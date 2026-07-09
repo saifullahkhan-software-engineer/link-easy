@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: linkeflow-postgres
+    environment:
+      POSTGRES_USER: linkeflow
+      POSTGRES_PASSWORD: linkeflow_password
+      POSTGRES_DB: linkeflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U linkeflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (for Celery broker and rate limiting)
+  redis:
+    image: redis:7-alpine
+    container_name: linkeflow-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Application
+  api:
+    build: .
+    container_name: linkeflow-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeflow
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=your_jwt_secret_key_here
+      - JWT_ALGORITHM=HS256
+      - ENCRYPTION_KEY=your_encryption_key_here
+      - RESEND_API_KEY=your_resend_api_key_here
+      - ENVIRONMENT=production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker
+  worker:
+    build: .
+    container_name: linkeflow-worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeflow
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=your_jwt_secret_key_here
+      - JWT_ALGORITHM=HS256
+      - ENCRYPTION_KEY=your_encryption_key_here
+      - RESEND_API_KEY=your_resend_api_key_here
+      - ENVIRONMENT=production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=2
+
+volumes:
+  postgres_data:
+  redis_data:
