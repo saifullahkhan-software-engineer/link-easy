@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
  
 from core.config import settings
 from core.security import decrypt_credential
+from core.logging_config import get_logger
 from worker.celery_app import celery_app
 from worker.rate_limit import check_and_increment
 from worker.playwright_semaphore import acquire_playwright_session
@@ -29,9 +30,19 @@ from automation.actions.visit_profile import (
 from automation.actions.connect import send_connection_request
 from automation.actions.message import send_message
 from models.lead import Lead, LeadStatus
-from models.campaign import Campaign, CampaignStep, CampaignStepType
+from models.campaign import Campaign, CampaignStep, CampaignStepType, CampaignStatus
 from models.campaign_job import CampaignJob, JobStatus
 from models.linkedin_account import LinkedInAccount, LinkedInAccountStatus
+from models.user import User  # Import User model for foreign key metadata
+
+
+logger = get_logger(__name__)
+
+
+# ── Custom Exceptions ───────────────────────────────────────────────────────
+class SessionFailureException(Exception):
+    """Raised when LinkedIn session is invalid/expired/checkpoint - should suspend account without retry."""
+    pass
  
 # ── Sync DB session for Celery (psycopg2, NOT asyncpg) ───────────────────────
 _sync_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
@@ -128,7 +139,32 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
         
         account = db.query(LinkedInAccount).filter_by(linkedin_email=campaign.account_email).first()
         if not account or account.status != LinkedInAccountStatus.ACTIVE:
-            return {"status": "skipped", "reason": "account not active"}
+            # Create CampaignJob record for audit trail
+            job_id = str(uuid.uuid4())
+            job = CampaignJob(
+                id=job_id,
+                campaign_id=campaign_id,
+                lead_id=lead_id,
+                step_type=step.step_type.value if step else "unknown",
+                status=JobStatus.SKIPPED,
+                error_message=f"Account not active. Status: {account.status if account else 'not found'}",
+                celery_task_id=self.request.id,
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc)
+            )
+            db.add(job)
+            db.commit()
+            
+            # Re-enqueue the task for 1 hour later
+            from datetime import timedelta
+            eta = datetime.now(timezone.utc) + timedelta(hours=1)
+            celery_app.send_task(
+                "tasks.execute_campaign_step",
+                args=[lead_id, campaign_id, step_order],
+                eta=eta
+            )
+            
+            return {"status": "skipped", "reason": "account not active", "requeued_at": eta.isoformat()}
         
         # Update lead's current step
         lead.current_step = step_order
@@ -147,6 +183,8 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
         db.add(job)
         db.flush()
         
+        result = None  # Initialize result to avoid UnboundLocalError
+        
         try:
             # Execute the appropriate action based on step type
             result = _execute_step_action(step.step_type, account, lead, campaign)
@@ -158,16 +196,111 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
             # Update lead status based on step type
             _update_lead_status(lead, step.step_type)
             
-            # Schedule next step
-            _schedule_next_step(lead_id, campaign_id, step_order)
+            # Schedule next step - wrap in try/except to separate scheduling failures
+            try:
+                _schedule_next_step(lead_id, campaign_id, step_order)
+            except Exception as scheduling_exc:
+                # Log scheduling failure but don't fail the step itself
+                logger.error(f"Failed to schedule next step: {scheduling_exc}")
+                job.error_message = f"Step completed but failed to schedule next: {scheduling_exc}"
+            
+            db.commit()
+            return result
+            
+        except SessionFailureException as exc:
+            # Session failure - suspend account and stop campaign without retry
+            job.status = JobStatus.FAILED
+            job.error_message = str(exc)
+            
+            # Suspend the LinkedIn account to prevent LinkedIn bot detection
+            account.status = LinkedInAccountStatus.SUSPENDED
+            account.updated_at = datetime.now(timezone.utc)
+            
+            # Mark lead as failed
+            lead.status = LeadStatus.FAILED
+            
+            # Do NOT retry - this prevents LinkedIn from detecting bot activity
+            # The campaign will stop for this account
+            db.commit()
+            return {"status": "failed", "reason": "session_failure", "error": str(exc)}
             
         except Exception as exc:
+            # Other exceptions - retry with backoff
             job.status = JobStatus.FAILED
             job.error_message = str(exc)
             lead.status = LeadStatus.FAILED
+            db.commit()
             raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+
+
+@celery_app.task(name="tasks.reconcile_stalled_leads")
+def reconcile_stalled_leads():
+    """Find stalled leads and re-enqueue them for processing.
     
-    return result
+    Runs every 15 minutes via Celery Beat to find leads where:
+    - Parent Campaign is ACTIVE
+    - Lead is still PENDING with current_step == 0
+    - created_at is older than 30 minutes
+    - No existing QUEUED or RUNNING CampaignJob for step 1
+    
+    This prevents leads from getting stuck if the worker fails or tasks are lost.
+    """
+    logger.info("🔍 Reconciling stalled leads...")
+    
+    with get_sync_db() as db:
+        from datetime import datetime, timedelta, timezone
+        
+        # Find stalled leads
+        thirty_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=30)
+        
+        stalled_leads = db.query(Lead).join(Campaign).filter(
+            Campaign.status == CampaignStatus.ACTIVE,
+            Lead.status == LeadStatus.PENDING,
+            Lead.current_step == 0,
+            Lead.created_at < thirty_minutes_ago
+        ).all()
+        
+        logger.info(f"📊 Found {len(stalled_leads)} potentially stalled leads")
+        
+        requeued_count = 0
+        for lead in stalled_leads:
+            # Check if there's already a QUEUED or RUNNING job for step 1
+            existing_job = db.query(CampaignJob).filter(
+                CampaignJob.lead_id == lead.id,
+                CampaignJob.campaign_id == lead.campaign_id,
+                CampaignJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING])
+            ).first()
+            
+            if existing_job:
+                logger.debug(f"⏭️ Lead {lead.id} already has {existing_job.status} job, skipping")
+                continue
+            
+            # Check if there's a recent DONE job for step 1 (within last hour)
+            recent_done_job = db.query(CampaignJob).filter(
+                CampaignJob.lead_id == lead.id,
+                CampaignJob.campaign_id == lead.campaign_id,
+                CampaignJob.status == JobStatus.DONE,
+                CampaignJob.completed_at > thirty_minutes_ago
+            ).first()
+            
+            if recent_done_job:
+                logger.debug(f"⏭️ Lead {lead.id} has recent DONE job, skipping")
+                continue
+            
+            # Re-enqueue the task for step 1
+            try:
+                celery_app.send_task(
+                    "tasks.execute_campaign_step",
+                    args=[lead.id, lead.campaign_id, 1],
+                    eta=datetime.now(timezone.utc) + timedelta(minutes=5)
+                )
+                requeued_count += 1
+                logger.info(f"🔄 Re-enqueued lead {lead.id} for step 1")
+            except Exception as e:
+                logger.error(f"❌ Failed to re-enqueue lead {lead.id}: {e}")
+        
+        logger.info(f"✅ Reconciliation complete: {requeued_count} leads re-enqueued")
+        return {"requeued_count": requeued_count, "total_stalled": len(stalled_leads)}
 
 
 def _execute_step_action(step_type, account, lead, campaign) -> dict:
@@ -177,7 +310,7 @@ def _execute_step_action(step_type, account, lead, campaign) -> dict:
     elif step_type == CampaignStepType.LIKE_POST:
         return asyncio.run(_run_like(account, lead))
     elif step_type == CampaignStepType.VISIT_AND_LIKE:
-        return asyncio.run(_run_visit(account, lead))  # Combined action
+        return asyncio.run(_run_visit_and_like(account, lead))  # Combined action
     elif step_type == CampaignStepType.SEND_CONNECTION:
         return asyncio.run(_run_connect(account, lead, campaign))
     elif step_type in [CampaignStepType.SEND_MESSAGE, CampaignStepType.FOLLOW_UP_IF_PENDING, CampaignStepType.THANKS_IF_ACCEPTED]:
@@ -267,13 +400,27 @@ async def _run_visit(account, lead) -> dict:
             proxy_port=account.proxy_port,
             proxy_user=account.proxy_username,
             proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
+            user_agent=account.user_agent  # Use saved user agent for consistency
         )
         try:
+            logger.info(f"🔓 Loading cookies for account {account.linkedin_email}")
+            logger.info(f"📅 Cookies last updated at: {account.cookies_updated_at}")
+            
             if not await load_session_cookies(context, account):
-                raise Exception("No session cookies — account needs Playwright login first")
+                raise SessionFailureException("No session cookies — account needs Playwright login first")
+            
+            logger.info("🔐 Verifying session validity...")
             verification = await verify_session(page)
+            logger.info(f"🔍 Verification result: {verification.status.value} - {verification.message}")
+            
             if verification.status != LinkedInSessionStatus.VALID:
-                raise Exception(f"LinkedIn session expired — re-login required. Status: {verification.status.value}")
+                # Raise session failure exception to suspend account and stop campaign
+                raise SessionFailureException(
+                    f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
+                    f"Account will be suspended to prevent LinkedIn bot detection."
+                )
+            
+            logger.info(f"✅ Session valid, visiting profile: {lead.linkedin_url}")
             return await visit_profile(page, lead.linkedin_url)
         finally:
             await context.close()
@@ -295,17 +442,60 @@ async def _run_like(account, lead) -> dict:
         )
         try:
             if not await load_session_cookies(context, account):
-                raise Exception("No session cookies — account needs Playwright login first")
+                raise SessionFailureException("No session cookies — account needs Playwright login first")
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
-                raise Exception(f"LinkedIn session expired — re-login required. Status: {verification.status.value}")
+                # Raise session failure exception to suspend account and stop campaign
+                raise SessionFailureException(
+                    f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
+                    f"Account will be suspended to prevent LinkedIn bot detection."
+                )
             return await like_recent_post(page, lead.linkedin_url)
         finally:
             await context.close()
             await browser.close()
             await pw.stop()
- 
- 
+
+
+async def _run_visit_and_like(account, lead) -> dict:
+    """Async wrapper for combined visit profile and like post action."""
+    with acquire_playwright_session(timeout=300) as acquired:
+        if not acquired:
+            raise Exception("Could not acquire Playwright session slot - timeout")
+
+        pw, browser, context, page, user_agent = await launch_browser(
+            proxy_host=account.proxy_host,
+            proxy_port=account.proxy_port,
+            proxy_user=account.proxy_username,
+            proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
+            user_agent=account.user_agent  # Use saved user agent for consistency
+        )
+        try:
+            logger.info(f"🔓 Loading cookies for account {account.linkedin_email}")
+            logger.info(f"📅 Cookies last updated at: {account.cookies_updated_at}")
+            
+            if not await load_session_cookies(context, account):
+                raise SessionFailureException("No session cookies — account needs Playwright login first")
+            
+            logger.info("🔐 Verifying session validity...")
+            verification = await verify_session(page)
+            logger.info(f"🔍 Verification result: {verification.status.value} - {verification.message}")
+            
+            if verification.status != LinkedInSessionStatus.VALID:
+                # Raise session failure exception to suspend account and stop campaign
+                raise SessionFailureException(
+                    f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
+                    f"Account will be suspended to prevent LinkedIn bot detection."
+                )
+            
+            logger.info(f"✅ Session valid, visiting profile and liking post: {lead.linkedin_url}")
+            return await visit_profile_and_like_post(page, lead.linkedin_url)
+        finally:
+            await context.close()
+            await browser.close()
+            await pw.stop()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 2 — Send Connection Request
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -334,6 +524,15 @@ def step2_send_connection(self, lead_id: str, campaign_id: str):
             _schedule_next("tasks.step3_send_message", [lead_id, campaign_id],
                            delay_hours=24, campaign_id=campaign_id)
  
+        except SessionFailureException as exc:
+            # Session failure - suspend account without retry
+            account.status = LinkedInAccountStatus.SUSPENDED
+            account.updated_at = datetime.now(timezone.utc)
+            lead.status = LeadStatus.FAILED
+            db.commit()
+            # Do NOT retry to prevent LinkedIn bot detection
+            
+
         except Exception as exc:
             raise self.retry(exc=exc, countdown=random.randint(600, 1800))
  
@@ -353,10 +552,15 @@ async def _run_connect(account, lead, campaign) -> dict:
             proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
         )
         try:
-            await load_session_cookies(context, account)
+            if not await load_session_cookies(context, account):
+                raise SessionFailureException("No session cookies — account needs Playwright login first")
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
-                raise Exception(f"Session expired. Status: {verification.status.value}")
+                # Raise session failure exception to suspend account and stop campaign
+                raise SessionFailureException(
+                    f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
+                    f"Account will be suspended to prevent LinkedIn bot detection."
+                )
             return await send_connection_request(
                 page, lead.linkedin_url,
                 first_name=lead.first_name,
@@ -402,6 +606,15 @@ def step3_send_message(self, lead_id: str, campaign_id: str):
             # Schedule thanks message check for day 5
             _schedule_next("tasks.step5_thanks_if_accepted", [lead_id, campaign_id],
                            delay_hours=48, campaign_id=campaign_id)
+        except SessionFailureException as exc:
+            # Session failure - suspend account without retry
+            account.status = LinkedInAccountStatus.SUSPENDED
+            account.updated_at = datetime.now(timezone.utc)
+            lead.status = LeadStatus.FAILED
+            db.commit()
+            # Do NOT retry to prevent LinkedIn bot detection
+            
+
         except Exception as exc:
             raise self.retry(exc=exc, countdown=random.randint(600, 1800))
  
@@ -438,6 +651,15 @@ def step4_followup_if_pending(self, lead_id: str, campaign_id: str):
         try:
             result = asyncio.run(_run_message(account, lead, message_text))
             lead.last_action_at = datetime.now(timezone.utc)
+        except SessionFailureException as exc:
+            # Session failure - suspend account without retry
+            account.status = LinkedInAccountStatus.SUSPENDED
+            account.updated_at = datetime.now(timezone.utc)
+            lead.status = LeadStatus.FAILED
+            db.commit()
+            # Do NOT retry to prevent LinkedIn bot detection
+            
+
         except Exception as exc:
             raise self.retry(exc=exc, countdown=random.randint(600, 1800))
  
@@ -470,6 +692,15 @@ def step5_thanks_if_accepted(self, lead_id: str, campaign_id: str):
         try:
             result = asyncio.run(_run_message(account, lead, message_text))
             lead.last_action_at = datetime.now(timezone.utc)
+        except SessionFailureException as exc:
+            # Session failure - suspend account without retry
+            account.status = LinkedInAccountStatus.SUSPENDED
+            account.updated_at = datetime.now(timezone.utc)
+            lead.status = LeadStatus.FAILED
+            db.commit()
+            # Do NOT retry to prevent LinkedIn bot detection
+            
+
         except Exception as exc:
             raise self.retry(exc=exc, countdown=random.randint(600, 1800))
  
@@ -489,10 +720,15 @@ async def _run_message(account, lead, message_text: str) -> dict:
             proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
         )
         try:
-            await load_session_cookies(context, account)
+            if not await load_session_cookies(context, account):
+                raise SessionFailureException("No session cookies — account needs Playwright login first")
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
-                raise Exception(f"Session expired. Status: {verification.status.value}")
+                # Raise session failure exception to suspend account and stop campaign
+                raise SessionFailureException(
+                    f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
+                    f"Account will be suspended to prevent LinkedIn bot detection."
+                )
             return await send_message(page, lead.linkedin_url, message_text, lead.first_name)
         finally:
             await context.close()

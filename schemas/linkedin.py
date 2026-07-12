@@ -133,3 +133,4 @@ class SessionVerificationResponse(BaseModel):
     message: str
     account: LinkedInAccountResponse | None  # Account data if available
     requires_manual_verification: bool = False
+    session_id: str | None = None  # Session ID if pending verification (for checkpoint)

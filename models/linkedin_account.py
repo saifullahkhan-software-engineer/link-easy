@@ -21,6 +21,7 @@ from database import Base
 class LinkedInAccountStatus(str, enum.Enum):
     PENDING_VERIFICATION = "pending_verification"
     ACTIVE               = "active"
+    VALID                = "valid"
     FAILED               = "failed"
     SUSPENDED            = "suspended"
  
@@ -32,9 +33,8 @@ class LinkedInAccount(Base):
     linkedin_email     = Column(String, nullable=False , primary_key=True, unique=True, index=True)
     encrypted_password = Column(String, nullable=False)
     label              = Column(String, nullable=True)
-    status             = Column( SAEnum(LinkedInAccountStatus, name="linkedin_account_status"),
-        nullable=False, default=LinkedInAccountStatus.PENDING_VERIFICATION,
-    )
+    status             = Column(SAEnum(LinkedInAccountStatus, name="linkedin_account_status", create_type=False), 
+                                nullable=False, default=LinkedInAccountStatus.PENDING_VERIFICATION)
  
     # ── NEW: AES-256-GCM encrypted JSON cookie blob ──────────────────────────
     # Stores all linkedin.com cookies as encrypted JSON.

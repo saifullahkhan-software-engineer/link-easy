@@ -1,3 +1,10 @@
+import asyncio
+import sys
+
+# Fix for Windows asyncio subprocess support - MUST be set before any async operations
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -23,6 +30,11 @@ from automation.session_manager import start_periodic_cleanup
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run database initializations on startup, start background tasks."""
+    # Ensure Windows asyncio policy is set for this event loop
+    if sys.platform == "win32":
+        if not isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsSelectorEventLoopPolicy):
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     await init_db()
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)
     try:
@@ -73,5 +85,9 @@ async def db_check(
 
 if __name__ == "__main__":
     import uvicorn
-
+    
+    # Fix for Windows asyncio subprocess support - set before uvicorn starts
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     uvicorn.run(app, host="127.0.0.1", port=8000)

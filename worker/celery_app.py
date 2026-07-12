@@ -32,4 +32,12 @@ celery_app.conf.update(
  
     # Result expiry
     result_expires           = 86400,   # Keep results for 24 hours
+
+    # Celery Beat schedule for periodic tasks
+    beat_schedule = {
+        'reconcile-stalled-leads': {
+            'task': 'tasks.reconcile_stalled_leads',
+            'schedule': 900.0,  # Every 15 minutes (900 seconds)
+        },
+    },
 )

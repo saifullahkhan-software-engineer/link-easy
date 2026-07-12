@@ -172,7 +172,7 @@ async def find_visible_button_by_text(page: Page, button_text: str) -> Locator:
     return page.locator("button").filter(has=matching_buttons[-1])
 
 
-async def linkedin_login(email: str, password: str, account: any, keep_alive: bool = False) -> tuple[LinkedInSessionStatus, any]:
+async def linkedin_login(email: str, password: str, account: any, keep_alive: bool = False, user_agent: str = None) -> tuple[LinkedInSessionStatus, any]:
     """
     Performs LinkedIn login and returns the session status.
     
@@ -181,6 +181,7 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
         password: LinkedIn password
         account: LinkedInAccount object (for saving cookies)
         keep_alive: If True, keeps browser session alive for verification (returns session resources)
+        user_agent: Specific User-Agent to use (for consistency)
     
     Returns:
         tuple: (LinkedInSessionStatus, session_resources or None)
@@ -189,7 +190,7 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
     
     Returns LinkedInSessionStatus: VALID, EXPIRED, CHECKPOINT, VERIFICATION_REQUIRED, or UNKNOWN.
     """
-    pw, browser, context, page, user_agent = await launch_browser()
+    pw, browser, context, page, actual_user_agent = await launch_browser(user_agent=user_agent)
 
     # Define multi-selector fallback pools to counter LinkedIn A/B testing
     USERNAME_SELECTORS = [
@@ -284,26 +285,71 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
             await find_and_type_resilient(page, [password_locator], password, "Password Field")
         await random_idle_pause(0.8, 2.0)
 
-        # ── Step 3.5: Uncheck "Remember me" checkbox ───────────────────────────
-        logger.info("🔲 Unchecking 'Remember me' checkbox to avoid LinkedIn emails...")
+        # ── Step 3.5: Uncheck all checkboxes BEFORE clicking submit ─────────────
+        logger.info("🔲 Unchecking all checkboxes to avoid LinkedIn emails...")
         try:
-            # Get all checkboxes on the page
-            checkboxes = await page.query_selector_all("input[type='checkbox']")
-            logger.info(f"🔍 Found {len(checkboxes)} checkbox(es) on the page")
+            # Wait a moment for any dynamic checkboxes to load
+            await page.wait_for_timeout(500)
             
-            for i, checkbox in enumerate(checkboxes):
+            # Try multiple selector strategies for LinkedIn's "Keep me signed in" checkbox
+            checkbox_selectors = [
+                "input[type='checkbox']",
+                "input[name='rememberMe']",
+                "input[id*='remember']",
+                "input[id*='Remember']",
+                "[role='checkbox']",
+                ".checkbox__input",
+                ".remember-me-checkbox",
+            ]
+            
+            checkboxes_found = []
+            
+            for selector in checkbox_selectors:
                 try:
-                    if await checkbox.is_visible():
+                    elements = await page.query_selector_all(selector)
+                    if elements:
+                        checkboxes_found.extend(elements)
+                        logger.debug(f"Found {len(elements)} checkboxes with selector: {selector}")
+                except:
+                    pass
+            
+            # Remove duplicates
+            unique_checkboxes = list(set(checkboxes_found))
+            logger.info(f"🔍 Found {len(unique_checkboxes)} total checkbox(es) on the page")
+            
+            for i, checkbox in enumerate(unique_checkboxes):
+                try:
+                    # Force check visibility with a small wait
+                    if await checkbox.is_visible(timeout=1000):
                         is_checked = await checkbox.is_checked()
                         logger.info(f"Checkbox {i}: checked={is_checked}")
                         
                         if is_checked:
-                            await checkbox.uncheck()
-                            logger.info(f"✅ Unchecked checkbox {i}")
+                            # Try multiple methods to uncheck
+                            try:
+                                await checkbox.click(force=True)
+                                logger.info(f"✅ Unchecked checkbox {i} via click")
+                            except:
+                                try:
+                                    await checkbox.uncheck(force=True)
+                                    logger.info(f"✅ Unchecked checkbox {i} via uncheck")
+                                except:
+                                    logger.warning(f"⚠️ Could not uncheck checkbox {i}")
+                            
+                            # Verify it's unchecked
+                            await page.wait_for_timeout(200)
+                            if await checkbox.is_checked():
+                                logger.warning(f"⚠️ Checkbox {i} still checked after uncheck attempt")
+                                # Try one more time with JavaScript
+                                try:
+                                    await checkbox.evaluate("el => el.checked = false")
+                                    logger.info(f"✅ Force unchecked checkbox {i} via JavaScript")
+                                except:
+                                    logger.warning(f"⚠️ JavaScript uncheck also failed for checkbox {i}")
                 except Exception as e:
                     logger.warning(f"⚠️ Could not process checkbox {i}: {str(e)}")
         except Exception as e:
-            logger.warning(f"⚠️ Could not uncheck 'Remember me': {str(e)}")
+            logger.warning(f"⚠️ Could not uncheck checkboxes: {str(e)}")
 
         # ── Step 4: Click Sign In ─────────────────────────────────────────────
         logger.info("🚀 Clicking submit button...")
@@ -491,6 +537,21 @@ async def load_session_cookies(context: BrowserContext, account) -> bool:
         lost_cookies = set(cookie_names) - set(final_cookie_names)
         if lost_cookies:
             logger.warning(f"⚠️ Cookies lost during add: {lost_cookies}")
+            # If __cf_bm is lost, try to add it manually with different settings
+            if "__cf_bm" in lost_cookies:
+                logger.info("🔧 Attempting to manually add __cf_bm cookie...")
+                for cookie in cookies:
+                    if cookie.get("name") == "__cf_bm":
+                        # Try adding with modified settings
+                        manual_cookie = cookie.copy()
+                        manual_cookie["sameSite"] = "None"
+                        manual_cookie["secure"] = True
+                        try:
+                            await context.add_cookies([manual_cookie])
+                            logger.info("✅ Manually added __cf_bm cookie")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Could not manually add __cf_bm: {str(e)}")
+                        break
     
     return True
  

@@ -26,7 +26,8 @@ class CampaignJob(Base):
     step_type       = Column(String, nullable=False)
  
     celery_task_id  = Column(String, nullable=True)     # Celery task UUID for tracking
-    status          = Column(SAEnum(JobStatus, name="job_status"),
+    status          = Column(SAEnum(JobStatus, name="job_status",
+                             values_callable=lambda enum_cls: [e.value for e in enum_cls]),
                              nullable=False, default=JobStatus.QUEUED)
  
     error_message   = Column(Text, nullable=True)       # Store failure reason

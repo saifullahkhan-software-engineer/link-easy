@@ -62,7 +62,7 @@ class CampaignStepCreate(BaseModel):
     campaign_id: str | None = Field(None, description="Campaign ID this step belongs to (auto-set when creating campaign)")
     step_order: int = Field(..., ge=1, description="Step order in the sequence (1, 2, 3, etc.)")
     step_type: CampaignStepType = Field(..., description="Type of action for this step")
-    delay_hours: int = Field(0, description="Delay in hours after previous step")
+    delay_hours: float = Field(0, ge=0, description="Delay in hours after previous step (e.g., 0.083 = 5 minutes)")
     condition: str | None = Field(None, description="Condition for step execution (null=always, 'accepted', 'not_accepted')")
 
 
@@ -70,7 +70,7 @@ class CampaignStepUpdate(BaseModel):
     """Payload to update an existing campaign step."""
     step_order: int | None = Field(None, ge=1)
     step_type: CampaignStepType | None = None
-    delay_hours: int | None = None
+    delay_hours: float | None = None
     condition: str | None = None
 
 
@@ -80,7 +80,7 @@ class CampaignStepResponse(BaseModel):
     campaign_id: str
     step_order: int
     step_type: CampaignStepType
-    delay_hours: int
+    delay_hours: float
     condition: str | None
 
     model_config = {"from_attributes": True}

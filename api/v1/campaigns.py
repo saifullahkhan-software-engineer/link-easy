@@ -180,3 +180,377 @@ async def start_campaign(
     await db.commit()
  
     return {"message": f"Campaign started. {len(leads)} leads queued.", "leads_queued": len(leads)}
+
+
+@router.post("/{campaign_id}/pause", status_code=200)
+async def pause_campaign(
+    campaign_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+):
+    """Pauses an active campaign and cancels pending tasks."""
+    from models.linkedin_account import LinkedInAccount
+    from worker.celery_app import celery_app
+    
+    result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.status != CampaignStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Campaign is not running")
+    
+    campaign.status = CampaignStatus.PAUSED
+    await db.commit()
+    
+    return {"message": "Campaign paused"}
+
+
+@router.post("/{campaign_id}/restart", status_code=200)
+async def restart_campaign(
+    campaign_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+):
+    """
+    Restarts a paused or failed campaign.
+    Resets failed leads back to pending and enqueues tasks.
+    """
+    from datetime import datetime, timezone
+    import random
+    from worker.celery_app import celery_app
+    from models.linkedin_account import LinkedInAccount
+    from models.campaign import CampaignStep
+    
+    result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.status == CampaignStatus.ACTIVE:
+        raise HTTPException(status_code=409, detail="Campaign is already running")
+    
+    # Reset only failed and skipped leads back to pending
+    # Keep leads that are already in progress (VISITING, REQUESTED, etc.) or completed
+    leads_result = await db.execute(
+        select(Lead).where(
+            Lead.campaign_id == campaign_id,
+            Lead.status.in_(["failed", "skipped"])
+        )
+    )
+    failed_leads = leads_result.scalars().all()
+    
+    # Reset failed/skipped leads to pending and step 0
+    for lead in failed_leads:
+        lead.status = "pending"
+        lead.current_step = 0
+    
+    # Get leads that are pending (new or reset) and need to start from step 1
+    pending_leads_result = await db.execute(
+        select(Lead).where(
+            Lead.campaign_id == campaign_id,
+            Lead.status == "pending",
+            Lead.current_step == 0
+        )
+    )
+    pending_leads = pending_leads_result.scalars().all()
+    
+    # Get leads that are in progress and need to continue from their current step
+    in_progress_leads_result = await db.execute(
+        select(Lead).where(
+            Lead.campaign_id == campaign_id,
+            Lead.status.in_(["visiting", "requested", "accepted", "messaged", "replied"]),
+            Lead.current_step > 0
+        )
+    )
+    in_progress_leads = in_progress_leads_result.scalars().all()
+    
+    # Get the first step from campaign_steps
+    first_step_result = await db.execute(
+        select(CampaignStep).where(
+            CampaignStep.campaign_id == campaign_id,
+            CampaignStep.step_order == 1
+        )
+    )
+    first_step = first_step_result.scalars().first()
+    
+    if not first_step:
+        raise HTTPException(status_code=400, detail="Campaign has no steps configured")
+    
+    # Enqueue pending leads for step 1
+    for i, lead in enumerate(pending_leads):
+        base_delay = random.randint(30, 120)
+        position_delay = i * random.randint(30, 60)
+        delay_seconds = base_delay + position_delay
+        celery_app.send_task(
+            "tasks.execute_campaign_step",
+            args=[lead.id, campaign_id, first_step.step_order],
+            countdown=delay_seconds,
+        )
+    
+    # Enqueue in-progress leads for their next step (current_step + 1)
+    for i, lead in enumerate(in_progress_leads):
+        next_step_order = lead.current_step + 1
+        base_delay = random.randint(30, 120)
+        position_delay = i * random.randint(30, 60)
+        delay_seconds = base_delay + position_delay
+        celery_app.send_task(
+            "tasks.execute_campaign_step",
+            args=[lead.id, campaign_id, next_step_order],
+            countdown=delay_seconds,
+        )
+    
+    campaign.status = CampaignStatus.ACTIVE
+    campaign.started_at = datetime.now(timezone.utc)
+    await db.commit()
+    
+    return {"message": f"Campaign restarted. {len(pending_leads)} new leads queued, {len(in_progress_leads)} in-progress leads continuing.", "new_leads_queued": len(pending_leads), "in_progress_leads": len(in_progress_leads)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Campaign Steps Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/{campaign_id}/steps", response_model=list[CampaignStepResponse])
+async def list_campaign_steps(
+    campaign_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+) -> list[CampaignStepResponse]:
+    """List all steps for a campaign."""
+    from models.linkedin_account import LinkedInAccount
+    
+    # Verify campaign belongs to owner
+    campaign_result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = campaign_result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    result = await db.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == campaign_id).order_by(CampaignStep.step_order)
+    )
+    steps = result.scalars().all()
+    return [CampaignStepResponse.model_validate(s) for s in steps]
+
+
+@router.get("/{campaign_id}/steps/{step_order}", response_model=CampaignStepResponse)
+async def get_campaign_step(
+    campaign_id: str,
+    step_order: int,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+) -> CampaignStepResponse:
+    """Get a specific campaign step."""
+    from models.linkedin_account import LinkedInAccount
+    
+    # Verify campaign belongs to owner
+    campaign_result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = campaign_result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    result = await db.execute(
+        select(CampaignStep).where(
+            CampaignStep.campaign_id == campaign_id,
+            CampaignStep.step_order == step_order
+        )
+    )
+    step = result.scalars().first()
+    if not step:
+        raise HTTPException(status_code=404, detail="Campaign step not found")
+    
+    return CampaignStepResponse.model_validate(step)
+
+
+@router.patch("/{campaign_id}/steps/{step_order}", response_model=CampaignStepResponse)
+async def update_campaign_step(
+    campaign_id: str,
+    step_order: int,
+    payload: CampaignStepUpdate,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+) -> CampaignStepResponse:
+    """Update a campaign step."""
+    from models.linkedin_account import LinkedInAccount
+    
+    # Verify campaign belongs to owner
+    campaign_result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = campaign_result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    result = await db.execute(
+        select(CampaignStep).where(
+            CampaignStep.campaign_id == campaign_id,
+            CampaignStep.step_order == step_order
+        )
+    )
+    step = result.scalars().first()
+    if not step:
+        raise HTTPException(status_code=404, detail="Campaign step not found")
+    
+    # Update step fields
+    if payload.step_type is not None:
+        step.step_type = payload.step_type
+    if payload.delay_hours is not None:
+        step.delay_hours = payload.delay_hours
+    if payload.condition is not None:
+        step.condition = payload.condition
+    
+    await db.commit()
+    await db.refresh(step)
+    return CampaignStepResponse.model_validate(step)
+
+
+@router.delete("/{campaign_id}/steps/{step_order}", status_code=204)
+async def delete_campaign_step(
+    campaign_id: str,
+    step_order: int,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+):
+    """Delete a campaign step."""
+    from models.linkedin_account import LinkedInAccount
+    
+    # Verify campaign belongs to owner
+    campaign_result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = campaign_result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    result = await db.execute(
+        select(CampaignStep).where(
+            CampaignStep.campaign_id == campaign_id,
+            CampaignStep.step_order == step_order
+        )
+    )
+    step = result.scalars().first()
+    if not step:
+        raise HTTPException(status_code=404, detail="Campaign step not found")
+    
+    await db.delete(step)
+    await db.commit()
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Campaign Jobs Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/{campaign_id}/jobs", response_model=list[dict])
+async def list_campaign_jobs(
+    campaign_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+) -> list[dict]:
+    """List all jobs for a campaign."""
+    from models.linkedin_account import LinkedInAccount
+    from models.campaign_job import CampaignJob
+    
+    # Verify campaign belongs to owner
+    campaign_result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = campaign_result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    result = await db.execute(
+        select(CampaignJob).where(CampaignJob.campaign_id == campaign_id).order_by(CampaignJob.created_at.desc())
+    )
+    jobs = result.scalars().all()
+    
+    return [
+        {
+            "id": job.id,
+            "campaign_id": job.campaign_id,
+            "lead_id": job.lead_id,
+            "step_type": job.step_type,
+            "celery_task_id": job.celery_task_id,
+            "status": job.status.value if hasattr(job.status, 'value') else job.status,
+            "error_message": job.error_message,
+            "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+        }
+        for job in jobs
+    ]
+
+
+@router.get("/{campaign_id}/jobs/{job_id}", response_model=dict)
+async def get_campaign_job(
+    campaign_id: str,
+    job_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+) -> dict:
+    """Get a specific campaign job."""
+    from models.linkedin_account import LinkedInAccount
+    from models.campaign_job import CampaignJob
+    
+    # Verify campaign belongs to owner
+    campaign_result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = campaign_result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    result = await db.execute(
+        select(CampaignJob).where(
+            CampaignJob.campaign_id == campaign_id,
+            CampaignJob.id == job_id
+        )
+    )
+    job = result.scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Campaign job not found")
+    
+    return {
+        "id": job.id,
+        "campaign_id": job.campaign_id,
+        "lead_id": job.lead_id,
+        "step_type": job.step_type,
+        "celery_task_id": job.celery_task_id,
+        "status": job.status.value if hasattr(job.status, 'value') else job.status,
+        "error_message": job.error_message,
+        "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+    }

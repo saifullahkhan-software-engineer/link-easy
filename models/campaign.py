@@ -7,7 +7,7 @@ It targets LinkedIn profiles matching a saved search filter.
 Steps define what action happens on which day of the drip sequence.
 """
 import enum
-from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text, Boolean, JSON
+from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text, Boolean, JSON, Float
 from sqlalchemy.sql import func
 from database import Base
  
@@ -38,7 +38,8 @@ class Campaign(Base):
  
     name         = Column(String, nullable=False)
     description  = Column(Text, nullable=True)
-    status       = Column(SAEnum(CampaignStatus, name="campaign_status"),
+    status       = Column(SAEnum(CampaignStatus, name="campaign_status",
+                          values_callable=lambda enum_cls: [e.value for e in enum_cls]),
                           nullable=False, default=CampaignStatus.DRAFT)
  
     # LinkedIn search filters saved as JSON
@@ -68,11 +69,13 @@ class CampaignStep(Base):
     campaign_id  = Column(String, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True)
  
     step_order   = Column(Integer, nullable=False)   # 1, 2, 3, 4, 5
-    step_type    = Column(SAEnum(CampaignStepType, name="campaign_step_type"), nullable=False)
+    step_type    = Column(SAEnum(CampaignStepType, name="campaign_step_type",
+                            values_callable=lambda enum_cls: [e.value for e in enum_cls]), nullable=False)
  
     # Delay in hours AFTER the previous step before this step fires
     # Day 1 = 0, Day 2 = ~24, Day 3 = ~48, etc.
-    delay_hours  = Column(Integer, nullable=False, default=0)
+    # Supports fractional hours for testing (e.g., 0.083 = 5 minutes)
+    delay_hours  = Column(Float, nullable=False, default=0)
  
     # Only run this step if a condition is met (used for steps 4 and 5)
     # Values: null (always run), "not_accepted", "accepted"

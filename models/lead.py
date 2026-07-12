@@ -31,7 +31,8 @@ class Lead(Base):
     last_name      = Column(String, nullable=True)
     headline       = Column(String, nullable=True)
  
-    status         = Column(SAEnum(LeadStatus, name="lead_status"),
+    status         = Column(SAEnum(LeadStatus, name="lead_status",
+                            values_callable=lambda enum_cls: [e.value for e in enum_cls]),
                             nullable=False, default=LeadStatus.PENDING)
     current_step   = Column(Integer, default=0)         # Which step was last executed
  
