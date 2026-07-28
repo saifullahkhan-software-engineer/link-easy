@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     
     # Redis settings
     REDIS_URL: str
+
+    # Root directory for durable per-account Chromium profile directories.
+    # Each LinkedInAccount gets <PROFILE_STORAGE_DIR>/<account.id> as its
+    # user-data-dir. Mount this path on a persistent volume in production.
+    PROFILE_STORAGE_DIR: str = "./profiles"
     
     @property
     def cors_origins(self) -> list[str]:

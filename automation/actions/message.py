@@ -7,7 +7,7 @@ and Day 5 (thanks message if accepted).
 """
 import asyncio
 import random
-from playwright.async_api import Page
+from patchright.async_api import Page
 from automation.human import human_click, human_type, human_scroll, random_idle_pause
  
  

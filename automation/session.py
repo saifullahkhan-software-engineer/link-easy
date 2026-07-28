@@ -1,18 +1,20 @@
 """
-LinkedIn session cookie management.
+LinkedIn session management.
 FILE: automation/session.py
- 
-Saves cookies after login, loads them before each run,
-and verifies the session is still active.
+
+Sessions live in the account's durable Chromium profile directory — there is
+no cookie/storage-state snapshotting to the database anymore. ``linkedin_login``
+logs in inside the persistent profile (Chromium persists the session to disk
+as a side effect), and ``verify_session`` checks whether the profile's session
+is still live.
 """
-import json
 import logging
 import random
-from datetime import datetime, timezone
 from enum import Enum
-from playwright.async_api import BrowserContext, Page, Locator, ElementHandle
-from core.security import encrypt_credential, decrypt_credential
-from automation.browser import launch_browser
+
+from patchright.async_api import BrowserContext, Page, Locator, ElementHandle  # noqa: F401
+
+from automation.browser import launch_persistent_browser
 from automation.human import (
     random_idle_pause,
     find_and_type_resilient,
@@ -38,7 +40,7 @@ class SessionVerificationResult:
         self.status = status
         self.url = url
         self.message = message
-    
+
     def to_dict(self):
         return {
             "status": self.status.value,
@@ -61,7 +63,7 @@ async def find_visible_input_by_type(page: Page, input_type: str) -> Locator:
             locator = page.get_by_role("textbox", name="password")
         else:
             locator = page.get_by_role("textbox")
-        
+
         count = await locator.count()
         if count > 0:
             # Find the first visible and enabled input
@@ -73,7 +75,7 @@ async def find_visible_input_by_type(page: Page, input_type: str) -> Locator:
                     return element
     except Exception:
         pass
-    
+
     # Fallback: use get_by_label for email/password
     try:
         if input_type == "email":
@@ -82,7 +84,7 @@ async def find_visible_input_by_type(page: Page, input_type: str) -> Locator:
             locator = page.get_by_label("password", exact=False)
         else:
             locator = page.locator(f"input[type='{input_type}']")
-        
+
         count = await locator.count()
         if count > 0:
             for i in range(count):
@@ -93,10 +95,10 @@ async def find_visible_input_by_type(page: Page, input_type: str) -> Locator:
                     return element
     except Exception:
         pass
-    
+
     # Final fallback: query_selector_all with enhanced checks
     inputs = await page.query_selector_all(f"input[type='{input_type}']")
-    
+
     for inp in inputs:
         # Check if element is physically visible (has positive dimensions)
         box = await inp.bounding_box()
@@ -108,7 +110,7 @@ async def find_visible_input_by_type(page: Page, input_type: str) -> Locator:
             if is_visible and is_enabled:
                 # Return as a Locator instead of building a CSS selector
                 return page.locator(f"input[type='{input_type}']").filter(has=inp)
-    
+
     raise ValueError(f"No visible, enabled input of type '{input_type}' found on page")
 
 
@@ -128,7 +130,7 @@ async def find_visible_button_by_text(page: Page, button_text: str) -> Locator:
             return locator.nth(count - 1)
     except Exception:
         pass
-    
+
     # Fallback: get_by_text
     try:
         locator = page.get_by_text(button_text, exact=False)
@@ -146,51 +148,62 @@ async def find_visible_button_by_text(page: Page, button_text: str) -> Locator:
                         return element
     except Exception:
         pass
-    
+
     # Final fallback: query_selector_all with enhanced checks
     buttons = await page.query_selector_all("button")
     matching_buttons = []
-    
+
     for btn in buttons:
         # Check if element is physically visible (has positive dimensions)
         box = await btn.bounding_box()
         if box and box['width'] > 0 and box['height'] > 0:
-            # Check if element is not hidden via CSS
             is_visible = await btn.is_visible()
-            # Check if element is enabled
             is_enabled = await btn.is_enabled()
             if is_visible and is_enabled:
                 # Check if button contains the target text
                 text_content = await btn.text_content()
                 if text_content and button_text.lower() in text_content.lower():
                     matching_buttons.append(btn)
-    
+
     if not matching_buttons:
         raise ValueError(f"No visible, enabled button containing '{button_text}' found on page")
-    
+
     # Use the last matching button (to target the main sign-in button, not social login)
     return page.locator("button").filter(has=matching_buttons[-1])
 
 
-async def linkedin_login(email: str, password: str, account: any, keep_alive: bool = False, user_agent: str = None) -> tuple[LinkedInSessionStatus, any]:
+async def linkedin_login(email: str, password: str, account, keep_alive: bool = False) -> tuple[LinkedInSessionStatus, any]:
     """
-    Performs LinkedIn login and returns the session status.
-    
+    Performs LinkedIn login inside the account's PERSISTENT browser profile
+    and returns the session status.
+
+    The login happens in the account's durable Chromium user-data-dir via
+    launch_persistent_browser(); once LinkedIn sets its session cookies,
+    Chromium persists them to disk automatically — there is no explicit
+    "save session state" step anymore.
+
     Args:
         email: LinkedIn email
         password: LinkedIn password
-        account: LinkedInAccount object (for saving cookies)
-        keep_alive: If True, keeps browser session alive for verification (returns session resources)
-        user_agent: Specific User-Agent to use (for consistency)
-    
+        account: LinkedInAccount object (must exist; its profile_dir is used)
+        keep_alive: If True and LinkedIn demands verification, keeps browser
+            session alive for the verification-code flow (returns session
+            resources the caller owns and must close).
+
     Returns:
         tuple: (LinkedInSessionStatus, session_resources or None)
-            - session_resources is only returned when keep_alive=True and status is VERIFICATION_REQUIRED
-            - session_resources contains: (pw, browser, context, page, user_agent)
-    
+            - session_resources (when returned) is: (pw, browser, context, page, user_agent)
+              where `browser` is always None for persistent contexts.
+
     Returns LinkedInSessionStatus: VALID, EXPIRED, CHECKPOINT, VERIFICATION_REQUIRED, or UNKNOWN.
     """
-    pw, browser, context, page, actual_user_agent = await launch_browser(user_agent=user_agent)
+    pw, browser, context, page = await launch_persistent_browser(account, headless=True)
+    actual_user_agent = account.user_agent  # pinned at launch, stable for this account
+
+    # Tracks whether we're handing live browser resources back to the caller
+    # (keep_alive flow). If None at exit, the finally block closes everything —
+    # this also prevents browser leaks when an exception is raised mid-login.
+    handed_off_resources = None
 
     # Define multi-selector fallback pools to counter LinkedIn A/B testing
     USERNAME_SELECTORS = [
@@ -235,7 +248,7 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
     ]
 
     try:
-        
+
         # ── Step 1: Navigate to LinkedIn login page ───────────────────────────
         logger.info("🌐 Navigating to LinkedIn Login Portal...")
         # TODO: Adjust timeout for deployment - currently increased for slow development internet
@@ -252,14 +265,14 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
             for i, inp in enumerate(inputs):
                 attrs = await inp.evaluate("el => ({id: el.id, name: el.name, type: el.type, placeholder: el.placeholder, class: el.className})")
                 logger.debug(f"Input {i}: {attrs}")
-            
+
             # Debug: Log all button elements on the page
             buttons = await page.query_selector_all("button")
             logger.debug(f"Found {len(buttons)} button elements on the page")
             for i, btn in enumerate(buttons):
                 attrs = await btn.evaluate("el => ({id: el.id, type: el.type, text: el.textContent, class: el.className})")
                 logger.debug(f"Button {i}: {attrs}")
-        
+
         if len(inputs) == 0:
             raise ValueError(f"No input elements found on page. URL: {page.url}. Page may not have loaded correctly.")
 
@@ -290,7 +303,7 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
         try:
             # Wait a moment for any dynamic checkboxes to load
             await page.wait_for_timeout(500)
-            
+
             # Try multiple selector strategies for LinkedIn's "Keep me signed in" checkbox
             checkbox_selectors = [
                 "input[type='checkbox']",
@@ -301,9 +314,9 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
                 ".checkbox__input",
                 ".remember-me-checkbox",
             ]
-            
+
             checkboxes_found = []
-            
+
             for selector in checkbox_selectors:
                 try:
                     elements = await page.query_selector_all(selector)
@@ -312,18 +325,18 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
                         logger.debug(f"Found {len(elements)} checkboxes with selector: {selector}")
                 except:
                     pass
-            
+
             # Remove duplicates
             unique_checkboxes = list(set(checkboxes_found))
             logger.info(f"🔍 Found {len(unique_checkboxes)} total checkbox(es) on the page")
-            
+
             for i, checkbox in enumerate(unique_checkboxes):
                 try:
                     # Force check visibility with a small wait
                     await checkbox.wait_for(state="visible", timeout=1000)
                     is_checked = await checkbox.is_checked()
                     logger.info(f"Checkbox {i}: checked={is_checked}")
-                    
+
                     if is_checked:
                         # Try multiple methods to uncheck
                         try:
@@ -335,7 +348,7 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
                                 logger.info(f"✅ Unchecked checkbox {i} via uncheck")
                             except:
                                 logger.warning(f"⚠️ Could not uncheck checkbox {i}")
-                            
+
                             # Verify it's unchecked
                             await page.wait_for_timeout(200)
                             if await checkbox.is_checked():
@@ -361,186 +374,79 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
             logger.info(f"Dynamic locator found for Sign In button")
             await find_and_click_resilient(page, [submit_locator], "Sign In Button")
         await random_idle_pause(4, 7)  # Wait for redirect + page load
-    
+
         # ── Step 5: Verify login result and determine status ───────────────────
-        logger.info(f"📍 Current URL after login attempt: {page.url}")
-        
+        # URL may contain challenge tokens — only log it in debug mode.
+        if should_log_debug():
+            logger.debug(f"📍 Current URL after login attempt: {page.url}")
+
         # Check for checkpoint/bot detection
         if "/checkpoint" in page.url or "/checkpoint/challenge" in page.url:
             logger.warning("⚠️ LinkedIn security checkpoint detected - possible bot detection")
             if should_take_screenshots():
                 await page.screenshot(path="checkpoint_detected.png", full_page=True)
             if keep_alive:
-                # Keep session alive for verification
-                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, (pw, browser, context, page, user_agent))
+                # Keep session alive for verification (resources handed to caller)
+                handed_off_resources = (pw, browser, context, page, actual_user_agent)
+                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, handed_off_resources)
             return (LinkedInSessionStatus.CHECKPOINT, None)
-        
+
         # Check for verification required
         if "/verify" in page.url or "verification" in page.url.lower():
             logger.warning("⚠️ LinkedIn requires account verification")
             if should_take_screenshots():
                 await page.screenshot(path="verification_required.png", full_page=True)
             if keep_alive:
-                # Keep session alive for verification
-                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, (pw, browser, context, page, user_agent))
+                # Keep session alive for verification (resources handed to caller)
+                handed_off_resources = (pw, browser, context, page, actual_user_agent)
+                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, handed_off_resources)
             return (LinkedInSessionStatus.VERIFICATION_REQUIRED, None)
-        
+
         # Check if still on login page (failed login)
         if "/login" in page.url or "/uas/login" in page.url:
             logger.error("❌ Login failed - still on login page")
             if should_take_screenshots():
                 await page.screenshot(path="login_failure_diagnostics.png", full_page=True)
             return (LinkedInSessionStatus.EXPIRED, None)
-        
+
         # Check if on feed page (successful login)
         if "/feed" in page.url:
             logger.info("✅ Login successful - on feed page")
-            # Save storage state only on successful login and if account is provided
-            if account is not None:
-                logger.info("💾 Saving active session storage state...")
-                await save_session_state(page.context, account, user_agent)
-            return (LinkedInSessionStatus.VALID, (pw, browser, context, page, user_agent))
-        
+            # No explicit save needed: the session now lives in the persistent
+            # profile directory; Chromium persisted it to disk automatically.
+            handed_off_resources = (pw, browser, context, page, actual_user_agent)
+            return (LinkedInSessionStatus.VALID, handed_off_resources)
+
         # Unknown state
         logger.warning("⚠️ Unknown page state after login")
         if should_take_screenshots():
             await page.screenshot(path="unknown_state.png", full_page=True)
         return (LinkedInSessionStatus.UNKNOWN, None)
-    
+
     except Exception as e:
         if should_take_screenshots():
-            await page.screenshot(path=f"error_screenshot_{random.randint(1000, 9999)}.png", full_page=True)
+            try:
+                await page.screenshot(path=f"error_screenshot_{random.randint(1000, 9999)}.png", full_page=True)
+            except Exception:
+                pass
         logger.error(f"❌ Automation Error Encountered: {str(e)}")
         return (LinkedInSessionStatus.EXPIRED, None)
     finally:
-        # Only close browser if not keeping alive for verification
-        if not keep_alive:
+        # Close everything UNLESS we handed live resources to the caller for
+        # the keep_alive verification flow. (Also fixes the old leak where an
+        # exception with keep_alive=True left the browser running forever.)
+        if handed_off_resources is None:
             logger.info("🧹 Closing browser instance contexts...")
-            await context.close()
-            await browser.close()
-            await pw.stop()
+            try:
+                await context.close()
+            except Exception:
+                pass
+            try:
+                await pw.stop()
+            except Exception:
+                pass
 
 
-async def save_session_state(context: BrowserContext, account, user_agent: str = None) -> None:
-    """
-    Extracts full Playwright storage state (cookies + localStorage) from the browser context,
-    encrypts it, and saves to the LinkedInAccount row.
-    Call this immediately after a successful Playwright login or after any successful action.
-    
-    account: SQLAlchemy LinkedInAccount object (sync session, from Celery).
-    user_agent: User-Agent string used during login (for session consistency).
-    """
-    logger.info("💾 Extracting full storage state from browser context...")
-    state = await context.storage_state()
-    logger.debug(f"Storage state contains {len(state.get('cookies', []))} cookies and {len(state.get('origins', []))} origins")
-    
-    # Check if li_at cookie is missing and try to capture it manually (always run, not just in debug)
-    li_at_cookie = next((c for c in state.get('cookies', []) if c.get("name") == "li_at"), None)
-    if not li_at_cookie:
-        logger.warning("⚠️ li_at cookie NOT found in storage_state(), attempting manual capture...")
-        try:
-            # Try to get li_at cookie directly from the browser context
-            cookies = await context.cookies()
-            li_at_manual = next((c for c in cookies if c.get("name") == "li_at"), None)
-            if li_at_manual:
-                logger.info(f"✅ Manually captured li_at cookie - Domain: {li_at_manual.get('domain')}")
-                # Add it to the storage state
-                state['cookies'].append(li_at_manual)
-            else:
-                logger.warning("⚠️ li_at cookie not found even with manual capture")
-        except Exception as e:
-            logger.error(f"❌ Failed to manually capture li_at cookie: {e}")
-    
-    # Log critical cookies for debugging (development only)
-    if should_log_debug():
-        li_at_cookie = next((c for c in state.get('cookies', []) if c.get("name") == "li_at"), None)
-        if li_at_cookie:
-            logger.debug(f"li_at cookie found - Domain: {li_at_cookie.get('domain')}, Expires: {li_at_cookie.get('expires')}, HttpOnly: {li_at_cookie.get('httpOnly')}, Secure: {li_at_cookie.get('secure')}")
-        else:
-            logger.warning("⚠️ li_at cookie NOT found in storage state!")
-        
-        # Log all cookie names
-        cookie_names = [c.get("name") for c in state.get('cookies', [])]
-        logger.debug(f"Cookie names: {cookie_names}")
-        
-        # Log origins with localStorage
-        origins = state.get('origins', [])
-        logger.debug(f"Origins with localStorage: {len(origins)}")
-        for origin in origins:
-            logger.debug(f"  Origin: {origin.get('origin')}, localStorage keys: {len(origin.get('localStorage', []))}")
-
-    if not state.get('cookies'):
-        raise ValueError("No cookies found in storage state — session may have failed")
-
-    state_json = json.dumps(state)
-    logger.debug(f"Encrypting {len(state_json)} bytes of storage state JSON...")
-    encrypted = encrypt_credential(state_json)
-    logger.debug(f"Encrypted storage state blob length: {len(encrypted)} bytes")
-
-    # Update the DB row (sync SQLAlchemy session in Celery context)
-    account.encrypted_storage_state = encrypted
-    account.cookies_updated_at = datetime.now(timezone.utc)
-    if user_agent:
-        account.user_agent = user_agent
-        logger.debug(f"User-Agent saved to account: {user_agent}")
-    logger.info(f"💾 Storage state saved to account. Updated at: {account.cookies_updated_at}")
- 
- 
-async def load_session_state(account) -> dict:
-    """
-    Loads saved storage state from the account and returns it as a dict.
-    The caller should pass this dict to browser.new_context(storage_state=state, ...).
-    Returns None if no storage state is saved.
-    
-    account: SQLAlchemy LinkedInAccount object.
-    """
-    logger.info("🔓 Checking for encrypted storage state in account...")
-    logger.debug(f"📅 Storage state last updated at: {account.cookies_updated_at}")
-    logger.debug(f"🔍 Saved User-Agent: {account.user_agent}")
-    
-    if not account.encrypted_storage_state:
-        logger.warning("⚠️ No encrypted storage state found in account")
-        return None
-
-    logger.debug(f"Decrypting storage state blob (length: {len(account.encrypted_storage_state)} bytes)...")
-    state_json = decrypt_credential(account.encrypted_storage_state)
-    logger.debug(f"Decrypted JSON length: {len(state_json)} bytes")
-    
-    state = json.loads(state_json)
-    logger.debug(f"Loaded storage state with {len(state.get('cookies', []))} cookies and {len(state.get('origins', []))} origins")
-    
-    # Check for critical li_at cookie
-    if should_log_debug():
-        li_at_cookie = next((c for	c in state.get('cookies', []) if c.get("name") == "li_at"), None)
-        if li_at_cookie:
-            logger.debug(f"li_at cookie found - Domain: {li_at_cookie.get('domain')}, Expires: {li_at_cookie.get('expires')}")
-            # Check if expired
-            if li_at_cookie.get('expires'):
-                from datetime import datetime, timezone
-                expires_ts = li_at_cookie.get('expires')
-                if isinstance(expires_ts, (int, float)):
-                    expires_dt = datetime.fromtimestamp(expires_ts, tz=timezone.utc)
-                    now = datetime.now(timezone.utc)
-                    if expires_dt < now:
-                        logger.warning(f"⚠️ li_at cookie EXPIRED! Expired at: {expires_dt}")
-                    else:
-                        logger.debug(f"li_at cookie still valid. Expires at: {expires_dt}")
-        else:
-            logger.warning("⚠️ li_at cookie NOT found in storage state!")
-        
-        # Log all cookie names
-        cookie_names = [c.get("name") for c in state.get('cookies', [])]
-        logger.debug(f"Loaded cookie names: {cookie_names}")
-        
-        # Log origins with localStorage
-        origins = state.get('origins', [])
-        logger.debug(f"Origins with localStorage: {len(origins)}")
-        for origin in origins:
-            logger.debug(f"  Origin: {origin.get('origin')}, localStorage keys: {len(origin.get('localStorage', []))}")
-
-    return state
- 
- 
 async def verify_session(page: Page) -> SessionVerificationResult:
     """
     Navigates to LinkedIn feed to check if the loaded session is still valid.
@@ -549,12 +455,14 @@ async def verify_session(page: Page) -> SessionVerificationResult:
     logger.info("🔍 Navigating to LinkedIn feed to verify session...")
     # TODO: Decrease timeout for production (currently 120s for local network development)
     await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=120000)
-    logger.debug(f"Current URL after navigation: {page.url}")
-    
+    # URL may contain challenge tokens — only log it in debug mode.
+    if should_log_debug():
+        logger.debug(f"Current URL after navigation: {page.url}")
+
     # Take screenshot for debugging (development only)
     if should_take_screenshots():
         await page.screenshot(path="session_verification_debug.png", full_page=True)
-    
+
     # Log page title for additional debugging (development only)
     if should_log_debug():
         try:
@@ -562,7 +470,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
             logger.debug(f"Page title: {page_title}")
         except:
             pass
-    
+
     # Check for ID verification page
     if "/checkpoint/challenge" in page.url or "/checkpoint" in page.url:
         logger.warning("⚠️ LinkedIn requires ID verification or security checkpoint")
@@ -580,7 +488,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
                 url=page.url,
                 message="LinkedIn requires ID document verification (manual intervention needed)"
             )
-    
+
     # If redirected to login page, session expired
     if "/login" in page.url or "/uas/login" in page.url:
         logger.warning("⚠️ Session expired - redirected to login page")
@@ -589,7 +497,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
             url=page.url,
             message="Session expired - redirected to login page"
         )
-    
+
     # Check for verification required page
     if "/verify" in page.url or "verification" in page.url.lower():
         logger.warning("⚠️ LinkedIn requires account verification")
@@ -598,7 +506,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
             url=page.url,
             message="LinkedIn requires account verification"
         )
-    
+
     # Check if we're on feed page (valid session)
     if "/feed" in page.url:
         logger.info("✅ Session valid - on feed page")
@@ -607,7 +515,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
             url=page.url,
             message="Session is valid and active"
         )
-    
+
     # Check for feed-specific element (valid session)
     try:
         await page.wait_for_selector("[data-control-name='nav.home']", timeout=5000)
@@ -650,6 +558,3 @@ async def verify_session(page: Page) -> SessionVerificationResult:
                     url=page.url,
                     message="Could not determine session status - unknown page state"
                 )
-
-
-             

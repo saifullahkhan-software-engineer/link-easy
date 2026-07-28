@@ -21,6 +21,7 @@ from api.v1.leads import router as leads_router
 
 from api.v1.test_automation import router as test_automation_router
 from core.config import settings
+from core.security import validate_encryption_key
 from database import init_db
 from models.roles import UserRole
 from api.dependencies import get_current_user
@@ -34,7 +35,11 @@ async def lifespan(app: FastAPI):
     if sys.platform == "win32":
         if not isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsSelectorEventLoopPolicy):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
+
+    # Fail loudly at startup if the credential encryption key is missing or
+    # malformed — a config mistake must not silently corrupt/expose secrets.
+    validate_encryption_key()
+
     await init_db()
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)
     try:

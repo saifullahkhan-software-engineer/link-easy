@@ -7,7 +7,12 @@ Start the worker with:
 """
 from celery import Celery
 from core.config import settings
- 
+from core.security import validate_encryption_key
+
+# Fail loudly at worker startup if the credential encryption key is missing
+# or malformed — better than failing mid-task on a decrypt.
+validate_encryption_key()
+
 celery_app = Celery(
     "LinkeFlow",
     broker=settings.REDIS_URL,

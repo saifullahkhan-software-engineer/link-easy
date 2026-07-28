@@ -15,13 +15,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
  
 from core.config import settings
-from core.security import decrypt_credential
 from core.logging_config import get_logger
 from worker.celery_app import celery_app
-from worker.rate_limit import check_and_increment
+from worker.rate_limit import check_and_increment, warmup_stage_for_account
 from worker.playwright_semaphore import acquire_playwright_session
-from automation.browser import launch_browser
-from automation.session import load_session_state, save_session_state, verify_session, LinkedInSessionStatus
+from worker.profile_lock import (
+    ProfileInUseError,
+    acquire_profile_lock,
+    release_profile_lock,
+)
+from automation.browser import launch_persistent_browser
+from automation.session import verify_session, LinkedInSessionStatus
 from automation.actions.visit_profile import (
     visit_profile,
     like_recent_post,
@@ -397,9 +401,10 @@ def step1_visit_and_like(self, lead_id: str, campaign_id: str):
         if not lead or not account or account.status != LinkedInAccountStatus.ACTIVE:
             return {"status": "skipped", "reason": "lead or account not valid"}
  
-        # Rate limit check
+        # Rate limit check (warm-up aware: new accounts get lower ceilings)
         if not check_and_increment(account.owner_email, "visit_profile",
-                                    campaign.daily_visit_limit):
+                                    campaign.daily_visit_limit,
+                                    warmup_stage=warmup_stage_for_account(account)):
             # Re-queue for tomorrow at a random time
             _schedule_next("tasks.step1_visit_and_like", [lead_id, campaign_id],
                            delay_hours=24, campaign_id=campaign_id)
@@ -440,45 +445,38 @@ async def _run_visit(account, lead) -> dict:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
 
-        # Load storage state before creating context
-        logger.info(f"🔓 Loading storage state for account {account.linkedin_email}")
-        logger.info(f"📅 Storage state last updated at: {account.cookies_updated_at}")
-        storage_state = await load_session_state(account)
-        if not storage_state:
-            raise SessionFailureException("No session state — account needs Playwright login first")
-
-        pw, browser, context, page, user_agent = await launch_browser(
-            proxy_host=account.proxy_host,
-            proxy_port=account.proxy_port,
-            proxy_user=account.proxy_username,
-            proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
-            user_agent=account.user_agent,  # Use saved user agent for consistency
-            storage_state=storage_state,  # Pass storage state to context
-        )
+        # Per-account profile lock — the Chromium user-data-dir can only be
+        # open by one process at a time. Fails fast if already held.
+        lock = acquire_profile_lock(account.id)
+        pw = None
+        context = None
         try:
+            # Open the account's durable persistent profile (session state
+            # lives on disk in the profile dir — nothing to load or save).
+            pw, _, context, page = await launch_persistent_browser(account, headless=True)
+
             logger.info("🔐 Verifying session validity...")
             verification = await verify_session(page)
             logger.info(f"🔍 Verification result: {verification.status.value} - {verification.message}")
-            
+
             if verification.status != LinkedInSessionStatus.VALID:
                 # Raise session failure exception to suspend account and stop campaign
                 raise SessionFailureException(
                     f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
                     f"Account will be suspended to prevent LinkedIn bot detection."
                 )
-            
+
             logger.info(f"✅ Session valid, visiting profile: {lead.linkedin_url}")
             result = await visit_profile(page, lead.linkedin_url)
-            
-            # Save updated storage state after successful action
-            await save_session_state(context, account, user_agent)
-            logger.info("💾 Storage state saved after successful visit")
-            
+            # No save step: Chromium already persisted any cookie changes to
+            # the profile directory as a side effect of the action.
             return result
         finally:
-            await context.close()
-            await browser.close()
-            await pw.stop()
+            if context:
+                await context.close()
+            if pw:
+                await pw.stop()
+            release_profile_lock(lock)
 
 
 async def _run_like(account, lead) -> dict:
@@ -487,20 +485,13 @@ async def _run_like(account, lead) -> dict:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
 
-        # Load storage state before creating context
-        storage_state = await load_session_state(account)
-        if not storage_state:
-            raise SessionFailureException("No session state — account needs Playwright login first")
-
-        pw, browser, context, page, user_agent = await launch_browser(
-            proxy_host=account.proxy_host,
-            proxy_port=account.proxy_port,
-            proxy_user=account.proxy_username,
-            proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
-            user_agent=account.user_agent,
-            storage_state=storage_state,
-        )
+        # Per-account profile lock — fails fast if the profile is open elsewhere.
+        lock = acquire_profile_lock(account.id)
+        pw = None
+        context = None
         try:
+            pw, _, context, page = await launch_persistent_browser(account, headless=True)
+
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
                 # Raise session failure exception to suspend account and stop campaign
@@ -509,16 +500,14 @@ async def _run_like(account, lead) -> dict:
                     f"Account will be suspended to prevent LinkedIn bot detection."
                 )
             result = await like_recent_post(page, lead.linkedin_url)
-            
-            # Save updated storage state after successful action
-            await save_session_state(context, account, user_agent)
-            logger.info("💾 Storage state saved after successful like")
-            
+            # No save step: the profile dir on disk already has the session.
             return result
         finally:
-            await context.close()
-            await browser.close()
-            await pw.stop()
+            if context:
+                await context.close()
+            if pw:
+                await pw.stop()
+            release_profile_lock(lock)
 
 
 async def _run_visit_and_like(account, lead) -> dict:
@@ -527,45 +516,34 @@ async def _run_visit_and_like(account, lead) -> dict:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
 
-        # Load storage state before creating context
-        logger.info(f"🔓 Loading storage state for account {account.linkedin_email}")
-        logger.info(f"📅 Storage state last updated at: {account.cookies_updated_at}")
-        storage_state = await load_session_state(account)
-        if not storage_state:
-            raise SessionFailureException("No session state — account needs Playwright login first")
-
-        pw, browser, context, page, user_agent = await launch_browser(
-            proxy_host=account.proxy_host,
-            proxy_port=account.proxy_port,
-            proxy_user=account.proxy_username,
-            proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
-            user_agent=account.user_agent,  # Use saved user agent for consistency
-            storage_state=storage_state,
-        )
+        # Per-account profile lock — fails fast if the profile is open elsewhere.
+        lock = acquire_profile_lock(account.id)
+        pw = None
+        context = None
         try:
+            pw, _, context, page = await launch_persistent_browser(account, headless=True)
+
             logger.info("🔐 Verifying session validity...")
             verification = await verify_session(page)
             logger.info(f"🔍 Verification result: {verification.status.value} - {verification.message}")
-            
+
             if verification.status != LinkedInSessionStatus.VALID:
                 # Raise session failure exception to suspend account and stop campaign
                 raise SessionFailureException(
                     f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
                     f"Account will be suspended to prevent LinkedIn bot detection."
                 )
-            
+
             logger.info(f"✅ Session valid, visiting profile and liking post: {lead.linkedin_url}")
             result = await visit_profile_and_like_post(page, lead.linkedin_url)
-            
-            # Save updated storage state after successful action
-            await save_session_state(context, account, user_agent)
-            logger.info("💾 Storage state saved after successful visit and like")
-            
+            # No save step: the profile dir on disk already has the session.
             return result
         finally:
-            await context.close()
-            await browser.close()
-            await pw.stop()
+            if context:
+                await context.close()
+            if pw:
+                await pw.stop()
+            release_profile_lock(lock)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -580,7 +558,8 @@ def step2_send_connection(self, lead_id: str, campaign_id: str):
         account  = db.query(LinkedInAccount).filter_by(linkedin_email=campaign.account_email).first()
  
         if not check_and_increment(account.owner_email, "send_connection",
-                                    campaign.daily_connection_limit):
+                                    campaign.daily_connection_limit,
+                                    warmup_stage=warmup_stage_for_account(account)):
             _schedule_next("tasks.step2_send_connection", [lead_id, campaign_id],
                            delay_hours=24, campaign_id=campaign_id)
             return {"status": "rate_limited"}
@@ -613,24 +592,18 @@ def step2_send_connection(self, lead_id: str, campaign_id: str):
  
 async def _run_connect(account, lead, campaign) -> dict:
     from worker.playwright_semaphore import acquire_playwright_session
-    
+
     with acquire_playwright_session(timeout=300) as acquired:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
-        
-        # Load storage state before creating context
-        storage_state = await load_session_state(account)
-        if not storage_state:
-            raise SessionFailureException("No session state — account needs Playwright login first")
-        
-        pw, browser, context, page, user_agent = await launch_browser(
-            proxy_host=account.proxy_host, proxy_port=account.proxy_port,
-            proxy_user=account.proxy_username,
-            proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
-            user_agent=account.user_agent,
-            storage_state=storage_state,
-        )
+
+        # Per-account profile lock — fails fast if the profile is open elsewhere.
+        lock = acquire_profile_lock(account.id)
+        pw = None
+        context = None
         try:
+            pw, _, context, page = await launch_persistent_browser(account, headless=True)
+
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
                 # Raise session failure exception to suspend account and stop campaign
@@ -643,16 +616,14 @@ async def _run_connect(account, lead, campaign) -> dict:
                 first_name=lead.first_name,
                 note_template=campaign.connection_note_template,
             )
-            
-            # Save updated storage state after successful action
-            await save_session_state(context, account, user_agent)
-            logger.info("💾 Storage state saved after successful connection request")
-            
+            # No save step: the profile dir on disk already has the session.
             return result
         finally:
-            await context.close()
-            await browser.close()
-            await pw.stop()
+            if context:
+                await context.close()
+            if pw:
+                await pw.stop()
+            release_profile_lock(lock)
  
  
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -674,7 +645,8 @@ def step3_send_message(self, lead_id: str, campaign_id: str):
             return {"status": "not_accepted_yet", "escalated_to_step4": True}
  
         if not check_and_increment(account.owner_email, "send_message",
-                                    campaign.daily_message_limit):
+                                    campaign.daily_message_limit,
+                                    warmup_stage=warmup_stage_for_account(account)):
             _schedule_next("tasks.step3_send_message", [lead_id, campaign_id],
                            delay_hours=24, campaign_id=campaign_id)
             return {"status": "rate_limited"}
@@ -722,7 +694,8 @@ def step4_followup_if_pending(self, lead_id: str, campaign_id: str):
             return {"status": "accepted_skip_followup"}
  
         if not check_and_increment(account.owner_email, "send_message",
-                                    campaign.daily_message_limit):
+                                    campaign.daily_message_limit,
+                                    warmup_stage=warmup_stage_for_account(account)):
             _schedule_next("tasks.step4_followup_if_pending", [lead_id, campaign_id],
                            delay_hours=24, campaign_id=campaign_id)
             return {"status": "rate_limited"}
@@ -764,7 +737,8 @@ def step5_thanks_if_accepted(self, lead_id: str, campaign_id: str):
             return {"status": "not_accepted_no_action"}
  
         if not check_and_increment(account.owner_email, "send_message",
-                                    campaign.daily_message_limit):
+                                    campaign.daily_message_limit,
+                                    warmup_stage=warmup_stage_for_account(account)):
             _schedule_next("tasks.step5_thanks_if_accepted", [lead_id, campaign_id],
                            delay_hours=24, campaign_id=campaign_id)
             return {"status": "rate_limited"}
@@ -792,24 +766,18 @@ def step5_thanks_if_accepted(self, lead_id: str, campaign_id: str):
  
 async def _run_message(account, lead, message_text: str) -> dict:
     from worker.playwright_semaphore import acquire_playwright_session
-    
+
     with acquire_playwright_session(timeout=300) as acquired:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
-        
-        # Load storage state before creating context
-        storage_state = await load_session_state(account)
-        if not storage_state:
-            raise SessionFailureException("No session state — account needs Playwright login first")
-        
-        pw, browser, context, page, user_agent = await launch_browser(
-            proxy_host=account.proxy_host, proxy_port=account.proxy_port,
-            proxy_user=account.proxy_username,
-            proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
-            user_agent=account.user_agent,
-            storage_state=storage_state,
-        )
+
+        # Per-account profile lock — fails fast if the profile is open elsewhere.
+        lock = acquire_profile_lock(account.id)
+        pw = None
+        context = None
         try:
+            pw, _, context, page = await launch_persistent_browser(account, headless=True)
+
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
                 # Raise session failure exception to suspend account and stop campaign
@@ -818,16 +786,14 @@ async def _run_message(account, lead, message_text: str) -> dict:
                     f"Account will be suspended to prevent LinkedIn bot detection."
                 )
             result = await send_message(page, lead.linkedin_url, message_text, lead.first_name)
-            
-            # Save updated storage state after successful action
-            await save_session_state(context, account, user_agent)
-            logger.info("💾 Storage state saved after successful message send")
-            
+            # No save step: the profile dir on disk already has the session.
             return result
         finally:
-            await context.close()
-            await browser.close()
-            await pw.stop()
+            if context:
+                await context.close()
+            if pw:
+                await pw.stop()
+            release_profile_lock(lock)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -924,10 +890,20 @@ def run_account_session(self, account_email: str):
                 "session_duration_minutes": target_duration_minutes
             }
     
+    except ProfileInUseError as exc:
+        # Another code path (manual verify-session, interactive login, ...)
+        # currently holds this account's browser profile. Do NOT attempt to
+        # launch anyway — fail cleanly and keep the self-rescheduling chain
+        # alive by re-enqueueing the next session shortly.
+        logger.warning(f"⚠️ Profile busy for account {account_email}: {exc}")
+        self.apply_async(args=[account_email], countdown=1800)
+        logger.info(f"📅 Retrying session for {account_email} in 30 minutes (profile was in use)")
+        return {"status": "skipped", "reason": "account_profile_in_use"}
+
     except Exception as exc:
         logger.error(f"❌ Session failed for account {account_email}: {exc}")
         raise self.retry(exc=exc, countdown=random.randint(600, 1800))
-    
+
     finally:
         try:
             lock.release()
@@ -939,27 +915,33 @@ def run_account_session(self, account_email: str):
 async def _process_leads_session(account, due_leads, per_action_seconds, db):
     """
     Async function that processes leads in a single browser session.
+
+    Opens the account's durable persistent profile (the session state lives
+    on disk in the profile directory — nothing to load before launch and
+    nothing to save after each action) under the per-account profile lock.
+    Raises ProfileInUseError if another code path already holds the profile.
     """
-    # Load storage state before creating context
-    logger.info(f"🔓 Loading storage state for account {account.linkedin_email}")
-    storage_state = await load_session_state(account)
-    if not storage_state:
-        raise SessionFailureException("No session state — account needs Playwright login first")
-    
-    # Launch browser with storage state
-    user_agent = account.user_agent
-    pw, browser, context, page, actual_user_agent = await launch_browser(
-        proxy_host=account.proxy_host,
-        proxy_port=account.proxy_port,
-        proxy_user=account.proxy_username,
-        proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
-        user_agent=user_agent,
-        storage_state=storage_state,
-    )
-    
+    # Per-account profile lock — a Chromium user-data-dir can only be held by
+    # one process at a time (SingletonLock). Fails fast with a clear error if
+    # the profile is already open (e.g. a manual verify-session request).
+    lock = acquire_profile_lock(account.id)
+
+    pw = None
+    context = None
     results = []
-    
+
     try:
+        pw, _, context, page = await launch_persistent_browser(account, headless=True)
+        # Persist the fingerprint pinned at first-ever launch (no-op afterwards).
+        db.commit()
+        # Log the pinned fingerprint so two runs of the same account can be
+        # diffed to prove stability (anti-detection acceptance check).
+        logger.info(
+            "🪪 Session fingerprint for account %s: ua=%s viewport=%sx%s tz=%s locale=%s cpu=%s mem=%s",
+            account.id, account.user_agent, account.viewport_width, account.viewport_height,
+            account.timezone_id, account.locale, account.hardware_concurrency, account.device_memory,
+        )
+
         # Verify session once at start
         verification = await verify_session(page)
         if verification.status != LinkedInSessionStatus.VALID:
@@ -1007,11 +989,11 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                 
                 db.commit()
                 results.append({"lead_id": lead.id, "result": result})
-                
-                # Save storage state after each action
-                await save_session_state(context, account, actual_user_agent)
-                logger.info(f"💾 Storage state saved after processing lead {lead.id}")
-                
+
+                # No explicit "save session" step: Chromium already persisted
+                # any cookie/storage changes to the profile dir on disk as a
+                # side effect of the action.
+
                 # Interstitial action and dwell before next lead (except last)
                 if i < len(due_leads) - 1:
                     await _interstitial_pause(page, per_action_seconds)
@@ -1042,12 +1024,16 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                 db.add(job)
                 db.commit()
                 continue
-    
+
     finally:
-        await context.close()
-        await browser.close()
-        await pw.stop()
-    
+        # Persistent context: close the context (there is no separate Browser
+        # object) and stop the Playwright driver, then free the profile lock.
+        if context:
+            await context.close()
+        if pw:
+            await pw.stop()
+        release_profile_lock(lock)
+
     return results
 
 

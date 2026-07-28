@@ -129,7 +129,9 @@ class VerificationCodeResponse(BaseModel):
 
 class SessionVerificationResponse(BaseModel):
     """Response after LinkedIn session verification."""
-    status: str  # "ACTIVE", "REFRESHED", "PENDING_VERIFICATION", "FAILED"
+    # "ACTIVE", "REFRESHED", "PENDING_VERIFICATION", "FAILED",
+    # or "IN_USE" (another session currently holds the account's browser profile)
+    status: str
     message: str
     account: LinkedInAccountResponse | None  # Account data if available
     requires_manual_verification: bool = False

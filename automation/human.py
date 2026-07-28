@@ -9,7 +9,7 @@ import asyncio
 import math
 import logging
 import random
-from playwright.async_api import Page, Locator, ElementHandle
+from patchright.async_api import Page, Locator, ElementHandle
 from core.logging_config import get_logger, should_log_debug
 
 logger = get_logger(__name__)
