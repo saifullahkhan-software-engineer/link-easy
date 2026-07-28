@@ -45,6 +45,17 @@ export const campaignsApi = {
       params: { owner_email: ownerEmail },
       timeout: 60_000,
     }),
+  pause: (campaignId, ownerEmail) =>
+    api.post(`/campaigns/${campaignId}/pause`, null, {
+      params: { owner_email: ownerEmail },
+    }),
+  restart: (campaignId, ownerEmail) =>
+    api.post(`/campaigns/${campaignId}/restart`, null, {
+      params: { owner_email: ownerEmail },
+      timeout: 60_000,
+    }),
+  listSteps: (campaignId, ownerEmail) =>
+    api.get(`/campaigns/${campaignId}/steps`, { params: { owner_email: ownerEmail } }),
 };
 
 /* --------------------------------- leads --------------------------------- */
