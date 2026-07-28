@@ -13,8 +13,17 @@ const navItems = [
     ),
   },
   {
+    to: '/app/campaigns/create',
+    label: 'Create Campaign',
+    icon: (
+      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+      </svg>
+    ),
+  },
+  {
     to: '/app/campaigns',
-    label: 'Campaigns & Leads',
+    label: 'Campaign Status',
     icon: (
       <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
         <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5 14.25 3l6.75 6.75-10.5 10.5H3.75v-6.75ZM12.75 6 18 11.25" />

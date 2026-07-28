@@ -10,7 +10,8 @@ import VerifyEmail from './pages/VerifyEmail';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
 import LinkedInAccountPage from './pages/LinkedInAccountPage';
-import CampaignsLeadsPage from './pages/CampaignsLeadsPage';
+import CampaignCreatePage from './pages/CampaignCreatePage';
+import CampaignStatusPage from './pages/CampaignStatusPage';
 
 export default function App() {
   return (
@@ -50,7 +51,8 @@ export default function App() {
           >
             <Route index element={<Navigate to="/app/account" replace />} />
             <Route path="account" element={<LinkedInAccountPage />} />
-            <Route path="campaigns" element={<CampaignsLeadsPage />} />
+            <Route path="campaigns" element={<CampaignStatusPage />} />
+            <Route path="campaigns/create" element={<CampaignCreatePage />} />
           </Route>
 
           {/* catch-all */}
