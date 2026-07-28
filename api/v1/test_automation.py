@@ -22,7 +22,7 @@ logging.basicConfig(
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.future import select
-from automation.session import load_session_cookies, verify_session, LinkedInSessionStatus
+from automation.session import load_session_state, verify_session, LinkedInSessionStatus
 from api.dependencies import get_db
 from models.linkedin_account import LinkedInAccount
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -131,8 +131,19 @@ async def _run_like_test(email: str, password: str, profile_url: str, db: AsyncS
     logger.info("🌐 Launching Playwright browser...")
     # Use saved User-Agent for session consistency
     user_agent = account.user_agent if account else None
-    pw, browser, context, page, _ = await launch_browser(user_agent=user_agent)
-    logger.info("✅ Browser launched successfully")
+    
+    # Load storage state before creating context
+    logger.info("🔓 Loading storage state from database...")
+    storage_state = await load_session_state(account)
+    if not storage_state:
+        logger.warning("⚠️ No storage state found in database for this account")
+        return {
+            "visited": False, "liked_post": False, "profile_name": None, "post_url": None,
+            "error": "No storage state found for this account. Please add the account first.",
+        }
+    
+    pw, browser, context, page, _ = await launch_browser(user_agent=user_agent, storage_state=storage_state)
+    logger.info("✅ Browser launched successfully with storage state")
 
     try:
         #  Direct login 
@@ -161,24 +172,11 @@ async def _run_like_test(email: str, password: str, profile_url: str, db: AsyncS
 
       
        
-        logger.info(f"✅ Found LinkedIn account in database. Cookie updated at: {account.cookies_updated_at}")
+        logger.info(f"✅ Found LinkedIn account in database. Storage state updated at: {account.cookies_updated_at}")
         if should_log_debug():
-            logger.debug(f"Has encrypted cookies: {bool(account.encrypted_cookies)}")
+            logger.debug(f"Has encrypted storage state: {bool(account.encrypted_storage_state)}")
             logger.debug(f"Account status: {account.status}")
-            logger.debug(f"Cookie updated at: {account.cookies_updated_at}")
-        
-        # load cookies from the account
-        logger.info("🍪 Loading session cookies from database...")
-        cookies_loaded = await load_session_cookies(context, account)
-        if not cookies_loaded:
-            logger.warning("⚠️ No session cookies found in database for this account")
-            return {
-                "visited": False, "liked_post": False, "profile_name": None, "post_url": None,
-                "error": "No session cookies found for this account. Please add the account first.",
-            }
-        logger.info(f"✅ Session cookies loaded successfully. Total cookies: {len(await context.cookies())}")
-        if should_log_debug():
-            logger.debug(f"Total cookies loaded: {len(await context.cookies())}")
+            logger.debug(f"Storage state updated at: {account.cookies_updated_at}")
         
         # verify session
         logger.info("🔐 Verifying session validity by navigating to feed...")

@@ -3,7 +3,7 @@ Celery application instance.
 FILE: worker/celery_app.py
  
 Start the worker with:
-    celery -A worker.celery_app worker --loglevel=info --concurrency=2
+    celery -A worker.celery_app worker --loglevel=info --concurrency=2 --pool=prefork -Q linkedin_sessions,default
 """
 from celery import Celery
 from core.config import settings

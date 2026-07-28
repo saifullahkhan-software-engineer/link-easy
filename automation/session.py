@@ -320,21 +320,21 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
             for i, checkbox in enumerate(unique_checkboxes):
                 try:
                     # Force check visibility with a small wait
-                    if await checkbox.is_visible(timeout=1000):
-                        is_checked = await checkbox.is_checked()
-                        logger.info(f"Checkbox {i}: checked={is_checked}")
-                        
-                        if is_checked:
-                            # Try multiple methods to uncheck
+                    await checkbox.wait_for(state="visible", timeout=1000)
+                    is_checked = await checkbox.is_checked()
+                    logger.info(f"Checkbox {i}: checked={is_checked}")
+                    
+                    if is_checked:
+                        # Try multiple methods to uncheck
+                        try:
+                            await checkbox.click(force=True)
+                            logger.info(f"✅ Unchecked checkbox {i} via click")
+                        except:
                             try:
-                                await checkbox.click(force=True)
-                                logger.info(f"✅ Unchecked checkbox {i} via click")
+                                await checkbox.uncheck(force=True)
+                                logger.info(f"✅ Unchecked checkbox {i} via uncheck")
                             except:
-                                try:
-                                    await checkbox.uncheck(force=True)
-                                    logger.info(f"✅ Unchecked checkbox {i} via uncheck")
-                                except:
-                                    logger.warning(f"⚠️ Could not uncheck checkbox {i}")
+                                logger.warning(f"⚠️ Could not uncheck checkbox {i}")
                             
                             # Verify it's unchecked
                             await page.wait_for_timeout(200)
@@ -395,10 +395,10 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
         # Check if on feed page (successful login)
         if "/feed" in page.url:
             logger.info("✅ Login successful - on feed page")
-            # Save cookies only on successful login and if account is provided
+            # Save storage state only on successful login and if account is provided
             if account is not None:
-                logger.info("💾 Saving active session cookies...")
-                await save_session_cookies(page.context, account)
+                logger.info("💾 Saving active session storage state...")
+                await save_session_state(page.context, account, user_agent)
             return (LinkedInSessionStatus.VALID, (pw, browser, context, page, user_agent))
         
         # Unknown state
@@ -421,139 +421,124 @@ async def linkedin_login(email: str, password: str, account: any, keep_alive: bo
             await pw.stop()
 
 
-async def save_session_cookies(context: BrowserContext, account, user_agent: str = None) -> None:
+async def save_session_state(context: BrowserContext, account, user_agent: str = None) -> None:
     """
-    Extracts all linkedin.com cookies from the browser context,
-    encrypts them, and saves to the LinkedInAccount row.
-    Call this immediately after a successful Playwright login.
+    Extracts full Playwright storage state (cookies + localStorage) from the browser context,
+    encrypts it, and saves to the LinkedInAccount row.
+    Call this immediately after a successful Playwright login or after any successful action.
     
     account: SQLAlchemy LinkedInAccount object (sync session, from Celery).
     user_agent: User-Agent string used during login (for session consistency).
     """
-    logger.info("🍪 Extracting cookies from browser context...")
-    all_cookies = await context.cookies()
-    logger.debug(f"Total cookies in context: {len(all_cookies)}")
+    logger.info("💾 Extracting full storage state from browser context...")
+    state = await context.storage_state()
+    logger.debug(f"Storage state contains {len(state.get('cookies', []))} cookies and {len(state.get('origins', []))} origins")
     
-    linkedin_cookies = [
-        c for c in all_cookies
-        if ".linkedin.com" in c.get("domain", "") or "linkedin.com" in c.get("domain", "")
-    ]
-    logger.debug(f"LinkedIn cookies after filtering: {len(linkedin_cookies)}")
+    # Check if li_at cookie is missing and try to capture it manually (always run, not just in debug)
+    li_at_cookie = next((c for c in state.get('cookies', []) if c.get("name") == "li_at"), None)
+    if not li_at_cookie:
+        logger.warning("⚠️ li_at cookie NOT found in storage_state(), attempting manual capture...")
+        try:
+            # Try to get li_at cookie directly from the browser context
+            cookies = await context.cookies()
+            li_at_manual = next((c for c in cookies if c.get("name") == "li_at"), None)
+            if li_at_manual:
+                logger.info(f"✅ Manually captured li_at cookie - Domain: {li_at_manual.get('domain')}")
+                # Add it to the storage state
+                state['cookies'].append(li_at_manual)
+            else:
+                logger.warning("⚠️ li_at cookie not found even with manual capture")
+        except Exception as e:
+            logger.error(f"❌ Failed to manually capture li_at cookie: {e}")
     
     # Log critical cookies for debugging (development only)
     if should_log_debug():
-        li_at_cookie = next((c for c in linkedin_cookies if c.get("name") == "li_at"), None)
+        li_at_cookie = next((c for c in state.get('cookies', []) if c.get("name") == "li_at"), None)
         if li_at_cookie:
-            logger.debug(f"li_at cookie found - Domain: {li_at_cookie.get('domain')}, Expires: {li_at_cookie.get('expires')}")
+            logger.debug(f"li_at cookie found - Domain: {li_at_cookie.get('domain')}, Expires: {li_at_cookie.get('expires')}, HttpOnly: {li_at_cookie.get('httpOnly')}, Secure: {li_at_cookie.get('secure')}")
         else:
-            logger.warning("⚠️ li_at cookie NOT found in LinkedIn cookies!")
+            logger.warning("⚠️ li_at cookie NOT found in storage state!")
         
-        # Log all LinkedIn cookie names
-        cookie_names = [c.get("name") for c in linkedin_cookies]
-        logger.debug(f"LinkedIn cookie names: {cookie_names}")
- 
-    if not linkedin_cookies:
-        raise ValueError("No LinkedIn cookies found after login — session may have failed")
- 
-    cookie_json = json.dumps(linkedin_cookies)
-    logger.debug(f"Encrypting {len(cookie_json)} bytes of cookie JSON...")
-    encrypted = encrypt_credential(cookie_json)
-    logger.debug(f"Encrypted cookie blob length: {len(encrypted)} bytes")
- 
+        # Log all cookie names
+        cookie_names = [c.get("name") for c in state.get('cookies', [])]
+        logger.debug(f"Cookie names: {cookie_names}")
+        
+        # Log origins with localStorage
+        origins = state.get('origins', [])
+        logger.debug(f"Origins with localStorage: {len(origins)}")
+        for origin in origins:
+            logger.debug(f"  Origin: {origin.get('origin')}, localStorage keys: {len(origin.get('localStorage', []))}")
+
+    if not state.get('cookies'):
+        raise ValueError("No cookies found in storage state — session may have failed")
+
+    state_json = json.dumps(state)
+    logger.debug(f"Encrypting {len(state_json)} bytes of storage state JSON...")
+    encrypted = encrypt_credential(state_json)
+    logger.debug(f"Encrypted storage state blob length: {len(encrypted)} bytes")
+
     # Update the DB row (sync SQLAlchemy session in Celery context)
-    account.encrypted_cookies = encrypted
+    account.encrypted_storage_state = encrypted
     account.cookies_updated_at = datetime.now(timezone.utc)
     if user_agent:
         account.user_agent = user_agent
         logger.debug(f"User-Agent saved to account: {user_agent}")
-    logger.info(f"💾 Cookies saved to account. Updated at: {account.cookies_updated_at}")
+    logger.info(f"💾 Storage state saved to account. Updated at: {account.cookies_updated_at}")
  
  
-async def load_session_cookies(context: BrowserContext, account) -> bool:
+async def load_session_state(account) -> dict:
     """
-    Loads saved cookies into the browser context.
-    Returns True if cookies were loaded, False if none saved.
+    Loads saved storage state from the account and returns it as a dict.
+    The caller should pass this dict to browser.new_context(storage_state=state, ...).
+    Returns None if no storage state is saved.
+    
+    account: SQLAlchemy LinkedInAccount object.
     """
-    logger.info("🔓 Checking for encrypted cookies in account...")
-    logger.debug(f"📅 Cookies last updated at: {account.cookies_updated_at}")
+    logger.info("🔓 Checking for encrypted storage state in account...")
+    logger.debug(f"📅 Storage state last updated at: {account.cookies_updated_at}")
     logger.debug(f"🔍 Saved User-Agent: {account.user_agent}")
     
-    if not account.encrypted_cookies:
-        logger.warning("⚠️ No encrypted cookies found in account")
-        return False
+    if not account.encrypted_storage_state:
+        logger.warning("⚠️ No encrypted storage state found in account")
+        return None
 
-    logger.debug(f"Decrypting cookie blob (length: {len(account.encrypted_cookies)} bytes)...")
-    cookie_json = decrypt_credential(account.encrypted_cookies)
-    logger.debug(f"Decrypted JSON length: {len(cookie_json)} bytes")
+    logger.debug(f"Decrypting storage state blob (length: {len(account.encrypted_storage_state)} bytes)...")
+    state_json = decrypt_credential(account.encrypted_storage_state)
+    logger.debug(f"Decrypted JSON length: {len(state_json)} bytes")
     
-    cookies = json.loads(cookie_json)
-    logger.debug(f"Loaded {len(cookies)} cookies from database")
+    state = json.loads(state_json)
+    logger.debug(f"Loaded storage state with {len(state.get('cookies', []))} cookies and {len(state.get('origins', []))} origins")
     
     # Check for critical li_at cookie
-    li_at = None
-    for cookie in cookies:
-        if cookie.get('name') == 'li_at':
-            li_at = cookie
-            break
-    
-    if li_at:
-        logger.debug(f"li_at cookie found - Domain: {li_at.get('domain')}, Expires: {li_at.get('expires')}")
-        # Check if expired
-        if li_at.get('expires'):
-            from datetime import datetime, timezone
-            expires_ts = li_at.get('expires')
-            if isinstance(expires_ts, (int, float)):
-                expires_dt = datetime.fromtimestamp(expires_ts, tz=timezone.utc)
-                now = datetime.now(timezone.utc)
-                if expires_dt < now:
-                    logger.warning(f"⚠️ li_at cookie EXPIRED! Expired at: {expires_dt}")
-                else:
-                    logger.debug(f"li_at cookie still valid. Expires at: {expires_dt}")
-    else:
-        logger.warning("⚠️ li_at cookie NOT found in saved cookies!")
-    
-    # Log all cookie names for debugging (development only)
     if should_log_debug():
-        cookie_names = [c.get("name") for c in cookies]
+        li_at_cookie = next((c for	c in state.get('cookies', []) if c.get("name") == "li_at"), None)
+        if li_at_cookie:
+            logger.debug(f"li_at cookie found - Domain: {li_at_cookie.get('domain')}, Expires: {li_at_cookie.get('expires')}")
+            # Check if expired
+            if li_at_cookie.get('expires'):
+                from datetime import datetime, timezone
+                expires_ts = li_at_cookie.get('expires')
+                if isinstance(expires_ts, (int, float)):
+                    expires_dt = datetime.fromtimestamp(expires_ts, tz=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    if expires_dt < now:
+                        logger.warning(f"⚠️ li_at cookie EXPIRED! Expired at: {expires_dt}")
+                    else:
+                        logger.debug(f"li_at cookie still valid. Expires at: {expires_dt}")
+        else:
+            logger.warning("⚠️ li_at cookie NOT found in storage state!")
+        
+        # Log all cookie names
+        cookie_names = [c.get("name") for c in state.get('cookies', [])]
         logger.debug(f"Loaded cookie names: {cookie_names}")
+        
+        # Log origins with localStorage
+        origins = state.get('origins', [])
+        logger.debug(f"Origins with localStorage: {len(origins)}")
+        for origin in origins:
+            logger.debug(f"  Origin: {origin.get('origin')}, localStorage keys: {len(origin.get('localStorage', []))}")
 
-    # Playwright requires 'sameSite' to be a specific string
-    for c in cookies:
-        if c.get("sameSite") not in ("Strict", "Lax", "None"):
-            c["sameSite"] = "Lax"
-
-    logger.info("➕ Adding cookies to browser context...")
-    await context.add_cookies(cookies)
-    logger.info("✅ Cookies successfully added to browser context")
-    
-    # Verify cookies were actually added
-    final_cookies = await context.cookies()
-    linkedin_final = [c for c in final_cookies if "linkedin.com" in c.get("domain", "")]
-    logger.debug(f"Final LinkedIn cookies in context: {len(linkedin_final)}")
-    
-    # Check which cookie was lost (development only)
-    if should_log_debug():
-        final_cookie_names = [c.get("name") for c in linkedin_final]
-        lost_cookies = set(cookie_names) - set(final_cookie_names)
-        if lost_cookies:
-            logger.warning(f"⚠️ Cookies lost during add: {lost_cookies}")
-            # If __cf_bm is lost, try to add it manually with different settings
-            if "__cf_bm" in lost_cookies:
-                logger.info("🔧 Attempting to manually add __cf_bm cookie...")
-                for cookie in cookies:
-                    if cookie.get("name") == "__cf_bm":
-                        # Try adding with modified settings
-                        manual_cookie = cookie.copy()
-                        manual_cookie["sameSite"] = "None"
-                        manual_cookie["secure"] = True
-                        try:
-                            await context.add_cookies([manual_cookie])
-                            logger.info("✅ Manually added __cf_bm cookie")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Could not manually add __cf_bm: {str(e)}")
-                        break
-    
-    return True
+    return state
  
  
 async def verify_session(page: Page) -> SessionVerificationResult:

@@ -27,14 +27,15 @@ VIEWPORTS = [
  
 async def launch_browser(proxy_host: str = None, proxy_port: str = None,
                           proxy_user: str = None, proxy_pass: str = None,
-                          user_agent: str = None):
+                          user_agent: str = None, storage_state: dict = None):
     """
     Launches a stealth Chromium browser.
-    Returns (playwright_instance, browser, context).
+    Returns (playwright_instance, browser, context, page, user_agent).
     Caller must close all three when done.
     
     Args:
         user_agent: Specific User-Agent to use (if None, random one is chosen)
+        storage_state: Playwright storage state dict to restore cookies/localStorage
     """
     from playwright_stealth import Stealth
  
@@ -72,6 +73,7 @@ async def launch_browser(proxy_host: str = None, proxy_port: str = None,
         timezone_id="America/New_York",
         # Permissions that a real browser would have
         permissions=["geolocation"],
+        storage_state=storage_state,  # Restore cookies/localStorage if provided
     )
  
     # Inject stealth patches — removes navigator.webdriver, randomises canvas fingerprint etc.

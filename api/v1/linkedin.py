@@ -33,7 +33,7 @@ from schemas.linkedin import (
     SessionVerificationResponse,
 )
 # import linkdin login from session 
-from automation.session  import linkedin_login, LinkedInSessionStatus, load_session_cookies, verify_session, save_session_cookies
+from automation.session  import linkedin_login, LinkedInSessionStatus, load_session_state, verify_session, save_session_state
 from automation.session_manager import session_manager
 from automation.browser import launch_browser
 from core import email
@@ -121,10 +121,10 @@ async def add_linkedin_account(
             status=LinkedInAccountStatus.ACTIVE,
         )
         
-        # Save cookies to temp account
+        # Save storage state to temp account
         pw, browser, context, page, user_agent = session_resources
-        from automation.session import save_session_cookies
-        await save_session_cookies(context, temp_account, user_agent)
+        from automation.session import save_session_state
+        await save_session_state(context, temp_account, user_agent)
         
         # Clean up browser resources
         await context.close()
@@ -297,7 +297,7 @@ async def submit_verification_code(
         # Find verification code input field
         from automation.session import find_visible_input_by_type
         from automation.human import random_idle_pause, find_and_click_resilient
-        from automation.session import save_session_cookies
+        from automation.session import save_session_state
         
         logger.info("🔢 Looking for verification code input field...")
         
@@ -442,8 +442,8 @@ async def submit_verification_code(
                 status=LinkedInAccountStatus.ACTIVE,
             )
             
-            # Save cookies with user_agent
-            await save_session_cookies(context, account, pending_session.user_agent)
+            # Save storage state with user_agent
+            await save_session_state(context, account, pending_session.user_agent)
             
             # Persist to database
             db.add(account)
@@ -623,29 +623,33 @@ async def verify_linkedin_session(
         else:
             logger.info(f"Using saved user agent: {user_agent}")
             
-        pw, browser, context, page, actual_user_agent = await launch_browser(user_agent=user_agent)
+        # Step 2: Load existing storage state
+        logger.info("🔓 Loading stored storage state...")
+        storage_state = await load_session_state(account)
+        
+        # Step 3: Launch browser with storage state
+        pw, browser, context, page, actual_user_agent = await launch_browser(
+            user_agent=user_agent,
+            storage_state=storage_state
+        )
         logger.debug(f"Browser launched with User-Agent: {actual_user_agent}")
         
-        # Step 2: Load existing cookies
-        logger.info("🍪 Loading stored session cookies...")
-        cookies_loaded = await load_session_cookies(context, account)
-        
-        if not cookies_loaded:
-            logger.warning("⚠️ No stored cookies found, proceeding to fresh login...")
+        if not storage_state:
+            logger.warning("⚠️ No stored state found, proceeding to fresh login...")
             verification_result = None
         else:
-            logger.info("✅ Cookies loaded successfully")
+            logger.info("✅ Storage state loaded successfully")
             
-            # Step 3: Verify session by navigating to feed
+            # Step 4: Verify session by navigating to feed
             logger.info("🔐 Verifying session validity...")
             verification_result = await verify_session(page)
             logger.debug(f"Verification result: {verification_result.status.value} - {verification_result.message}")
         
-        # Step 4: Handle verification result
+        # Step 5: Handle verification result
         if verification_result and verification_result.status == LinkedInSessionStatus.VALID:
-            # Session is valid - save fresh cookies to ensure they're up-to-date
-            logger.info("✅ LinkedIn session is ACTIVE - saving fresh cookies")
-            await save_session_cookies(context, account, actual_user_agent)
+            # Session is valid - save fresh storage state to ensure it's up-to-date
+            logger.info("✅ LinkedIn session is ACTIVE - saving fresh storage state")
+            await save_session_state(context, account, actual_user_agent)
             
             # Close browser since we're done
             await context.close()
@@ -680,9 +684,9 @@ async def verify_linkedin_session(
         
         # Step 6: Handle login result
         if session_status == LinkedInSessionStatus.VALID:
-            # Login successful - save cookies manually
+            # Login successful - save storage state manually
             logger.info("✅ Automatic relogin successful")
-            await save_session_cookies(context, account, user_agent)
+            await save_session_state(context, account, user_agent)
             
             # Close browser since we're done
             await context.close()

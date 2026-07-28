@@ -21,7 +21,7 @@ from worker.celery_app import celery_app
 from worker.rate_limit import check_and_increment
 from worker.playwright_semaphore import acquire_playwright_session
 from automation.browser import launch_browser
-from automation.session import load_session_cookies, save_session_cookies, verify_session, LinkedInSessionStatus
+from automation.session import load_session_state, save_session_state, verify_session, LinkedInSessionStatus
 from automation.actions.visit_profile import (
     visit_profile,
     like_recent_post,
@@ -37,6 +37,13 @@ from models.user import User  # Import User model for foreign key metadata
 
 
 logger = get_logger(__name__)
+
+
+# ── Session Configuration ─────────────────────────────────────────────────────
+MAX_ACTIONS_PER_SESSION = 20  # Maximum leads to process per session run
+SESSION_DURATION_MIN = 15    # Minimum session duration in minutes
+SESSION_DURATION_MAX = 20   # Maximum session duration in minutes
+INTERSTITIAL_ACTION_RATE = 0.3  # 30% chance of interstitial action between leads
 
 
 # ── Custom Exceptions ───────────────────────────────────────────────────────
@@ -187,7 +194,7 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
         
         try:
             # Execute the appropriate action based on step type
-            result = _execute_step_action(step.step_type, account, lead, campaign)
+            result = asyncio.run(_execute_step_action(step.step_type, account, lead, campaign))
             
             # Update job status
             job.status = JobStatus.DONE
@@ -303,16 +310,54 @@ def reconcile_stalled_leads():
         return {"requeued_count": requeued_count, "total_stalled": len(stalled_leads)}
 
 
-def _execute_step_action(step_type, account, lead, campaign) -> dict:
-    """Execute the appropriate action for a step type."""
+async def _execute_step_action(step_type, account, lead, campaign, page=None) -> dict:
+    """
+    Execute the appropriate action for a step type.
+    If page is provided, uses existing browser context (session-based).
+    If page is None, creates new browser context (legacy per-lead tasks).
+    """
+    if page:
+        # Session-based: use existing page/context
+        return await _execute_step_with_page(step_type, account, lead, campaign, page)
+    else:
+        # Legacy: create new browser context per action
+        if step_type == CampaignStepType.VISIT_PROFILE:
+            return await _run_visit(account, lead)
+        elif step_type == CampaignStepType.LIKE_POST:
+            return await _run_like(account, lead)
+        elif step_type == CampaignStepType.VISIT_AND_LIKE:
+            return await _run_visit_and_like(account, lead)
+        elif step_type == CampaignStepType.SEND_CONNECTION:
+            return await _run_connect(account, lead, campaign)
+        elif step_type in [CampaignStepType.SEND_MESSAGE, CampaignStepType.FOLLOW_UP_IF_PENDING, CampaignStepType.THANKS_IF_ACCEPTED]:
+            templates = campaign.message_templates or []
+            if step_type == CampaignStepType.SEND_MESSAGE:
+                message_text = templates[0] if templates else "Hi {{first_name}}, great to connect!"
+            elif step_type == CampaignStepType.FOLLOW_UP_IF_PENDING:
+                message_text = templates[1] if len(templates) > 1 else "Hi {{first_name}}, just wanted to follow up!"
+            else:  # THANKS_IF_ACCEPTED
+                message_text = templates[2] if len(templates) > 2 else "Thanks for connecting, {{first_name}}!"
+            return await _run_message(account, lead, message_text)
+        else:
+            raise Exception(f"Unknown step type: {step_type}")
+
+
+async def _execute_step_with_page(step_type, account, lead, campaign, page) -> dict:
+    """
+    Execute step action using existing browser context (session-based).
+    """
     if step_type == CampaignStepType.VISIT_PROFILE:
-        return asyncio.run(_run_visit(account, lead))
+        return await visit_profile(page, lead.linkedin_url)
     elif step_type == CampaignStepType.LIKE_POST:
-        return asyncio.run(_run_like(account, lead))
+        return await like_recent_post(page, lead.linkedin_url)
     elif step_type == CampaignStepType.VISIT_AND_LIKE:
-        return asyncio.run(_run_visit_and_like(account, lead))  # Combined action
+        return await visit_profile_and_like_post(page, lead.linkedin_url)
     elif step_type == CampaignStepType.SEND_CONNECTION:
-        return asyncio.run(_run_connect(account, lead, campaign))
+        return await send_connection_request(
+            page, lead.linkedin_url,
+            first_name=lead.first_name,
+            note_template=campaign.connection_note_template,
+        )
     elif step_type in [CampaignStepType.SEND_MESSAGE, CampaignStepType.FOLLOW_UP_IF_PENDING, CampaignStepType.THANKS_IF_ACCEPTED]:
         templates = campaign.message_templates or []
         if step_type == CampaignStepType.SEND_MESSAGE:
@@ -321,7 +366,7 @@ def _execute_step_action(step_type, account, lead, campaign) -> dict:
             message_text = templates[1] if len(templates) > 1 else "Hi {{first_name}}, just wanted to follow up!"
         else:  # THANKS_IF_ACCEPTED
             message_text = templates[2] if len(templates) > 2 else "Thanks for connecting, {{first_name}}!"
-        return asyncio.run(_run_message(account, lead, message_text))
+        return await send_message(page, lead.linkedin_url, message_text, lead.first_name)
     else:
         raise Exception(f"Unknown step type: {step_type}")
 
@@ -395,20 +440,22 @@ async def _run_visit(account, lead) -> dict:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
 
+        # Load storage state before creating context
+        logger.info(f"🔓 Loading storage state for account {account.linkedin_email}")
+        logger.info(f"📅 Storage state last updated at: {account.cookies_updated_at}")
+        storage_state = await load_session_state(account)
+        if not storage_state:
+            raise SessionFailureException("No session state — account needs Playwright login first")
+
         pw, browser, context, page, user_agent = await launch_browser(
             proxy_host=account.proxy_host,
             proxy_port=account.proxy_port,
             proxy_user=account.proxy_username,
             proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
-            user_agent=account.user_agent  # Use saved user agent for consistency
+            user_agent=account.user_agent,  # Use saved user agent for consistency
+            storage_state=storage_state,  # Pass storage state to context
         )
         try:
-            logger.info(f"🔓 Loading cookies for account {account.linkedin_email}")
-            logger.info(f"📅 Cookies last updated at: {account.cookies_updated_at}")
-            
-            if not await load_session_cookies(context, account):
-                raise SessionFailureException("No session cookies — account needs Playwright login first")
-            
             logger.info("🔐 Verifying session validity...")
             verification = await verify_session(page)
             logger.info(f"🔍 Verification result: {verification.status.value} - {verification.message}")
@@ -421,7 +468,13 @@ async def _run_visit(account, lead) -> dict:
                 )
             
             logger.info(f"✅ Session valid, visiting profile: {lead.linkedin_url}")
-            return await visit_profile(page, lead.linkedin_url)
+            result = await visit_profile(page, lead.linkedin_url)
+            
+            # Save updated storage state after successful action
+            await save_session_state(context, account, user_agent)
+            logger.info("💾 Storage state saved after successful visit")
+            
+            return result
         finally:
             await context.close()
             await browser.close()
@@ -434,15 +487,20 @@ async def _run_like(account, lead) -> dict:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
 
+        # Load storage state before creating context
+        storage_state = await load_session_state(account)
+        if not storage_state:
+            raise SessionFailureException("No session state — account needs Playwright login first")
+
         pw, browser, context, page, user_agent = await launch_browser(
             proxy_host=account.proxy_host,
             proxy_port=account.proxy_port,
             proxy_user=account.proxy_username,
             proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
+            user_agent=account.user_agent,
+            storage_state=storage_state,
         )
         try:
-            if not await load_session_cookies(context, account):
-                raise SessionFailureException("No session cookies — account needs Playwright login first")
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
                 # Raise session failure exception to suspend account and stop campaign
@@ -450,7 +508,13 @@ async def _run_like(account, lead) -> dict:
                     f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
                     f"Account will be suspended to prevent LinkedIn bot detection."
                 )
-            return await like_recent_post(page, lead.linkedin_url)
+            result = await like_recent_post(page, lead.linkedin_url)
+            
+            # Save updated storage state after successful action
+            await save_session_state(context, account, user_agent)
+            logger.info("💾 Storage state saved after successful like")
+            
+            return result
         finally:
             await context.close()
             await browser.close()
@@ -463,20 +527,22 @@ async def _run_visit_and_like(account, lead) -> dict:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
 
+        # Load storage state before creating context
+        logger.info(f"🔓 Loading storage state for account {account.linkedin_email}")
+        logger.info(f"📅 Storage state last updated at: {account.cookies_updated_at}")
+        storage_state = await load_session_state(account)
+        if not storage_state:
+            raise SessionFailureException("No session state — account needs Playwright login first")
+
         pw, browser, context, page, user_agent = await launch_browser(
             proxy_host=account.proxy_host,
             proxy_port=account.proxy_port,
             proxy_user=account.proxy_username,
             proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
-            user_agent=account.user_agent  # Use saved user agent for consistency
+            user_agent=account.user_agent,  # Use saved user agent for consistency
+            storage_state=storage_state,
         )
         try:
-            logger.info(f"🔓 Loading cookies for account {account.linkedin_email}")
-            logger.info(f"📅 Cookies last updated at: {account.cookies_updated_at}")
-            
-            if not await load_session_cookies(context, account):
-                raise SessionFailureException("No session cookies — account needs Playwright login first")
-            
             logger.info("🔐 Verifying session validity...")
             verification = await verify_session(page)
             logger.info(f"🔍 Verification result: {verification.status.value} - {verification.message}")
@@ -489,7 +555,13 @@ async def _run_visit_and_like(account, lead) -> dict:
                 )
             
             logger.info(f"✅ Session valid, visiting profile and liking post: {lead.linkedin_url}")
-            return await visit_profile_and_like_post(page, lead.linkedin_url)
+            result = await visit_profile_and_like_post(page, lead.linkedin_url)
+            
+            # Save updated storage state after successful action
+            await save_session_state(context, account, user_agent)
+            logger.info("💾 Storage state saved after successful visit and like")
+            
+            return result
         finally:
             await context.close()
             await browser.close()
@@ -546,14 +618,19 @@ async def _run_connect(account, lead, campaign) -> dict:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
         
+        # Load storage state before creating context
+        storage_state = await load_session_state(account)
+        if not storage_state:
+            raise SessionFailureException("No session state — account needs Playwright login first")
+        
         pw, browser, context, page, user_agent = await launch_browser(
             proxy_host=account.proxy_host, proxy_port=account.proxy_port,
             proxy_user=account.proxy_username,
             proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
+            user_agent=account.user_agent,
+            storage_state=storage_state,
         )
         try:
-            if not await load_session_cookies(context, account):
-                raise SessionFailureException("No session cookies — account needs Playwright login first")
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
                 # Raise session failure exception to suspend account and stop campaign
@@ -561,11 +638,17 @@ async def _run_connect(account, lead, campaign) -> dict:
                     f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
                     f"Account will be suspended to prevent LinkedIn bot detection."
                 )
-            return await send_connection_request(
+            result = await send_connection_request(
                 page, lead.linkedin_url,
                 first_name=lead.first_name,
                 note_template=campaign.connection_note_template,
             )
+            
+            # Save updated storage state after successful action
+            await save_session_state(context, account, user_agent)
+            logger.info("💾 Storage state saved after successful connection request")
+            
+            return result
         finally:
             await context.close()
             await browser.close()
@@ -714,14 +797,19 @@ async def _run_message(account, lead, message_text: str) -> dict:
         if not acquired:
             raise Exception("Could not acquire Playwright session slot - timeout")
         
+        # Load storage state before creating context
+        storage_state = await load_session_state(account)
+        if not storage_state:
+            raise SessionFailureException("No session state — account needs Playwright login first")
+        
         pw, browser, context, page, user_agent = await launch_browser(
             proxy_host=account.proxy_host, proxy_port=account.proxy_port,
             proxy_user=account.proxy_username,
             proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
+            user_agent=account.user_agent,
+            storage_state=storage_state,
         )
         try:
-            if not await load_session_cookies(context, account):
-                raise SessionFailureException("No session cookies — account needs Playwright login first")
             verification = await verify_session(page)
             if verification.status != LinkedInSessionStatus.VALID:
                 # Raise session failure exception to suspend account and stop campaign
@@ -729,8 +817,262 @@ async def _run_message(account, lead, message_text: str) -> dict:
                     f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
                     f"Account will be suspended to prevent LinkedIn bot detection."
                 )
-            return await send_message(page, lead.linkedin_url, message_text, lead.first_name)
+            result = await send_message(page, lead.linkedin_url, message_text, lead.first_name)
+            
+            # Save updated storage state after successful action
+            await save_session_state(context, account, user_agent)
+            logger.info("💾 Storage state saved after successful message send")
+            
+            return result
         finally:
             await context.close()
             await browser.close()
             await pw.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ACCOUNT SESSION TASK (NEW ARCHITECTURE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@celery_app.task(bind=True, name="tasks.run_account_session")
+def run_account_session(self, account_email: str):
+    """
+    Single task per account that processes all due leads across all campaigns.
+    Opens one browser/context, processes leads with human-like timing, and saves state.
+    """
+    import redis
+    from core.config import settings
+    
+    # Redis lock to prevent overlapping sessions for the same account
+    redis_client = redis.from_url(settings.REDIS_URL)
+    lock_key = f"session_lock:{account_email}"
+    lock = redis_client.lock(lock_key, timeout=7200)  # 2 hour timeout
+    
+    if not lock.acquire(blocking=False):
+        logger.warning(f"⚠️ Session already running for account {account_email}, skipping")
+        return {"status": "skipped", "reason": "session_already_running"}
+    
+    try:
+        with get_sync_db() as db:
+            # Get the account
+            account = db.query(LinkedInAccount).filter_by(linkedin_email=account_email).first()
+            if not account or account.status != LinkedInAccountStatus.ACTIVE:
+                logger.warning(f"⚠️ Account {account_email} not found or not active")
+                return {"status": "skipped", "reason": "account_not_active"}
+            
+            # Query all due leads across all ACTIVE campaigns for this account
+            # For leads that haven't started (current_step is NULL/0), match step 1
+            # For leads that have started, match their current step
+            from sqlalchemy import or_
+            due_leads = db.query(Lead, Campaign, CampaignStep).join(
+                Campaign, Lead.campaign_id == Campaign.id
+            ).join(
+                CampaignStep, Campaign.id == CampaignStep.campaign_id
+            ).filter(
+                Campaign.account_email == account_email,
+                Campaign.status == CampaignStatus.ACTIVE,
+                Lead.status.in_([LeadStatus.PENDING, LeadStatus.VISITING, LeadStatus.REQUESTED, LeadStatus.ACCEPTED]),
+                or_(
+                    (Lead.current_step == None) & (CampaignStep.step_order == 1),
+                    (Lead.current_step == 0) & (CampaignStep.step_order == 1),
+                    Lead.current_step == CampaignStep.step_order
+                )
+            ).all()
+            
+            if not due_leads:
+                logger.info(f"✅ No due leads found for account {account_email}")
+                return {"status": "completed", "leads_processed": 0}
+            
+            # Cap the number of leads per session
+            due_leads = due_leads[:MAX_ACTIONS_PER_SESSION]
+            logger.info(f"📊 Processing {len(due_leads)} due leads for account {account_email}")
+            
+            # Calculate target session duration and per-action dwell time
+            target_duration_minutes = random.randint(SESSION_DURATION_MIN, SESSION_DURATION_MAX)
+            per_action_seconds = (target_duration_minutes * 60) / len(due_leads)
+            logger.info(f"⏱️ Target session duration: {target_duration_minutes} minutes, ~{per_action_seconds:.0f}s per action")
+            
+            # Process leads in async loop
+            results = asyncio.run(_process_leads_session(
+                account, due_leads, per_action_seconds, db
+            ))
+            
+            logger.info(f"✅ Session completed for account {account_email}. Processed {len(results)} leads.")
+            
+            # Calculate next session delay based on the current step's delay_hours
+            # Use the delay_hours from the step that was just processed (step 1 typically)
+            # If delay_hours is 0 or not set, default to 2 hours minimum
+            if due_leads:
+                # Get the step that was processed (first lead's step)
+                _, _, current_step = due_leads[0]
+                delay_hours = current_step.delay_hours if current_step.delay_hours and current_step.delay_hours > 0 else 2
+            else:
+                delay_hours = 2  # Default if no leads processed
+            
+            next_run_delay = int(delay_hours * 3600)
+            self.apply_async(
+                args=[account_email],
+                countdown=next_run_delay,
+                time_limit=7200,
+                soft_time_limit=6600
+            )
+            logger.info(f"📅 Next session scheduled in {delay_hours} hours (based on step delay_hours)")
+            
+            return {
+                "status": "completed",
+                "leads_processed": len(results),
+                "session_duration_minutes": target_duration_minutes
+            }
+    
+    except Exception as exc:
+        logger.error(f"❌ Session failed for account {account_email}: {exc}")
+        raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+    
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            # Lock may have expired or been released already (e.g., during retry)
+            pass
+
+
+async def _process_leads_session(account, due_leads, per_action_seconds, db):
+    """
+    Async function that processes leads in a single browser session.
+    """
+    # Load storage state before creating context
+    logger.info(f"🔓 Loading storage state for account {account.linkedin_email}")
+    storage_state = await load_session_state(account)
+    if not storage_state:
+        raise SessionFailureException("No session state — account needs Playwright login first")
+    
+    # Launch browser with storage state
+    user_agent = account.user_agent
+    pw, browser, context, page, actual_user_agent = await launch_browser(
+        proxy_host=account.proxy_host,
+        proxy_port=account.proxy_port,
+        proxy_user=account.proxy_username,
+        proxy_pass=decrypt_credential(account.proxy_password_enc) if account.proxy_password_enc else None,
+        user_agent=user_agent,
+        storage_state=storage_state,
+    )
+    
+    results = []
+    
+    try:
+        # Verify session once at start
+        verification = await verify_session(page)
+        if verification.status != LinkedInSessionStatus.VALID:
+            raise SessionFailureException(
+                f"LinkedIn session invalid/expired/checkpoint. Status: {verification.status.value}. "
+                f"Account will be suspended to prevent LinkedIn bot detection."
+            )
+        logger.info("✅ Session valid, starting lead processing")
+        
+        for i, (lead, campaign, step) in enumerate(due_leads):
+            try:
+                # If lead hasn't started (current_step is NULL/0), assign to step 1
+                if lead.current_step is None or lead.current_step == 0:
+                    lead.current_step = 1
+                    db.flush()
+                
+                # Ensure we're processing the correct step for this lead
+                if step.step_order != lead.current_step:
+                    logger.warning(f"⚠️ Step mismatch for lead {lead.id}: step_order={step.step_order}, current_step={lead.current_step}, skipping")
+                    continue
+                
+                logger.info(f"📋 Processing lead {lead.id} (step {step.step_order}: {step.step_type.value})")
+                
+                # Execute the appropriate action
+                result = await _execute_step_action(step.step_type, account, lead, campaign, page)
+                
+                # Create CampaignJob record
+                job_id = str(uuid.uuid4())
+                job = CampaignJob(
+                    id=job_id,
+                    campaign_id=campaign.id,
+                    lead_id=lead.id,
+                    step_type=step.step_type.value,
+                    status=JobStatus.DONE,
+                    celery_task_id=None,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc)
+                )
+                db.add(job)
+                
+                # Update lead status and current_step
+                _update_lead_status(lead, step.step_type)
+                lead.current_step = step.step_order + 1
+                lead.last_action_at = datetime.now(timezone.utc)
+                
+                db.commit()
+                results.append({"lead_id": lead.id, "result": result})
+                
+                # Save storage state after each action
+                await save_session_state(context, account, actual_user_agent)
+                logger.info(f"💾 Storage state saved after processing lead {lead.id}")
+                
+                # Interstitial action and dwell before next lead (except last)
+                if i < len(due_leads) - 1:
+                    await _interstitial_pause(page, per_action_seconds)
+            
+            except SessionFailureException as exc:
+                # Session failure - suspend account and stop session
+                account.status = LinkedInAccountStatus.SUSPENDED
+                account.updated_at = datetime.now(timezone.utc)
+                lead.status = LeadStatus.FAILED
+                db.commit()
+                logger.error(f"❌ Session failure, suspending account: {exc}")
+                raise
+            
+            except Exception as exc:
+                # Individual lead failure - log and continue
+                logger.error(f"❌ Failed to process lead {lead.id}: {exc}")
+                job = CampaignJob(
+                    id=str(uuid.uuid4()),
+                    campaign_id=campaign.id,
+                    lead_id=lead.id,
+                    step_type=step.step_type.value,
+                    status=JobStatus.FAILED,
+                    error_message=str(exc),
+                    celery_task_id=None,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc)
+                )
+                db.add(job)
+                db.commit()
+                continue
+    
+    finally:
+        await context.close()
+        await browser.close()
+        await pw.stop()
+    
+    return results
+
+
+async def _interstitial_pause(page, per_action_seconds):
+    """
+    Random interstitial action and dwell between leads to appear human-like.
+    """
+    # Random dwell time (50-100% of per_action_seconds)
+    dwell_seconds = per_action_seconds * random.uniform(0.5, 1.0)
+    logger.info(f"⏸️ Dwell for {dwell_seconds:.0f}s before next action")
+    await asyncio.sleep(dwell_seconds)
+    
+    # 30% chance of interstitial action
+    if random.random() < INTERSTITIAL_ACTION_RATE:
+        logger.info("🎲 Performing interstitial action...")
+        action = random.choice(["feed", "notifications", "scroll"])
+        
+        if action == "feed":
+            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(2, 5))
+        elif action == "notifications":
+            await page.goto("https://www.linkedin.com/notifications/", wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(2, 5))
+        elif action == "scroll":
+            await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
+            await asyncio.sleep(random.uniform(1, 3))
+        
+        logger.info(f"✅ Interstitial action '{action}' completed")

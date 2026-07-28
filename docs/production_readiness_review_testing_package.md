@@ -8,7 +8,7 @@ Important security note: A real LinkedIn credential was shared during review. Ro
 
 ## Executive Summary
 
-The backend is not production-ready yet. Most critical runtime blockers have been fixed, including adding `REDIS_URL` to settings, adding campaign step fields with proper imports, adding lead completion fields with migration, correcting the worker's Playwright unpacking/session-status checks, removing plaintext password from verification sessions, and fixing browser resource leaks. The remaining blockers are startup configuration mismatch, incomplete CSV validation, Docker/env mismatch, and incomplete action separation for LinkedIn visit vs like behavior.
+The backend is not production-ready yet. Most critical runtime blockers have been fixed, including adding `REDIS_URL` to settings and `.env`, adding campaign step fields with proper imports, adding lead completion fields with migration, correcting the worker's Playwright unpacking/session-status checks, removing plaintext password from verification sessions, fixing browser resource leaks, implementing proper async session cleanup with periodic cleanup tasks, and separating visit and like automation actions. The remaining blockers are incomplete CSV validation, Docker/env mismatch, and some medium-priority improvements.
 
 The `POST /api/v1/test/like-first-post` flow can work in Postman because it uses an already stored `LinkedInAccount` and reloads encrypted cookies from the database. That confirms the local cookie reuse path can work, but it should remain an internal-only endpoint and must be removed or admin-gated before production.
 
@@ -24,14 +24,14 @@ Verification commands run:
 
 | Area | Current Status | Evidence | Remaining Action |
 |---|---|---|---|
-| Redis config | Fixed | `core/config.py::Settings` now includes `REDIS_URL`. | Add `REDIS_URL` to `.env`; fix Docker env names for `JWT_SECRET` and `CREDENTIAL_ENCRYPTION_KEY`. |
+| Redis config | Fixed | `core/config.py::Settings` now includes `REDIS_URL`; added to `.env`. | Fix Docker env names for `JWT_SECRET` and `CREDENTIAL_ENCRYPTION_KEY`. |
 | Campaign steps | Fixed | `schemas/campaign.py::CampaignCreate` now has `steps`; `api/v1/campaigns.py::create_campaign` imports `CampaignStep` and creates step rows. | Add tests for create-with-steps. |
 | Lead completion | Fixed at model level | `models/lead.py` now has `LeadStatus.COMPLETE` and `completed_at`; migration created. | Run migration in production. |
 | Worker browser unpacking | Fixed in generic worker wrappers | `_run_visit`, `_run_like`, `_run_connect`, `_run_message` now unpack five values from `launch_browser()`. | Run Celery worker smoke tests. |
 | Worker session verification | Fixed in generic worker wrappers | Worker now checks `verification.status != LinkedInSessionStatus.VALID`. | Confirm legacy tasks and all wrappers follow the same rule. |
 | Verification session plaintext password | Fixed | `automation/session_manager.py::PendingLoginSession` no longer stores `linkedin_password`; `api/v1/linkedin.py::add_linkedin_account` no longer passes it. | None. |
-| Session cleanup | Partially fixed | Cleanup now uses `run_until_complete` / `asyncio.run` from sync code; this can fail inside a running FastAPI event loop. | Convert cleanup to async and await it from async endpoints. |
-| LinkedIn visit vs like action split | Partially fixed | Worker now has `_run_like`, but both `_run_visit` and `_run_like` still call `visit_profile_and_like_post()`. | Implement separate `visit_profile()` and `like_recent_post()` actions. |
+| Session cleanup | Fixed | Cleanup is now fully async with `cleanup_session()` and `cleanup_expired_sessions()`; periodic cleanup task added with `start_periodic_cleanup()`. | Integrate periodic cleanup into application lifespan. |
+| LinkedIn visit vs like action split | Fixed | Worker now has separate `_run_visit()` calling `visit_profile()` and `_run_like()` calling `like_recent_post()`. | None. |
 | Lead URL validation | Partially fixed | `LeadCreate.linkedin_url` validates `https://www.linkedin.com/in/`. | CSV upload bypasses `LeadCreate` and still stores raw `linkedin_url`. Apply the same validation in upload. |
 | Docker/env readiness | Still open | `docker-compose.yml` still uses `JWT_SECRET_KEY` and `ENCRYPTION_KEY`; settings expect `JWT_SECRET` and `CREDENTIAL_ENCRYPTION_KEY`. | Rename compose variables and provide all required settings. |
 
@@ -39,10 +39,7 @@ Verification commands run:
 
 | Severity | File / Function | Issue | Why It Matters | Recommended Fix |
 |---|---|---|---|---|
-| Critical | `.env`, `core/config.py::Settings`, worker modules | `REDIS_URL` is now required but missing from `.env`. | Local app/worker imports fail settings validation until the env var is provided. | Add `REDIS_URL=redis://localhost:6379/0` locally and production Redis URL in deployment secrets. |
-| High | `worker/tasks/campaign_tasks.py::_run_visit`, `_run_like` | `_run_like` was added, but both visit and like still call `visit_profile_and_like_post()`. | A visit-only step can still like a post, and the like step repeats profile visit behavior. | Split automation actions into a pure visit function and a pure like-recent-post function. |
 | High | `api/v1/test_automation.py::LikeTestRequest`, `test_like_first_post` | Internal test endpoint accepts plaintext LinkedIn password and has no auth gate in the active code. The password is not used in the cookie path. | Anyone with network access can submit credentials and trigger automation if the endpoint is exposed. | Remove `linkedin_password` from this endpoint, require admin/internal auth, and disable the router in production. |
-| High | `automation/session_manager.py::cleanup_session` | Cleanup still tries to close async resources from sync code and swallows failures. | Browser processes can leak, especially when called inside an already running event loop. | Make cleanup async and await context/browser/playwright close. Add periodic cleanup on lifespan. |
 | High | `api/v1/leads.py::upload_leads_csv` | CSV upload still accepts arbitrary `linkedin_url` strings because it bypasses `LeadCreate` validation. | Invalid URLs, non-LinkedIn URLs, or malicious payload strings can enter automation and cause unintended navigation. | Reuse the same LinkedIn URL validator during CSV parsing. |
 | High | `api/v1/leads.py::upload_leads_csv` | CSV upload silently skips invalid rows and still returns success. | Operators may think all leads were imported when bad rows were ignored. | Return row-level validation errors or a `207`-style summary with accepted/rejected counts. |
 | High | `database.py::init_db` | Production startup calls `Base.metadata.create_all`. | Auto-creating schema can mask missing migrations and create drift from Alembic. | Use Alembic migrations in deployment; restrict `create_all` to local/dev only. |
@@ -395,13 +392,12 @@ async def test_create_campaign_persists_steps_after_fix(async_client, auth_heade
 
 ## Production Readiness Recommendations
 
-1. Add `REDIS_URL` to `.env` and deployment secrets; align Docker env names with `Settings`.
+1. Fix Docker env names to match `Settings` (rename `JWT_SECRET_KEY` to `JWT_SECRET`, `ENCRYPTION_KEY` to `CREDENTIAL_ENCRYPTION_KEY`) and include all required values (email, CORS, password-reset variables).
 2. Run the Alembic migration for `LeadStatus.COMPLETE` and `leads.completed_at` in production.
-3. Remove or strictly protect `/api/v1/test/*` endpoints in production.
-4. Validate all LinkedIn URLs, including CSV upload rows, plus CSV headers, CSV size, row count, and duplicate leads.
-5. Add idempotency for campaign lead/step execution and prevent concurrent duplicate starts.
-6. Separate visit, like, connect, and message automation functions and rate-limit them independently.
+3. Integrate periodic session cleanup into application lifespan using `start_periodic_cleanup()`.
+4. Remove or strictly protect `/api/v1/test/*` endpoints in production.
+5. Validate all LinkedIn URLs, including CSV upload rows, plus CSV headers, CSV size, row count, and duplicate leads.
+6. Add idempotency for campaign lead/step execution and prevent concurrent duplicate starts.
 7. Replace in-memory pending verification sessions with a distributed short-lived store, or pin the verification flow to one process.
-8. Convert session cleanup to async and await it from async endpoints.
-9. Use Alembic migrations only in production; stop calling `create_all` during production startup.
-10. Add automated tests before broader testing: route tests, worker unit tests, CSV validation tests, cookie encryption/decryption tests, and session-state tests.
+8. Use Alembic migrations only in production; stop calling `create_all` during production startup.
+9. Add automated tests before broader testing: route tests, worker unit tests, CSV validation tests, cookie encryption/decryption tests, and session-state tests.

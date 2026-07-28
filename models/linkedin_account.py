@@ -36,11 +36,11 @@ class LinkedInAccount(Base):
     status             = Column(SAEnum(LinkedInAccountStatus, name="linkedin_account_status", create_type=False), 
                                 nullable=False, default=LinkedInAccountStatus.PENDING_VERIFICATION)
  
-    # ── NEW: AES-256-GCM encrypted JSON cookie blob ──────────────────────────
-    # Stores all linkedin.com cookies as encrypted JSON.
-    # Format (after decrypt): JSON array of Playwright cookie dicts.
+    # ── NEW: AES-256-GCM encrypted JSON storage state ──────────────────────────
+    # Stores full Playwright storage state (cookies + localStorage) as encrypted JSON.
+    # Format (after decrypt): JSON dict with "cookies" and "origins" keys.
     # NEVER return this field in any API response.
-    encrypted_cookies  = Column(Text, nullable=True)
+    encrypted_storage_state = Column(Text, nullable=True)
     cookies_updated_at = Column(DateTime(timezone=True), nullable=True)
     
     # ── User-Agent used during login (for session consistency) ───────────────

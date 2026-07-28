@@ -130,9 +130,11 @@ async def start_campaign(
     """
     from datetime import datetime, timezone
     import random
+    import redis
     from worker.celery_app import celery_app
+    from core.config import settings
     from models.linkedin_account import LinkedInAccount
- 
+
     result = await db.execute(
         select(Campaign).join(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
@@ -143,14 +145,13 @@ async def start_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.status == CampaignStatus.ACTIVE:
         raise HTTPException(status_code=409, detail="Campaign is already running")
- 
-    # Get all pending leads for this campaign
-    leads_result = await db.execute(
-        select(Lead).where(Lead.campaign_id == campaign_id,
-                           Lead.status == "pending")
-    )
-    leads = leads_result.scalars().all()
- 
+
+    # Check if a session is already running for this account
+    redis_client = redis.from_url(settings.REDIS_URL)
+    lock_key = f"session_lock:{campaign.account_email}"
+    if redis_client.exists(lock_key):
+        raise HTTPException(status_code=409, detail="A session is already running for this account")
+
     # Get the first step from campaign_steps
     from models.campaign import CampaignStep
     first_step_result = await db.execute(
@@ -164,22 +165,18 @@ async def start_campaign(
     if not first_step:
         raise HTTPException(status_code=400, detail="Campaign has no steps configured")
 
-    # Spread lead start times with human-like random delays (30 seconds to 2 minutes)
-    for i, lead in enumerate(leads):
-        base_delay = random.randint(30, 120)
-        position_delay = i * random.randint(30, 60)
-        delay_seconds = base_delay + position_delay
-        celery_app.send_task(
-            "tasks.execute_campaign_step",
-            args=[lead.id, campaign_id, first_step.step_order],
-            countdown=delay_seconds,
-        )
- 
+    # Enqueue a single account session task instead of per-lead tasks
+    celery_app.send_task(
+        "tasks.run_account_session",
+        args=[campaign.account_email],
+        countdown=random.randint(30, 120)  # Random delay before first session
+    )
+
     campaign.status = CampaignStatus.ACTIVE
     campaign.started_at = datetime.now(timezone.utc)
     await db.commit()
- 
-    return {"message": f"Campaign started. {len(leads)} leads queued.", "leads_queued": len(leads)}
+
+    return {"message": f"Campaign started. Account session queued for {campaign.account_email}.", "account_email": campaign.account_email}
 
 
 @router.post("/{campaign_id}/pause", status_code=200)
