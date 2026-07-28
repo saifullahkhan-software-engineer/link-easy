@@ -203,20 +203,28 @@ ALTER TABLE public.leads OWNER TO postgres;
 --
 
 CREATE TABLE public.linkedin_accounts (
+    id character varying DEFAULT gen_random_uuid()::text NOT NULL,
     owner_email character varying,
     linkedin_email character varying NOT NULL,
     encrypted_password character varying NOT NULL,
     label character varying,
     status public.linkedin_account_status NOT NULL,
-    encrypted_cookies text,
-    cookies_updated_at timestamp with time zone,
+    profile_dir character varying NOT NULL,
     user_agent character varying,
+    viewport_width integer,
+    viewport_height integer,
+    timezone_id character varying,
+    locale character varying,
+    hardware_concurrency integer,
+    device_memory integer,
+    warmup_stage character varying,
     proxy_host character varying,
     proxy_port character varying,
     proxy_username character varying,
     proxy_password_enc character varying,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_linkedin_accounts_warmup_stage CHECK (((warmup_stage IS NULL) OR ((warmup_stage)::text = ANY ((ARRAY['new'::character varying, 'ramping'::character varying, 'established'::character varying])::text[]))))
 );
 
 
@@ -302,7 +310,7 @@ ALTER TABLE ONLY public.leads
 --
 
 ALTER TABLE ONLY public.linkedin_accounts
-    ADD CONSTRAINT linkedin_accounts_pkey PRIMARY KEY (linkedin_email);
+    ADD CONSTRAINT linkedin_accounts_pkey PRIMARY KEY (id);
 
 
 --

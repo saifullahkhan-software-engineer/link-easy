@@ -7,7 +7,7 @@ from the campaign's connection_note_template.
 """
 import asyncio
 import random
-from playwright.async_api import Page
+from patchright.async_api import Page
 from automation.human import human_click, human_type, human_scroll, random_idle_pause
  
  

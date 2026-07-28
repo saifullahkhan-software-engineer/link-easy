@@ -17,7 +17,7 @@ Provides three public coroutines:
       legacy Celery tasks.  Calls both functions above in sequence.
 """
 import random
-from playwright.async_api import Page
+from patchright.async_api import Page
 from automation.human import human_scroll, human_mouse_move, random_idle_pause
 from core.logging_config import get_logger, should_log_debug, should_take_screenshots
 

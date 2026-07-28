@@ -12,3 +12,6 @@ __pycache__/
 /.postman
 /.venv
 /postman
+
+# Durable per-account Chromium profile directories (volume-mounted in prod)
+/profiles/

@@ -7,10 +7,16 @@ POST   /api/v1/linkedin/account          — add a LinkedIn account
 GET    /api/v1/linkedin/account          — get the user's account
 PATCH  /api/v1/linkedin/account          — update label / password
 DELETE /api/v1/linkedin/account          — remove account
+
+Session state lives in each account's durable Chromium profile directory
+(account.profile_dir) — NOT in the database. Adding an account creates the
+row + profile directory first, then logs in inside that persistent profile;
+LinkedIn's session cookies are persisted to disk by Chromium automatically.
+Credential-based relogin is a FALLBACK used only when the persistent
+profile's session has expired.
 """
 
-from datetime import datetime, timedelta, timezone
-import uuid
+import shutil
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -19,7 +25,7 @@ from sqlalchemy.future import select
 
 from api.dependencies import get_current_user, get_db, require_roles
 from core.security import decrypt_credential, encrypt_credential
-from models.linkedin_account import LinkedInAccount, LinkedInAccountStatus 
+from models.linkedin_account import LinkedInAccount, LinkedInAccountStatus
 from models.roles import UserRole
 from models.user import User
 from schemas.linkedin import (
@@ -32,14 +38,17 @@ from schemas.linkedin import (
     VerificationCodeResponse,
     SessionVerificationResponse,
 )
-# import linkdin login from session 
-from automation.session  import linkedin_login, LinkedInSessionStatus, load_session_state, verify_session, save_session_state
+from automation.session import linkedin_login, LinkedInSessionStatus, verify_session
 from automation.session_manager import session_manager
-from automation.browser import launch_browser
-from core import email
+from automation.browser import launch_persistent_browser, ensure_profile_dir
+from worker.profile_lock import (
+    ProfileInUseError,
+    acquire_profile_lock,
+    release_profile_lock,
+)
 
 
-# add logger 
+# add logger
 import logging
 from core.logging_config import get_logger, should_log_debug, should_take_screenshots
 
@@ -86,115 +95,168 @@ async def add_linkedin_account(
 ) -> LinkedInAccountCreateResponse:
     """
     Accepts the user's LinkedIn email and password, encrypts the password
-    with AES-256-GCM, and attempts LinkedIn login.
+    with AES-256-GCM, creates the account's durable browser profile, and
+    attempts LinkedIn login inside that persistent profile.
 
     Returns two possible outcomes:
-    1. LOGIN_SUCCESS: Login completed, cookies saved, account created with ACTIVE status
-    2. PENDING_VERIFICATION: LinkedIn requires verification code, session kept alive
-    
+    1. LOGIN_SUCCESS: Login completed inside the persistent profile (session
+       persisted to disk by Chromium), account ACTIVE.
+    2. PENDING_VERIFICATION: LinkedIn requires a verification code; the
+       browser session is kept alive for the verification endpoint.
+
     The plaintext password is never logged or stored.
     """
-    
+
     encrypted = encrypt_credential(payload.linkedin_password)
+    linkedin_email = str(payload.linkedin_email).lower().strip()
 
-    # Use a consistent Windows user agent for this account to avoid detection
-    from automation.browser import USER_AGENTS
-    consistent_user_agent = USER_AGENTS[0]  # Always use Windows Chrome 124 for consistency
-
-    # Attempt login with keep_alive=True to support verification flow
-    session_status, session_resources = await linkedin_login(
-        email=payload.linkedin_email, 
-        password=payload.linkedin_password, 
-        account=None,  # Don't pass account yet, will create after verification
-        keep_alive=True
+    # Fail fast on duplicates BEFORE launching any browser.
+    existing = await db.execute(
+        select(LinkedInAccount).where(
+            (LinkedInAccount.linkedin_email == linkedin_email)
+            | (LinkedInAccount.owner_email == payload.owner_email)
+        )
     )
-    
-    # Scenario 1: Login successful - create account with ACTIVE status
-    if session_status == LinkedInSessionStatus.VALID:
-        # Create a temporary account object to save cookies
-        from models.linkedin_account import LinkedInAccount
-        temp_account = LinkedInAccount(
-            owner_email=payload.owner_email,
-            linkedin_email=str(payload.linkedin_email).lower().strip(),
-            encrypted_password=encrypted,
-            label=payload.label,
-            status=LinkedInAccountStatus.ACTIVE,
-        )
-        
-        # Save storage state to temp account
-        pw, browser, context, page, user_agent = session_resources
-        from automation.session import save_session_state
-        await save_session_state(context, temp_account, user_agent)
-        
-        # Clean up browser resources
-        await context.close()
-        await browser.close()
-        await pw.stop()
-        
-        # Persist account to database
-        db.add(temp_account)
-        try:   
-            await db.commit()
-            await db.refresh(temp_account)
-        except IntegrityError:
-            await db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="A LinkedIn account is already connected to your profile",
-            )
-        
-        return LinkedInAccountCreateResponse(
-            status="LOGIN_SUCCESS",
-            session_id=None,
-            message="LinkedIn account added successfully",
-            account=LinkedInAccountResponse.model_validate(temp_account)
-        )
-    
-    # Scenario 2: Verification required - keep session alive
-    elif session_status == LinkedInSessionStatus.VERIFICATION_REQUIRED:
-        pw, browser, context, page, user_agent = session_resources
-        
-        # Create pending session in session manager
-        session_id = session_manager.create_session(
-            linkedin_email=str(payload.linkedin_email).lower().strip(),
-            owner_email=payload.owner_email,
-            label=payload.label,
-            pw=pw,
-            browser=browser,
-            context=context,
-            page=page,
-            encrypted_password=encrypted,
-            user_agent=user_agent
-        )
-        
-        return LinkedInAccountCreateResponse(
-            status="PENDING_VERIFICATION",
-            session_id=session_id,
-            message="LinkedIn requires verification code. Please use the verification endpoint.",
-            account=None
-        )
-    
-    # Scenario 3: Login failed - return error
-    else:
-        # Clean up browser resources
-        if session_resources:
-            pw, browser, context, page, user_agent = session_resources
-            await context.close()
-            await browser.close()
-            await pw.stop()
-        
-        error_message = "Login failed"
-        if session_status == LinkedInSessionStatus.CHECKPOINT:
-            error_message = "LinkedIn security checkpoint detected - possible bot detection"
-        elif session_status == LinkedInSessionStatus.EXPIRED:
-            error_message = "Invalid credentials or login failed"
-        elif session_status == LinkedInSessionStatus.UNKNOWN:
-            error_message = "Unknown error during login"
-        
+    if existing.scalars().first() is not None:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_message
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A LinkedIn account is already connected to your profile",
         )
+
+    # Create the account row up front so the login can run inside its durable
+    # profile directory. profile_dir is derived ONLY from the server-generated
+    # UUID — never from the (user-supplied) email address.
+    account = LinkedInAccount(
+        owner_email=payload.owner_email,
+        linkedin_email=linkedin_email,
+        encrypted_password=encrypted,
+        label=payload.label,
+        status=LinkedInAccountStatus.PENDING_VERIFICATION,
+    )
+    account.assign_profile_dir()   # sets id + profile_dir from the UUID
+    ensure_profile_dir(account)    # mkdir with 0o700 permissions
+
+    db.add(account)
+    try:
+        await db.commit()
+        await db.refresh(account)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A LinkedIn account is already connected to your profile",
+        )
+
+    lock = None
+    try:
+        # Per-account profile lock — fail fast if something else holds it.
+        lock = acquire_profile_lock(account.id, blocking_timeout=0)
+
+        # Attempt login inside the persistent profile (keep_alive=True to
+        # support the verification-code flow).
+        session_status, session_resources = await linkedin_login(
+            email=account.linkedin_email,
+            password=payload.linkedin_password,
+            account=account,
+            keep_alive=True,
+        )
+        # Persist the fingerprint pinned at first launch (no-op afterwards).
+        await db.commit()
+
+        # Scenario 1: Login successful — session now lives in the profile dir.
+        if session_status == LinkedInSessionStatus.VALID:
+            pw, browser, context, page, user_agent = session_resources
+
+            # Clean up browser resources (the profile dir keeps the session)
+            await context.close()
+            await pw.stop()
+
+            account.status = LinkedInAccountStatus.ACTIVE
+            await db.commit()
+            await db.refresh(account)
+
+            return LinkedInAccountCreateResponse(
+                status="LOGIN_SUCCESS",
+                session_id=None,
+                message="LinkedIn account added successfully",
+                account=LinkedInAccountResponse.model_validate(account)
+            )
+
+        # Scenario 2: Verification required — keep session alive.
+        elif session_status == LinkedInSessionStatus.VERIFICATION_REQUIRED:
+            pw, browser, context, page, user_agent = session_resources
+
+            # Create pending session in session manager. The profile lock
+            # transfers to the pending session because the browser context
+            # (and its grip on the profile dir) stays open until the code
+            # is submitted or the session expires.
+            session_id = session_manager.create_session(
+                linkedin_email=account.linkedin_email,
+                owner_email=payload.owner_email,
+                label=payload.label,
+                pw=pw,
+                browser=browser,
+                context=context,
+                page=page,
+                encrypted_password=encrypted,
+                user_agent=user_agent,
+                profile_lock=lock,
+            )
+            lock = None  # ownership transferred to the pending session
+
+            return LinkedInAccountCreateResponse(
+                status="PENDING_VERIFICATION",
+                session_id=session_id,
+                message="LinkedIn requires verification code. Please use the verification endpoint.",
+                account=None
+            )
+
+        # Scenario 3: Login failed — remove the account row + profile dir so
+        # the user can retry cleanly.
+        else:
+            # Clean up browser resources (if any were returned)
+            if session_resources:
+                pw, browser, context, page, user_agent = session_resources
+                await context.close()
+                await pw.stop()
+
+            profile_dir = account.profile_dir
+            await db.delete(account)
+            await db.commit()
+            shutil.rmtree(profile_dir, ignore_errors=True)
+
+            error_message = "Login failed"
+            if session_status == LinkedInSessionStatus.CHECKPOINT:
+                error_message = "LinkedIn security checkpoint detected - possible bot detection"
+            elif session_status == LinkedInSessionStatus.EXPIRED:
+                error_message = "Invalid credentials or login failed"
+            elif session_status == LinkedInSessionStatus.UNKNOWN:
+                error_message = "Unknown error during login"
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_message
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error while adding LinkedIn account: {str(e)}")
+        # Best-effort: remove the partially-created account so the user can retry.
+        try:
+            await db.delete(account)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+        shutil.rmtree(account.profile_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not complete LinkedIn login: {str(e)}"
+        )
+    finally:
+        # No-op if the lock was transferred to a pending session (lock=None)
+        # or never acquired.
+        release_profile_lock(lock)
 
 
 @router.get(
@@ -236,7 +298,7 @@ async def update_linkedin_account(
         account.encrypted_password = encrypt_credential(payload.linkedin_password)
         # Reset status — credentials changed, need re-verification
         account.status = LinkedInAccountStatus.PENDING_VERIFICATION
-    
+
     if payload.linkedin_email is not None:
         account.linkedin_email = str(payload.linkedin_email).lower().strip()
 
@@ -256,8 +318,12 @@ async def delete_linkedin_account(
 ) -> LinkedInAccountDeleteResponse:
     """Permanently removes a LinkedIn account. This action cannot be undone."""
     account = await _get_account_or_404(current_user.email, db)
+    profile_dir = account.profile_dir
     await db.delete(account)
     await db.commit()
+    # Remove the durable profile directory too — the session data on disk
+    # belongs to this account and must not outlive it.
+    shutil.rmtree(profile_dir, ignore_errors=True)
     return LinkedInAccountDeleteResponse(message="LinkedIn account removed successfully")
 
 
@@ -276,9 +342,12 @@ async def submit_verification_code(
 ) -> VerificationCodeResponse:
     """
     Submits a verification code for a pending LinkedIn login session.
-    
+
     This endpoint retrieves the existing Playwright session (does not create a new one),
     navigates to the verification page, enters the code, and completes the login flow.
+    The account row already exists (created when the login was started); on
+    success it is simply flipped to ACTIVE — the verified session persists in
+    the account's durable profile directory.
     """
     # Retrieve pending session
     pending_session = session_manager.get_session(payload.session_id)
@@ -287,27 +356,26 @@ async def submit_verification_code(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found or expired. Please start a new login."
         )
-    
+
     page = pending_session.page
     context = pending_session.context
     browser = pending_session.browser
     pw = pending_session.pw
-    
+
     try:
         # Find verification code input field
         from automation.session import find_visible_input_by_type
         from automation.human import random_idle_pause, find_and_click_resilient
-        from automation.session import save_session_state
-        
+
         logger.info("🔢 Looking for verification code input field...")
-        
+
         # Try to find verification input
         code_input = None
         try:
             code_input = await find_visible_input_by_type(page, "text")
         except:
             pass
-        
+
         if not code_input:
             # Try with type="tel" (common for verification codes)
             try:
@@ -318,7 +386,7 @@ async def submit_verification_code(
                     code_input = None
             except:
                 code_input = None
-        
+
         if not code_input:
             # Try generic input selectors
             inputs = await page.query_selector_all("input")
@@ -329,24 +397,24 @@ async def submit_verification_code(
                     if await inp.is_visible():
                         code_input = inp
                         break
-        
+
         if not code_input:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Could not find verification code input field. Session may have expired."
             )
-        
+
         # Enter verification code
         logger.info("✍️ Entering verification code...")
         await code_input.fill(payload.verification_code)
         await random_idle_pause(0.5, 1.0)
-        
+
         # Uncheck any checkboxes (e.g., "Remember this device") before submitting
         logger.info("🔲 Unchecking any checkboxes before verification...")
         try:
             # Wait a moment for dynamic checkboxes to load
             await page.wait_for_timeout(500)
-            
+
             # Try multiple selector strategies for LinkedIn's checkboxes
             checkbox_selectors = [
                 "input[type='checkbox']",
@@ -357,9 +425,9 @@ async def submit_verification_code(
                 ".checkbox__input",
                 ".remember-me-checkbox",
             ]
-            
+
             checkboxes_found = []
-            
+
             for selector in checkbox_selectors:
                 try:
                     elements = await page.query_selector_all(selector)
@@ -368,18 +436,18 @@ async def submit_verification_code(
                         logger.debug(f"Found {len(elements)} checkboxes with selector: {selector}")
                 except:
                     pass
-            
+
             # Remove duplicates
             unique_checkboxes = list(set(checkboxes_found))
-            logger.info(f"🔍 Found {len(unique_checkboxes)} checkbox(es) on verification page")
-            
+            logger.info(f"🔍 Found {len(unique_checkboxes)} total checkbox(es) on verification page")
+
             for i, checkbox in enumerate(unique_checkboxes):
                 try:
                     # Force check visibility with timeout
                     if await checkbox.is_visible(timeout=1000):
                         is_checked = await checkbox.is_checked()
                         logger.info(f"Checkbox {i}: checked={is_checked}")
-                        
+
                         if is_checked:
                             # Try multiple methods to uncheck
                             try:
@@ -391,7 +459,7 @@ async def submit_verification_code(
                                     logger.info(f"✅ Unchecked checkbox {i} via uncheck")
                                 except:
                                     logger.warning(f"⚠️ Could not uncheck checkbox {i}")
-                            
+
                             # Verify it's unchecked
                             await page.wait_for_timeout(200)
                             if await checkbox.is_checked():
@@ -406,7 +474,7 @@ async def submit_verification_code(
                     logger.warning(f"⚠️ Could not process checkbox {i}: {str(e)}")
         except Exception as e:
             logger.warning(f"⚠️ Could not uncheck checkboxes: {str(e)}")
-        
+
         # Find and click submit button
         logger.info("🚀 Looking for submit button...")
         submit_selectors = [
@@ -416,7 +484,7 @@ async def submit_verification_code(
             "button:has-text('Continue')",
             "button:has-text('Confirm')",
         ]
-        
+
         try:
             await find_and_click_resilient(page, submit_selectors, "Submit Button")
         except Exception as e:
@@ -424,48 +492,44 @@ async def submit_verification_code(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Could not find submit button: {str(e)}"
             )
-        
+
         # Wait for redirect and check result
         await random_idle_pause(3, 5)
-        logger.debug(f"Current URL after verification: {page.url}")
-        
+        if should_log_debug():
+            logger.debug(f"Current URL after verification: {page.url}")
+
         # Check if verification succeeded (redirected to feed)
         if "/feed" in page.url:
             logger.info("✅ Verification successful - on feed page")
-            
-            # Create account object
-            account = LinkedInAccount(
-                owner_email=pending_session.owner_email,
-                linkedin_email=pending_session.linkedin_email,
-                encrypted_password=pending_session.encrypted_password,
-                label=pending_session.label,
-                status=LinkedInAccountStatus.ACTIVE,
-            )
-            
-            # Save storage state with user_agent
-            await save_session_state(context, account, pending_session.user_agent)
-            
-            # Persist to database
-            db.add(account)
-            try:
-                await db.commit()
-                await db.refresh(account)
-            except IntegrityError:
-                await db.rollback()
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="A LinkedIn account is already connected to your profile",
+
+            # The account row was created when the login was started — flip
+            # it to ACTIVE. The verified session now lives in the account's
+            # durable profile directory; nothing to save to the database.
+            result = await db.execute(
+                select(LinkedInAccount).where(
+                    LinkedInAccount.linkedin_email == pending_session.linkedin_email
                 )
-            
-            # Clean up session
+            )
+            account = result.scalars().first()
+            if account is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Account record missing for pending session. Please re-add the account.",
+                )
+
+            account.status = LinkedInAccountStatus.ACTIVE
+            await db.commit()
+            await db.refresh(account)
+
+            # Clean up session (closes browser + releases the profile lock)
             await session_manager.cleanup_session(payload.session_id)
-            
+
             return VerificationCodeResponse(
                 status="LOGIN_SUCCESS",
                 message="Verification successful. LinkedIn account added.",
                 account=LinkedInAccountResponse.model_validate(account)
             )
-        
+
         # Check if verification failed (still on verification page or error)
         elif "/verify" in page.url or "/checkpoint" in page.url or "/login" in page.url:
             logger.warning("⚠️ Verification failed - still on verification/error page")
@@ -475,7 +539,7 @@ async def submit_verification_code(
                 message="Verification code invalid or expired. Please try again.",
                 account=None
             )
-        
+
         else:
             logger.warning("⚠️ Unknown state after verification")
             # Keep session alive for debugging
@@ -484,7 +548,7 @@ async def submit_verification_code(
                 message=f"Unexpected state after verification. Current URL: {page.url}",
                 account=None
             )
-            
+
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
@@ -517,7 +581,7 @@ async def admin_update_account_status(
     """
     Admin endpoint to change the status of any LinkedIn account.
     Useful for suspending accounts that trigger LinkedIn security checks.
-    
+
     TEMPORARY: Auth disabled for testing.
     """
     # Convert string to enum (case-insensitive)
@@ -529,7 +593,7 @@ async def admin_update_account_status(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid status. Valid values: {[s.value for s in LinkedInAccountStatus]}"
         )
-    
+
     result = await db.execute(
         select(LinkedInAccount).where(LinkedInAccount.linkedin_email == linkedin_email)
     )
@@ -541,7 +605,7 @@ async def admin_update_account_status(
     # SQLAlchemy will handle the enum type correctly.
     account.status = status_enum
     await db.commit()
-    
+
     # Refresh to get updated data (e.g., updated_at from DB trigger/default)
     await db.refresh(account)
     return LinkedInAccountResponse.model_validate(account)
@@ -561,21 +625,22 @@ async def verify_linkedin_session(
     db: AsyncSession = Depends(get_db),
 ) -> SessionVerificationResponse:
     """
-    Verifies if the user's LinkedIn session is still active.
-    
-    - If session is valid: Returns ACTIVE status
-    - If session is expired: Attempts automatic relogin
-    - If relogin succeeds: Returns REFRESHED status with new cookies
-    - If relogin requires verification: Returns PENDING_VERIFICATION status and sends email notification
-    - If relogin fails: Returns FAILED status
-    
-    This endpoint integrates with existing authentication, Playwright automation,
-    cookie management, and email notification systems.
-    
+    Verifies if the user's LinkedIn session is still active by opening the
+    account's durable browser profile.
+
+    - If session is valid: Returns ACTIVE status (no save step needed — the
+      session persists in the profile directory).
+    - If LinkedIn demands a checkpoint/verification code: the live browser is
+      handed to the pending-session flow (PENDING_VERIFICATION + email).
+    - If session is EXPIRED: falls back to credential-based relogin inside the
+      same persistent profile (this is the ONLY path that reads
+      encrypted_password).
+    - If relogin fails: Returns FAILED status.
+
     TEMPORARY: Uses owner_email query parameter to bypass auth for testing.
     """
     logger.info("🔍 Starting LinkedIn session verification for user: %s", owner_email)
-    
+
     # Get the user's LinkedIn account
     result = await db.execute(
         select(LinkedInAccount).where(
@@ -583,7 +648,7 @@ async def verify_linkedin_session(
         )
     )
     account = result.scalars().first()
-    
+
     if not account:
         logger.warning("⚠️ No LinkedIn account found for user: %s", owner_email)
         return SessionVerificationResponse(
@@ -592,9 +657,9 @@ async def verify_linkedin_session(
             account=None,
             requires_manual_verification=False
         )
-    
+
     logger.info("✅ Found LinkedIn account: %s (status: %s)", account.linkedin_email, account.status)
-    
+
     # Check if account is already in pending verification state
     if account.status == LinkedInAccountStatus.PENDING_VERIFICATION:
         logger.warning("⚠️ Account already in PENDING_VERIFICATION state")
@@ -604,113 +669,152 @@ async def verify_linkedin_session(
             account=LinkedInAccountResponse.model_validate(account),
             requires_manual_verification=True
         )
-    
+
+    lock = None
     pw = None
-    browser = None
     context = None
     page = None
     pending_session_created = False  # Track if we created a pending session that should stay alive
-    
+
     try:
-        # Step 1: Launch browser with saved User-Agent if available, otherwise use consistent Windows UA
-        logger.info("🚀 Launching browser for session verification...")
-        user_agent = account.user_agent
-        if not user_agent:
-            # If no saved user agent, use consistent Windows UA
-            from automation.browser import USER_AGENTS
-            user_agent = USER_AGENTS[0]
-            logger.info(f"No saved user agent, using consistent Windows UA: {user_agent}")
-        else:
-            logger.info(f"Using saved user agent: {user_agent}")
-            
-        # Step 2: Load existing storage state
-        logger.info("🔓 Loading stored storage state...")
-        storage_state = await load_session_state(account)
-        
-        # Step 3: Launch browser with storage state
-        pw, browser, context, page, actual_user_agent = await launch_browser(
-            user_agent=user_agent,
-            storage_state=storage_state
-        )
-        logger.debug(f"Browser launched with User-Agent: {actual_user_agent}")
-        
-        if not storage_state:
-            logger.warning("⚠️ No stored state found, proceeding to fresh login...")
-            verification_result = None
-        else:
-            logger.info("✅ Storage state loaded successfully")
-            
-            # Step 4: Verify session by navigating to feed
-            logger.info("🔐 Verifying session validity...")
-            verification_result = await verify_session(page)
-            logger.debug(f"Verification result: {verification_result.status.value} - {verification_result.message}")
-        
-        # Step 5: Handle verification result
-        if verification_result and verification_result.status == LinkedInSessionStatus.VALID:
-            # Session is valid - save fresh storage state to ensure it's up-to-date
-            logger.info("✅ LinkedIn session is ACTIVE - saving fresh storage state")
-            await save_session_state(context, account, actual_user_agent)
-            
-            # Close browser since we're done
+        # Step 1: Acquire the per-account profile lock — fail fast with a
+        # clear error if a campaign task / another request holds the profile.
+        try:
+            lock = acquire_profile_lock(account.id, blocking_timeout=0)
+        except ProfileInUseError as exc:
+            logger.warning("⚠️ Profile busy: %s", exc)
+            return SessionVerificationResponse(
+                status="IN_USE",
+                message="This LinkedIn account is currently in use by another session. Please try again in a few minutes.",
+                account=LinkedInAccountResponse.model_validate(account),
+                requires_manual_verification=False
+            )
+
+        # Step 2: Open the persistent profile and verify the session inside it.
+        logger.info("🚀 Launching persistent browser for session verification...")
+        pw, _, context, page = await launch_persistent_browser(account, headless=True)
+        # Persist the fingerprint pinned at first-ever launch (no-op afterwards).
+        await db.commit()
+
+        logger.info("🔐 Verifying session validity...")
+        verification_result = await verify_session(page)
+        logger.info("🔍 Verification result: %s - %s",
+                    verification_result.status.value, verification_result.message)
+
+        # Step 3: Valid → done. The session lives on disk in the profile dir.
+        if verification_result.status == LinkedInSessionStatus.VALID:
+            logger.info("✅ LinkedIn session is ACTIVE in the persistent profile")
+
             await context.close()
-            await browser.close()
+            context = None
             await pw.stop()
-            
+            pw = None
+
             await db.refresh(account)
             return SessionVerificationResponse(
                 status="ACTIVE",
-                message="Your LinkedIn session is active and working. Fresh cookies saved.",
+                message="Your LinkedIn session is active and working.",
                 account=LinkedInAccountResponse.model_validate(account),
                 requires_manual_verification=False
             )
-        
-        # Step 5: Session expired or no cookies - attempt automatic relogin
-        logger.info("🔄 Session expired or invalid, attempting automatic relogin...")
-        logger.info("🔐 Decrypting credentials for relogin...")
-        
-        from core.security import decrypt_credential
+
+        # Step 4: Checkpoint / verification code required → hand the live
+        # browser to the pending-session flow. No password is used here.
+        if verification_result.status in (
+            LinkedInSessionStatus.CHECKPOINT,
+            LinkedInSessionStatus.VERIFICATION_REQUIRED,
+        ):
+            logger.warning("⚠️ LinkedIn requires verification — creating pending session")
+
+            session_id = session_manager.create_session(
+                linkedin_email=account.linkedin_email,
+                owner_email=owner_email,
+                label=account.label,
+                pw=pw,
+                browser=None,
+                context=context,
+                page=page,
+                encrypted_password=account.encrypted_password,
+                user_agent=account.user_agent,
+                profile_lock=lock,  # lock stays held while the context is open
+            )
+            lock = None            # ownership transferred to the pending session
+            pw = context = page = None  # resources now owned by session_manager
+            pending_session_created = True
+
+            account.status = LinkedInAccountStatus.PENDING_VERIFICATION
+            await db.commit()
+            await db.refresh(account)
+
+            try:
+                from core.email import send_verification_email
+                await send_verification_email(
+                    email=owner_email,
+                    code="MANUAL_VERIFICATION_REQUIRED"
+                )
+                logger.info("✅ Email notification sent to user: %s", owner_email)
+            except Exception as email_error:
+                logger.error(f"❌ Failed to send email notification: {str(email_error)}")
+
+            return SessionVerificationResponse(
+                status="PENDING_VERIFICATION",
+                message=f"LinkedIn requires verification. Session ID: {session_id}. Use this to submit the verification code.",
+                account=LinkedInAccountResponse.model_validate(account),
+                requires_manual_verification=True,
+                session_id=session_id
+            )
+
+        # Step 5: EXPIRED (or UNKNOWN) → credential-based relogin FALLBACK.
+        # This is the ONLY place encrypted_password is decrypted for an
+        # already-linked account — normal campaign runs and the valid-session
+        # path above never touch it. Relogin happens inside the SAME
+        # persistent profile, so the refreshed session is durable.
+        logger.info("🔄 Persistent-profile session expired, attempting credential relogin fallback...")
+
+        # Close the verification context first — the same profile dir cannot
+        # be open twice. (The profile lock stays held across both launches.)
+        await context.close()
+        context = None
+        await pw.stop()
+        pw = None
+
         password = decrypt_credential(account.encrypted_password)
-        
-        logger.info("🚀 Initiating fresh login with stored credentials...")
+
         session_status, session_resources = await linkedin_login(
             email=account.linkedin_email,
             password=password,
-            account=None,  # Don't auto-save cookies, handle manually
+            account=account,
             keep_alive=True,  # Keep alive for checkpoint/verification
-            user_agent=user_agent  # Use consistent user agent
         )
-        
-        pw, browser, context, page, user_agent = session_resources
-        
-        # Step 6: Handle login result
+        await db.commit()  # persist any fingerprint changes (no-op after first login)
+
         if session_status == LinkedInSessionStatus.VALID:
-            # Login successful - save storage state manually
-            logger.info("✅ Automatic relogin successful")
-            await save_session_state(context, account, user_agent)
-            
-            # Close browser since we're done
+            # Login successful — session persisted in the profile directory.
+            logger.info("✅ Credential relogin fallback successful")
+            pw, _, context, page, user_agent = session_resources
+
             await context.close()
-            await browser.close()
+            context = None
             await pw.stop()
-            
-            # Update account status to ACTIVE
+            pw = None
+
             account.status = LinkedInAccountStatus.ACTIVE
             await db.commit()
             await db.refresh(account)
-            
+
             logger.info("✅ Session refreshed successfully")
             return SessionVerificationResponse(
                 status="REFRESHED",
-                message="Your LinkedIn session expired but was successfully refreshed with new cookies.",
+                message="Your LinkedIn session expired but was successfully refreshed.",
                 account=LinkedInAccountResponse.model_validate(account),
                 requires_manual_verification=False
             )
-        
+
         elif session_status == LinkedInSessionStatus.VERIFICATION_REQUIRED or session_status == LinkedInSessionStatus.CHECKPOINT:
-            # Verification required - create pending session for manual intervention
+            # Verification required — create pending session for manual intervention
             logger.warning("⚠️ LinkedIn requires verification for relogin")
-            
-            # Create pending session in session manager
+            pw, browser, context, page, user_agent = session_resources
+
             session_id = session_manager.create_session(
                 linkedin_email=account.linkedin_email,
                 owner_email=owner_email,
@@ -720,16 +824,17 @@ async def verify_linkedin_session(
                 context=context,
                 page=page,
                 encrypted_password=account.encrypted_password,
-                user_agent=user_agent
+                user_agent=user_agent,
+                profile_lock=lock,
             )
-            
-            pending_session_created = True  # Mark that we have a pending session that should stay alive
-            
-            # Update account status
+            lock = None
+            pw = context = page = None
+            pending_session_created = True
+
             account.status = LinkedInAccountStatus.PENDING_VERIFICATION
             await db.commit()
             await db.refresh(account)
-            
+
             # Send email notification
             try:
                 from core.email import send_verification_email
@@ -740,7 +845,7 @@ async def verify_linkedin_session(
                 logger.info("✅ Email notification sent to user: %s", owner_email)
             except Exception as email_error:
                 logger.error(f"❌ Failed to send email notification: {str(email_error)}")
-            
+
             return SessionVerificationResponse(
                 status="PENDING_VERIFICATION",
                 message=f"LinkedIn {'checkpoint detected' if session_status == LinkedInSessionStatus.CHECKPOINT else 'requires verification'}. Session ID: {session_id}. Use this to submit verification code.",
@@ -748,37 +853,29 @@ async def verify_linkedin_session(
                 requires_manual_verification=True,
                 session_id=session_id
             )
-        
+
         else:
-            # Login failed - expired or unknown
-            logger.warning("⚠️ Automatic relogin failed with status: %s", session_status.value)
-            
-            # Close browser resources on failure
-            if context:
-                await context.close()
-            if browser:
-                await browser.close()
-            if pw:
-                await pw.stop()
-            
-            # Update account status to indicate failure
+            # Relogin failed — linkedin_login already closed its own browser
+            # resources on this path (session_resources is None).
+            logger.warning("⚠️ Credential relogin fallback failed with status: %s", session_status.value)
+
             account.status = LinkedInAccountStatus.FAILED
             await db.commit()
             await db.refresh(account)
-            
+
             error_message = "Automatic relogin failed"
             if session_status == LinkedInSessionStatus.EXPIRED:
                 error_message = "Invalid credentials during relogin"
             elif session_status == LinkedInSessionStatus.UNKNOWN:
                 error_message = "Unknown error during relogin"
-            
+
             return SessionVerificationResponse(
                 status="FAILED",
                 message=error_message,
                 account=LinkedInAccountResponse.model_validate(account),
                 requires_manual_verification=False
             )
-    
+
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
@@ -790,24 +887,14 @@ async def verify_linkedin_session(
             account=None,
             requires_manual_verification=False
         )
-    
+
     finally:
         # Only clean up Playwright resources if we didn't create a pending session
         # (pending sessions should stay alive for verification code entry)
         if not pending_session_created:
-            if page:
-                try:
-                    await page.close()
-                except:
-                    pass
             if context:
                 try:
                     await context.close()
-                except:
-                    pass
-            if browser:
-                try:
-                    await browser.close()
                 except:
                     pass
             if pw:
@@ -816,3 +903,6 @@ async def verify_linkedin_session(
                 except:
                     pass
             logger.debug("🧹 Playwright resources cleaned up")
+        # Release the profile lock unless it was transferred to a pending
+        # session (in which case lock is None here).
+        release_profile_lock(lock)

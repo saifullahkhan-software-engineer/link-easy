@@ -14,15 +14,37 @@ from core.config import settings
 def _get_aes_key() -> bytes:
     """
     Derives the 32-byte AES key from the hex-encoded CREDENTIAL_ENCRYPTION_KEY env var.
-    Raises a clear error at startup if the key is missing or malformed.
+    Raises a clear error if the key is missing or malformed. The key is read
+    from environment/config ONLY and is never logged or hardcoded.
     """
     raw = settings.CREDENTIAL_ENCRYPTION_KEY
-    key_bytes = bytes.fromhex(raw)
+    if not raw:
+        raise ValueError(
+            "CREDENTIAL_ENCRYPTION_KEY is not set. Generate one with: "
+            'python -c "import secrets; print(secrets.token_hex(32))"'
+        )
+    try:
+        key_bytes = bytes.fromhex(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "CREDENTIAL_ENCRYPTION_KEY is malformed — expected a 64-character hex "
+            "string (32 bytes). Generate one with: "
+            'python -c "import secrets; print(secrets.token_hex(32))"'
+        ) from exc
     if len(key_bytes) != 32:
         raise ValueError(
             "CREDENTIAL_ENCRYPTION_KEY must be exactly 32 bytes (64 hex characters)"
         )
     return key_bytes
+
+
+def validate_encryption_key() -> None:
+    """
+    Eager startup check — call once during API/worker boot so a missing or
+    malformed key fails LOUDLY at startup instead of silently corrupting or
+    exposing credentials mid-request.
+    """
+    _get_aes_key()
 
 
 def encrypt_credential(plaintext: str) -> str:

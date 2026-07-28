@@ -22,13 +22,14 @@ logging.basicConfig(
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.future import select
-from automation.session import load_session_state, verify_session, LinkedInSessionStatus
+from automation.session import verify_session, LinkedInSessionStatus
 from api.dependencies import get_db
 from models.linkedin_account import LinkedInAccount
 from sqlalchemy.ext.asyncio import AsyncSession
-from automation.browser import launch_browser
+from automation.browser import launch_persistent_browser
 from automation.human import human_click, human_type, human_scroll, random_idle_pause
 from automation.actions.like_post import visit_profile_and_like_post
+from worker.profile_lock import ProfileInUseError, acquire_profile_lock, release_profile_lock
 from core.logging_config import get_logger, should_log_debug
 
 logger = get_logger(__name__)
@@ -107,82 +108,56 @@ async def test_like_first_post(
 async def _run_like_test(email: str, password: str, profile_url: str, db: AsyncSession) -> dict:
     """
     Full Playwright flow:
-      1. Launch stealth browser
-      2. Load session from cookies
+      1. Open the account's durable persistent browser profile
+         (the session lives on disk in the profile dir — the password
+         argument is unused; persistent sessions never re-enter credentials)
+      2. Verify the session is live
       3. Navigate to profile
       4. Like first post
       5. Return result dict
     """
-   
+
     # ── Step 1: Get the account based on email  ───────────────────────────
     logger.info(f"🔍 Looking up LinkedIn account in database for email: {email}")
     result = await db.execute(
             select(LinkedInAccount).where(LinkedInAccount.linkedin_email == email)
         )
     account = result.scalars().first()
-        
+
     if not account:
             logger.warning(f"⚠️ No LinkedIn account found in database for email: {email}")
             return {
                 "visited": False, "liked_post": False, "profile_name": None, "post_url": None,
                 "error": f"No LinkedIn account found in DB for {email}",
             }
-    
-    logger.info("🌐 Launching Playwright browser...")
-    # Use saved User-Agent for session consistency
-    user_agent = account.user_agent if account else None
-    
-    # Load storage state before creating context
-    logger.info("🔓 Loading storage state from database...")
-    storage_state = await load_session_state(account)
-    if not storage_state:
-        logger.warning("⚠️ No storage state found in database for this account")
+
+    # ── Step 2: Acquire the per-account profile lock (fail fast) ──────────
+    try:
+        lock = acquire_profile_lock(account.id, blocking_timeout=0)
+    except ProfileInUseError as exc:
+        logger.warning(f"⚠️ Profile busy: {exc}")
         return {
             "visited": False, "liked_post": False, "profile_name": None, "post_url": None,
-            "error": "No storage state found for this account. Please add the account first.",
+            "error": "Account is currently in use by another session. Please try again in a few minutes.",
         }
-    
-    pw, browser, context, page, _ = await launch_browser(user_agent=user_agent, storage_state=storage_state)
-    logger.info("✅ Browser launched successfully with storage state")
+
+    logger.info("🌐 Launching persistent browser profile...")
+    pw, _, context, page = await launch_persistent_browser(account, headless=True)
+    # Persist the fingerprint pinned at first-ever launch (no-op afterwards).
+    await db.commit()
+    logger.info("✅ Persistent browser profile launched")
 
     try:
-        #  Direct login 
-
-        # ── Step 1: Navigate to LinkedIn login page ───────────────────────────
-        # The code below is commented out because the primary test path uses cookies.
-        # await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-        # await random_idle_pause(2, 4)
-        #
-        # # ── Step 2: Fill in email ──────────────────────────────────────────
-        # await human_type(page, "#username", email)
-        # await random_idle_pause(0.5, 1.5)
-        #
-        # # ── Step 3: Fill in password ───────────────────────────────────────
-        # await human_type(page, "#password", password)
-        # await random_idle_pause(0.8, 2.0)
-        #
-        # # ── Step 4: Click Sign In ──────────────────────────────────────────
-        # await human_click(page, "button[type='submit']")
-        # await random_idle_pause(4, 7)  # Wait for redirect + page load
-
-        # ── Step 5: Verify login succeeded ───────────────────────────────────
-        # The code below uses session cookies instead of direct login.
-
-        # using cookies from an account 
-
-      
-       
-        logger.info(f"✅ Found LinkedIn account in database. Storage state updated at: {account.cookies_updated_at}")
         if should_log_debug():
-            logger.debug(f"Has encrypted storage state: {bool(account.encrypted_storage_state)}")
             logger.debug(f"Account status: {account.status}")
-            logger.debug(f"Storage state updated at: {account.cookies_updated_at}")
-        
+            logger.debug(f"Profile dir: {account.profile_dir}")
+
         # verify session
         logger.info("🔐 Verifying session validity by navigating to feed...")
         verification_result = await verify_session(page)
-        logger.debug(f"Current URL after verification: {page.url}")
-        logger.debug(f"Session status: {verification_result.status.value} - {verification_result.message}")
+        if should_log_debug():
+            logger.debug(f"Current URL after verification: {page.url}")
+            logger.debug(f"Session status: {verification_result.status.value} - {verification_result.message}")
 
         if verification_result.status != LinkedInSessionStatus.VALID:
             logger.error(f"❌ Session verification failed. Status: {verification_result.status.value}")
@@ -213,6 +188,6 @@ async def _run_like_test(email: str, password: str, profile_url: str, db: AsyncS
         # Always close browser — no zombie processes
         logger.info("🧹 Closing browser and cleaning up resources...")
         await context.close()
-        await browser.close()
         await pw.stop()
+        release_profile_lock(lock)
         logger.info("✅ Cleanup complete")

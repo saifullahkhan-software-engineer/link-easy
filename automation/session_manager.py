@@ -35,6 +35,12 @@ class PendingLoginSession:
     encrypted_password: Optional[str] = None
     user_agent: Optional[str] = None  # User-Agent used during login
 
+    # Per-account profile lock held for the lifetime of this pending session.
+    # The browser context (and therefore the Chromium user-data-dir) stays
+    # open while awaiting the verification code, so the lock must stay held
+    # too — it is released in cleanup_session().
+    profile_lock: Any = None
+
     def is_expired(self, timeout_minutes: int = 15) -> bool:
         """Check if session has expired (default 15 minutes)."""
         return datetime.now(timezone.utc) - self.created_at > timedelta(minutes=timeout_minutes)
@@ -67,10 +73,15 @@ class SessionManager:
         page: Any,
         encrypted_password: str,
         user_agent: str,
+        profile_lock: Any = None,
     ) -> str:
         """
         Create a new pending login session.
         Returns the session ID for later retrieval.
+
+        profile_lock: optional Redis profile lock (worker/profile_lock.py)
+        whose ownership transfers to this pending session — it stays held
+        while the browser context is open and is released on cleanup.
         """
         session_id = str(uuid.uuid4())
 
@@ -85,6 +96,7 @@ class SessionManager:
             page=page,
             encrypted_password=encrypted_password,
             user_agent=user_agent,
+            profile_lock=profile_lock,
         )
 
         self._sessions[session_id] = session
@@ -151,6 +163,19 @@ class SessionManager:
             except Exception:
                 logger.warning(
                     "Failed to stop Playwright for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+
+        # Release the per-account profile lock now that the browser context
+        # (and its grip on the Chromium user-data-dir) is closed.
+        if session.profile_lock is not None:
+            try:
+                from worker.profile_lock import release_profile_lock
+                release_profile_lock(session.profile_lock)
+            except Exception:
+                logger.warning(
+                    "Failed to release profile lock for session %s",
                     session_id,
                     exc_info=True,
                 )
