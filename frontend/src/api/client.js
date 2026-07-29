@@ -1,26 +1,60 @@
 import axios from 'axios';
 
 export const TOKEN_KEYS = {
-  ACCESS: 'rp.access_token',
-  REFRESH: 'rp.refresh_token',
-  EMAIL: 'rp.user_email',
-  NAME: 'rp.user_name',
+  ACCESS: 'le.access_token',
+  REFRESH: 'le.refresh_token',
+  EMAIL: 'le.user_email',
+  NAME: 'le.user_name',
+  // backward compat: also clear old rp.* keys on logout
+  LEGACY_ACCESS: 'rp.access_token',
+  LEGACY_REFRESH: 'rp.refresh_token',
+  LEGACY_EMAIL: 'rp.user_email',
+  LEGACY_NAME: 'rp.user_name',
 };
 
-export const getAccessToken = () => localStorage.getItem(TOKEN_KEYS.ACCESS);
-export const getRefreshToken = () => localStorage.getItem(TOKEN_KEYS.REFRESH);
-export const getUserEmail = () => localStorage.getItem(TOKEN_KEYS.EMAIL);
-export const getUserName = () => localStorage.getItem(TOKEN_KEYS.NAME);
+function clearLegacyKeys() {
+  ['rp.access_token', 'rp.refresh_token', 'rp.user_email', 'rp.user_name'].forEach((k) => {
+    try {
+      localStorage.removeItem(k);
+    } catch {}
+  });
+}
+
+function getWithLegacy(newKey, legacyKey) {
+  try {
+    const v = localStorage.getItem(newKey);
+    if (v) return v;
+    const legacy = localStorage.getItem(legacyKey);
+    if (legacy) {
+      // migrate
+      localStorage.setItem(newKey, legacy);
+      localStorage.removeItem(legacyKey);
+      return legacy;
+    }
+  } catch {}
+  return null;
+}
+
+export const getAccessToken = () => getWithLegacy(TOKEN_KEYS.ACCESS, TOKEN_KEYS.LEGACY_ACCESS);
+export const getRefreshToken = () => getWithLegacy(TOKEN_KEYS.REFRESH, TOKEN_KEYS.LEGACY_REFRESH);
+export const getUserEmail = () => getWithLegacy(TOKEN_KEYS.EMAIL, TOKEN_KEYS.LEGACY_EMAIL);
+export const getUserName = () => getWithLegacy(TOKEN_KEYS.NAME, TOKEN_KEYS.LEGACY_NAME);
 
 export function storeSession({ access_token, refresh_token, email, name }) {
-  if (access_token) localStorage.setItem(TOKEN_KEYS.ACCESS, access_token);
-  if (refresh_token) localStorage.setItem(TOKEN_KEYS.REFRESH, refresh_token);
-  if (email) localStorage.setItem(TOKEN_KEYS.EMAIL, email);
-  if (name) localStorage.setItem(TOKEN_KEYS.NAME, name);
+  try {
+    if (access_token) localStorage.setItem(TOKEN_KEYS.ACCESS, access_token);
+    if (refresh_token) localStorage.setItem(TOKEN_KEYS.REFRESH, refresh_token);
+    if (email) localStorage.setItem(TOKEN_KEYS.EMAIL, email);
+    if (name) localStorage.setItem(TOKEN_KEYS.NAME, name);
+    clearLegacyKeys();
+  } catch {}
 }
 
 export function clearSession() {
-  Object.values(TOKEN_KEYS).forEach((k) => localStorage.removeItem(k));
+  try {
+    Object.values(TOKEN_KEYS).forEach((k) => localStorage.removeItem(k));
+    clearLegacyKeys();
+  } catch {}
 }
 
 /**

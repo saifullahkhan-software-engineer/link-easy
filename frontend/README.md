@@ -1,4 +1,4 @@
-# ReachPilot — LinkedIn Automation Frontend
+# LinkEasy — LinkedIn Automation Frontend
 
 React 18 + Vite single-page frontend for the FastAPI LinkedIn outreach
 automation backend in this repository (base path `/api/v1`).

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { linkedinApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
@@ -35,7 +36,7 @@ function EditAccountModal({ open, account, onClose, onSaved }) {
     setBusy(true);
     try {
       const payload = {};
-      if (form.label.trim() !== (account.label || '')) payload.label = form.label.trim(); // '' clears the label
+      if (form.label.trim() !== (account.label || '')) payload.label = form.label.trim();
       if (form.linkedin_email.trim() && form.linkedin_email.trim() !== account.linkedin_email)
         payload.linkedin_email = form.linkedin_email.trim();
       if (form.linkedin_password) payload.linkedin_password = form.linkedin_password;
@@ -141,8 +142,9 @@ export default function LinkedInAccountPage() {
         setAccount(null);
         setNotConnected(true);
       } else {
+        // Don't block the user - allow them to still see the connect form
         setAccount(null);
-        setNotConnected(false);
+        setNotConnected(true);
         setLoadError(getErrorMessage(err, 'Could not load your LinkedIn account.'));
       }
     } finally {
@@ -174,6 +176,10 @@ export default function LinkedInAccountPage() {
   /* ------------------------------ connect ------------------------------ */
   async function connect(e) {
     e.preventDefault();
+    if (!ownerEmail) {
+      toast.error('Owner email missing — please log in again.');
+      return;
+    }
     setConnecting(true);
     setConnectError(null);
     try {
@@ -199,7 +205,6 @@ export default function LinkedInAccountPage() {
         setConnectError(data.message || 'Unexpected response from the server.');
       }
     } catch (err) {
-      // 400 — login failed outright (bad creds, checkpoint, bot detection)
       setConnectError(getErrorMessage(err, 'LinkedIn login failed.'));
     } finally {
       setConnecting(false);
@@ -208,6 +213,10 @@ export default function LinkedInAccountPage() {
 
   /* --------------------------- refresh session -------------------------- */
   async function refreshSession() {
+    if (!ownerEmail) {
+      toast.error('Owner email missing.');
+      return;
+    }
     setRefreshing(true);
     try {
       const { data } = await linkedinApi.verifySession(ownerEmail);
@@ -224,6 +233,9 @@ export default function LinkedInAccountPage() {
         case 'PENDING_VERIFICATION':
           toast('LinkedIn needs a verification code to finish refreshing.', { icon: '🔐' });
           setVerification({ open: true, sessionId: data.session_id });
+          break;
+        case 'IN_USE':
+          toast.error(data.message || 'Account is busy.');
           break;
         case 'FAILED':
         default:
@@ -258,6 +270,7 @@ export default function LinkedInAccountPage() {
       if (data?.account) setAccount(data.account);
       else fetchAccount();
       setNotConnected(false);
+      toast.success('Verification succeeded — account is now active!');
     }
   }
 
@@ -278,45 +291,71 @@ export default function LinkedInAccountPage() {
     );
   }
 
-  if (loadError) {
-    return (
-      <div className="max-w-3xl">
-        <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
-        <div className="card mt-6 border-red-500/30 p-6 text-center">
-          <p className="text-sm font-medium text-red-300">{loadError}</p>
-          <p className="mt-1 text-xs text-zinc-500">
-            The account could not be loaded — the backend may be unreachable.
-          </p>
-          <button
-            onClick={() => {
-              setLoading(true);
-              fetchAccount();
-            }}
-            className="btn-secondary mt-4"
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const hasAccount = Boolean(account);
 
   return (
     <div className="max-w-3xl">
-      <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
-      <p className="mt-1 text-sm text-zinc-400">
-        Connect the LinkedIn profile your campaigns will run from. Login happens in a real browser
-        on our side, so it can take a moment.
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
+          <p className="mt-1 text-sm text-zinc-400">
+            Connect the LinkedIn profile your campaigns will run from. Login happens in a real browser
+            on our side, so it can take a moment.
+          </p>
+        </div>
+        {!hasAccount && (
+          <Link to="/" className="btn-secondary text-xs">
+            ← Back to home
+          </Link>
+        )}
+      </div>
 
-      {notConnected ? (
+      {loadError && (
+        <div className="card mt-6 border-amber-500/30 bg-amber-500/5 p-4">
+          <div className="flex gap-3">
+            <span className="text-amber-400">⚠</span>
+            <div className="flex-1">
+              <p className="text-sm font-medium text-amber-200">{loadError}</p>
+              <p className="mt-1 text-xs text-zinc-400">
+                You can still try to connect your account below. If the problem persists, check if the
+                backend is running.
+              </p>
+              <button
+                onClick={() => {
+                  setLoading(true);
+                  fetchAccount();
+                }}
+                className="btn-secondary mt-3 text-xs"
+              >
+                Retry loading
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!hasAccount ? (
         /* --------------------------- connect form --------------------------- */
         <div className="card mt-6 p-6">
-          <h2 className="text-lg font-semibold text-zinc-100">Connect your LinkedIn account</h2>
-          <p className="mt-1 text-sm text-zinc-500">
-            Your password is sent over HTTPS and stored only AES-256 encrypted. We never display it
-            again.
-          </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-zinc-100">Connect your LinkedIn account</h2>
+              <p className="mt-1 text-sm text-zinc-500">
+                Your password is sent over HTTPS and stored only AES-256 encrypted. We never display it again.
+              </p>
+            </div>
+            <div className="hidden sm:flex h-10 w-10 items-center justify-center rounded-xl bg-accent-500/10 text-accent-300">
+              <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
+              </svg>
+            </div>
+          </div>
+
+          {!ownerEmail && (
+            <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              No owner email detected — please log out and log back in. Your account session may have expired.
+            </div>
+          )}
 
           <form onSubmit={connect} className="mt-5 space-y-4">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -377,10 +416,22 @@ export default function LinkedInAccountPage() {
               </div>
             )}
 
-            <button type="submit" className="btn-primary" disabled={connecting}>
-              {connecting && <Spinner />}
-              {connecting ? 'Connecting…' : 'Connect account'}
-            </button>
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <button type="submit" className="btn-primary px-6" disabled={connecting}>
+                {connecting && <Spinner />}
+                {connecting ? 'Connecting…' : 'Connect LinkedIn account'}
+              </button>
+              <span className="text-xs text-zinc-500">Takes ~10-30s • Secure & encrypted</span>
+            </div>
+
+            <div className="rounded-lg bg-surface-800/60 p-3 text-xs leading-relaxed text-zinc-400">
+              <p className="font-medium text-zinc-300">First time?</p>
+              <ul className="mt-1 list-disc pl-4 space-y-0.5">
+                <li>Use the email & password you normally use on linkedin.com</li>
+                <li>If LinkedIn asks for a PIN, you'll get a popup to enter it</li>
+                <li>You can disconnect anytime from this page</li>
+              </ul>
+            </div>
           </form>
         </div>
       ) : (
@@ -399,6 +450,9 @@ export default function LinkedInAccountPage() {
                 {account.label && <p className="mt-0.5 text-sm text-zinc-400">{account.label}</p>}
               </div>
             </div>
+            <button onClick={fetchAccount} className="btn-secondary text-xs">
+              ↻ Refresh
+            </button>
           </div>
 
           <dl className="mt-5 grid grid-cols-1 gap-4 border-t border-surface-700 pt-5 text-sm sm:grid-cols-2">
@@ -414,6 +468,10 @@ export default function LinkedInAccountPage() {
               <dt className="text-xs uppercase tracking-wide text-zinc-500">Last updated</dt>
               <dd className="mt-0.5 text-zinc-300">{formatDate(account.updated_at)}</dd>
             </div>
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Status details</dt>
+              <dd className="mt-0.5 text-zinc-300 capitalize">{account.status?.replace('_',' ')}</dd>
+            </div>
           </dl>
 
           {(account.status === 'failed' || account.status === 'suspended') && (
@@ -421,6 +479,24 @@ export default function LinkedInAccountPage() {
               {account.status === 'suspended'
                 ? 'LinkedIn has suspended this account. Log in via LinkedIn directly to resolve it, then refresh the session.'
                 : 'The last login attempt failed. Update the credentials and refresh the session to retry.'}
+              <div className="mt-2 flex gap-2">
+                <button onClick={() => setEditOpen(true)} className="btn-secondary text-xs">
+                  Update credentials
+                </button>
+                <button onClick={refreshSession} className="btn-primary text-xs">
+                  Retry now
+                </button>
+              </div>
+            </div>
+          )}
+
+          {account.status === 'pending_verification' && (
+            <div className="mt-5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+              <p className="font-medium">Verification needed</p>
+              <p className="mt-1 text-amber-200/80">LinkedIn requested an extra check. Refresh to trigger code entry, or check your email.</p>
+              <button onClick={refreshSession} className="btn-primary mt-3 text-xs">
+                Refresh & verify
+              </button>
             </div>
           )}
 
@@ -449,6 +525,35 @@ export default function LinkedInAccountPage() {
             >
               Disconnect
             </button>
+            <Link to="/app/campaigns/create" className="btn-secondary">
+              Create campaign →
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {/* Always-visible help card when no account, plus quick actions */}
+      {!hasAccount && !loading && (
+        <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="card p-4">
+            <h3 className="text-sm font-semibold text-zinc-200">How it works</h3>
+            <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-zinc-400">
+              <li>Enter your LinkedIn email + password</li>
+              <li>We log in in a secure cloud browser</li>
+              <li>If 2FA appears, enter the code here</li>
+              <li>Start creating campaigns immediately</li>
+            </ol>
+          </div>
+          <div className="card p-4">
+            <h3 className="text-sm font-semibold text-zinc-200">Need help?</h3>
+            <p className="mt-2 text-xs text-zinc-400">
+              If you get stuck at login, LinkedIn may have triggered a checkpoint.
+              Try logging in manually on linkedin.com first, then return here.
+            </p>
+            <div className="mt-3 flex gap-2">
+              <Link to="/" className="btn-secondary text-xs">Home</Link>
+              <button onClick={fetchAccount} className="btn-secondary text-xs">Retry</button>
+            </div>
           </div>
         </div>
       )}

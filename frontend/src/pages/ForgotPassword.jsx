@@ -30,7 +30,7 @@ export default function ForgotPassword() {
         <Link to="/" className="mb-8 flex items-center justify-center gap-2.5">
           <img src="/favicon.svg" alt="" className="h-8 w-8" />
           <span className="text-xl font-bold tracking-tight">
-            Reach<span className="text-accent-400">Pilot</span>
+            Link<span className="text-accent-400">Easy</span>
           </span>
         </Link>
 
