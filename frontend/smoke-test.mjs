@@ -16,10 +16,10 @@ const bundleName = readdirSync(assetsDir).find((f) => f.startsWith('index-') && 
 if (!bundleName) throw new Error('dist bundle not found — run `npm run build` first');
 
 const AUTH_TOKENS = {
-  'rp.access_token': 'fake-access-token',
-  'rp.refresh_token': 'fake-refresh-token',
-  'rp.user_email': 'owner@test.dev',
-  'rp.user_name': 'Test Owner',
+  'le.access_token': 'fake-access-token',
+  'le.refresh_token': 'fake-refresh-token',
+  'le.user_email': 'owner@test.dev',
+  'le.user_name': 'Test Owner',
 };
 
 const ACTIVE_ACCOUNT = {
@@ -102,7 +102,7 @@ const CASES = [
     path: '/app/account',
     storage: AUTH_TOKENS,
     api: { 'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }) },
-    mustContain: ['Connect your LinkedIn account', 'Connect account', 'LinkedIn password'],
+    mustContain: ['Connect your LinkedIn account', 'Connect LinkedIn account', 'LinkedIn password'],
   },
   {
     name: 'account page — active account renders card + actions',

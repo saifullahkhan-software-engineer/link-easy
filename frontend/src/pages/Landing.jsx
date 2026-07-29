@@ -111,12 +111,12 @@ export default function Landing() {
     <div className="min-h-screen bg-surface-950">
       {/* Nav */}
       <header className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
-        <div className="flex items-center gap-2.5">
+        <Link to="/" className="flex items-center gap-2.5">
           <img src="/favicon.svg" alt="" className="h-7 w-7" />
-          <span className="text-lg font-bold tracking-tight">
-            Reach<span className="text-accent-400">Pilot</span>
+          <span className="text-lg font-bold tracking-tight text-zinc-50">
+            Link<span className="text-accent-400">Easy</span>
           </span>
-        </div>
+        </Link>
         <nav className="flex items-center gap-3">
           {isAuthenticated ? (
             <Link to="/app" className="btn-primary">
@@ -149,7 +149,7 @@ export default function Landing() {
             </span>
           </h1>
           <p className="mt-6 max-w-lg text-lg leading-relaxed text-zinc-400">
-            ReachPilot automates connection requests, follow-up sequences, and profile visits with
+            LinkEasy automates connection requests, follow-up sequences, and profile visits with
             conservative, human-like pacing — so you fill your pipeline without risking your account.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-4">
@@ -219,10 +219,10 @@ export default function Landing() {
       {/* Footer */}
       <footer className="border-t border-surface-800">
         <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 px-6 py-8 text-sm text-zinc-500 sm:flex-row">
-          <div className="flex items-center gap-2">
+          <Link to="/" className="flex items-center gap-2 hover:text-zinc-300 transition">
             <img src="/favicon.svg" alt="" className="h-5 w-5 opacity-70" />
-            <span>ReachPilot</span>
-          </div>
+            <span>LinkEasy</span>
+          </Link>
           <p>Automate responsibly. Respect LinkedIn&apos;s terms and your prospects&apos; time.</p>
         </div>
       </footer>
