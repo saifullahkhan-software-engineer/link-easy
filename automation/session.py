@@ -251,8 +251,7 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
 
         # ── Step 1: Navigate to LinkedIn login page ───────────────────────────
         logger.info("🌐 Navigating to LinkedIn Login Portal...")
-        # TODO: Adjust timeout for deployment - currently increased for slow development internet
-        await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=80000)
+        await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30000)
         # await page.wait_for_load_state("networkidle", timeout=120000)
         await random_idle_pause(2, 4)
         if should_take_screenshots():
@@ -373,7 +372,7 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
             submit_locator = await find_visible_button_by_text(page, "Sign in")
             logger.info(f"Dynamic locator found for Sign In button")
             await find_and_click_resilient(page, [submit_locator], "Sign In Button")
-        await random_idle_pause(4, 7)  # Wait for redirect + page load
+        await random_idle_pause(2, 4)  # Wait for redirect + page load
 
         # ── Step 5: Verify login result and determine status ───────────────────
         # URL may contain challenge tokens — only log it in debug mode.
@@ -453,8 +452,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
     Returns SessionVerificationResult with detailed status.
     """
     logger.info("🔍 Navigating to LinkedIn feed to verify session...")
-    # TODO: Decrease timeout for production (currently 120s for local network development)
-    await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=120000)
+    await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
     # URL may contain challenge tokens — only log it in debug mode.
     if should_log_debug():
         logger.debug(f"Current URL after navigation: {page.url}")
@@ -518,7 +516,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
 
     # Check for feed-specific element (valid session)
     try:
-        await page.wait_for_selector("[data-control-name='nav.home']", timeout=5000)
+        await page.wait_for_selector("[data-control-name='nav.home']", timeout=3000)
         logger.info("✅ Session valid - found home navigation element")
         return SessionVerificationResult(
             status=LinkedInSessionStatus.VALID,
@@ -528,7 +526,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
     except Exception:
         # Try alternate feed indicator
         try:
-            await page.wait_for_selector(".feed-identity-module", timeout=5000)
+            await page.wait_for_selector(".feed-identity-module", timeout=3000)
             logger.info("✅ Session valid - found feed identity module")
             return SessionVerificationResult(
                 status=LinkedInSessionStatus.VALID,
@@ -538,7 +536,7 @@ async def verify_session(page: Page) -> SessionVerificationResult:
         except Exception:
             # Try checking for any LinkedIn navigation element
             try:
-                await page.wait_for_selector(".global-nav", timeout=5000)
+                await page.wait_for_selector(".global-nav", timeout=3000)
                 logger.info("✅ Session valid - found global navigation")
                 return SessionVerificationResult(
                     status=LinkedInSessionStatus.VALID,

@@ -24,6 +24,7 @@ const navItems = [
   {
     to: '/app/campaigns',
     label: 'Campaign Status',
+    end: true,   // exact match only — prevents double-highlight with /campaigns/create
     icon: (
       <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
         <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5 14.25 3l6.75 6.75-10.5 10.5H3.75v-6.75ZM12.75 6 18 11.25" />
@@ -65,6 +66,7 @@ export default function DashboardLayout() {
             <NavLink
               key={item.to}
               to={item.to}
+              end={item.end}
               className={({ isActive }) =>
                 `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${
                   isActive

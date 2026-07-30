@@ -63,7 +63,7 @@ async def human_click(page: Page, target: str | Locator | ElementHandle) -> None
     # Handle different input types
     if isinstance(target, str):
         try:
-            element = await page.wait_for_selector(target, timeout=10000)
+            element = await page.wait_for_selector(target, timeout=5000)
         except Exception as e:
             # On failure, save a screenshot for debugging
             screenshot_path = f"error_screenshot_{random.randint(1000, 9999)}.png"
@@ -158,7 +158,7 @@ async def find_and_type_resilient(page: Page, selectors: list[str] | list[Locato
         try:
             if isinstance(target, str):
                 # Check if selector is attached to DOM (not necessarily visible yet)
-                await page.wait_for_selector(target, timeout=5000, state="attached")
+                await page.wait_for_selector(target, timeout=3000, state="attached")
                 if should_log_debug():
                     logger.debug(f"Found active selector for {field_name}: '{target}'")
                 await human_type(page, target, value)
@@ -193,7 +193,7 @@ async def find_and_click_resilient(page: Page, selectors: list[str] | list[Locat
     for target in selectors:
         try:
             if isinstance(target, str):
-                element = await page.wait_for_selector(target, timeout=5000, state="attached")
+                element = await page.wait_for_selector(target, timeout=3000, state="attached")
                 if element:
                     if should_log_debug():
                         logger.debug(f"Found active selector for {button_name}: '{target}'")

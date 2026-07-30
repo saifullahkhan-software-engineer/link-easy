@@ -81,8 +81,7 @@ async def test_like_first_post(
                 profile_url=payload.profile_url,
                 db= db
             ),
-            # TODO: Decrease timeout for production (currently 300s for local network development)
-            timeout=300,  # 5 minute timeout max
+            timeout=120,  # 2 minute timeout max
         )
         logger.info(f"✅ LinkedIn automation test completed successfully")
         return LikeTestResponse(**result)
