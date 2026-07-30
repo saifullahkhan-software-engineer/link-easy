@@ -580,10 +580,10 @@ export default function CampaignCreatePage() {
                             <button
                               type="button"
                               onClick={() => removeStep(step.id)}
-                              className="rounded-lg p-1.5 text-zinc-500 hover:bg-surface-800 hover:text-red-400 transition"
-                              title="Delete Step"
+                              className="rounded-lg p-1.5 text-zinc-500 hover:bg-red-500/10 hover:text-red-400 transition"
+                              title="Delete this step"
                             >
-                              <svg className="h-4.5 w-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.34 9m-4.78 0L9 9m4.77-3.07V19c0 .11-.04.2-.11.28a.33.33 0 0 1-.28.11H9.62a.33.33 0 0 1-.28-.11.33.33 0 0 1-.11-.28V5.93M4.5 5.93h15M10.12 3h3.76" />
                               </svg>
                             </button>

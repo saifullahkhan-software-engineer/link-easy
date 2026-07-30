@@ -952,6 +952,14 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
         logger.info("✅ Session valid, starting lead processing")
         
         for i, (lead, campaign, step) in enumerate(due_leads):
+            # Capture plain-string IDs up front so the exception handler
+            # never needs to touch ORM attributes (which can trigger lazy
+            # loads on a broken session after a failed commit/flush).
+            lead_id = lead.id
+            campaign_id = campaign.id
+            step_type_val = step.step_type.value
+            step_order = step.step_order
+
             try:
                 # If lead hasn't started (current_step is NULL/0), assign to step 1
                 if lead.current_step is None or lead.current_step == 0:
@@ -959,11 +967,11 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                     db.flush()
                 
                 # Ensure we're processing the correct step for this lead
-                if step.step_order != lead.current_step:
-                    logger.warning(f"⚠️ Step mismatch for lead {lead.id}: step_order={step.step_order}, current_step={lead.current_step}, skipping")
+                if step_order != lead.current_step:
+                    logger.warning(f"⚠️ Step mismatch for lead {lead_id}: step_order={step_order}, current_step={lead.current_step}, skipping")
                     continue
                 
-                logger.info(f"📋 Processing lead {lead.id} (step {step.step_order}: {step.step_type.value})")
+                logger.info(f"📋 Processing lead {lead_id} (step {step_order}: {step_type_val})")
                 
                 # Execute the appropriate action
                 result = await _execute_step_action(step.step_type, account, lead, campaign, page)
@@ -972,9 +980,9 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                 job_id = str(uuid.uuid4())
                 job = CampaignJob(
                     id=job_id,
-                    campaign_id=campaign.id,
-                    lead_id=lead.id,
-                    step_type=step.step_type.value,
+                    campaign_id=campaign_id,
+                    lead_id=lead_id,
+                    step_type=step_type_val,
                     status=JobStatus.DONE,
                     celery_task_id=None,
                     started_at=datetime.now(timezone.utc),
@@ -984,11 +992,11 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                 
                 # Update lead status and current_step
                 _update_lead_status(lead, step.step_type)
-                lead.current_step = step.step_order + 1
+                lead.current_step = step_order + 1
                 lead.last_action_at = datetime.now(timezone.utc)
                 
                 db.commit()
-                results.append({"lead_id": lead.id, "result": result})
+                results.append({"lead_id": lead_id, "result": result})
 
                 # No explicit "save session" step: Chromium already persisted
                 # any cookie/storage changes to the profile dir on disk as a
@@ -999,30 +1007,42 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                     await _interstitial_pause(page, per_action_seconds)
             
             except SessionFailureException as exc:
-                # Session failure - suspend account and stop session
-                account.status = LinkedInAccountStatus.SUSPENDED
-                account.updated_at = datetime.now(timezone.utc)
-                lead.status = LeadStatus.FAILED
-                db.commit()
+                # Session failure - suspend account and stop session.
+                # Rollback first so the session is usable for the commit below.
+                db.rollback()
+                try:
+                    account.status = LinkedInAccountStatus.SUSPENDED
+                    account.updated_at = datetime.now(timezone.utc)
+                    lead.status = LeadStatus.FAILED
+                    db.commit()
+                except Exception:
+                    db.rollback()
                 logger.error(f"❌ Session failure, suspending account: {exc}")
                 raise
             
             except Exception as exc:
-                # Individual lead failure - log and continue
-                logger.error(f"❌ Failed to process lead {lead.id}: {exc}")
-                job = CampaignJob(
-                    id=str(uuid.uuid4()),
-                    campaign_id=campaign.id,
-                    lead_id=lead.id,
-                    step_type=step.step_type.value,
-                    status=JobStatus.FAILED,
-                    error_message=str(exc),
-                    celery_task_id=None,
-                    started_at=datetime.now(timezone.utc),
-                    completed_at=datetime.now(timezone.utc)
-                )
-                db.add(job)
-                db.commit()
+                # Individual lead failure - log and continue.
+                # IMPORTANT: Roll back the broken transaction BEFORE touching
+                # any ORM attributes or issuing new statements.
+                db.rollback()
+                logger.error(f"❌ Failed to process lead {lead_id}: {exc}")
+                try:
+                    job = CampaignJob(
+                        id=str(uuid.uuid4()),
+                        campaign_id=campaign_id,
+                        lead_id=lead_id,
+                        step_type=step_type_val,
+                        status=JobStatus.FAILED,
+                        error_message=str(exc),
+                        celery_task_id=None,
+                        started_at=datetime.now(timezone.utc),
+                        completed_at=datetime.now(timezone.utc)
+                    )
+                    db.add(job)
+                    db.commit()
+                except Exception as db_exc:
+                    logger.error(f"❌ Failed to record failed job for lead {lead_id}: {db_exc}")
+                    db.rollback()
                 continue
 
     finally:

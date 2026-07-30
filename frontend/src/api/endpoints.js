@@ -12,8 +12,9 @@ export const authApi = {
 
 /* ------------------------------- linkedin -------------------------------- */
 // LinkedIn login/refresh calls drive real browser automation on the backend
-// and can take 30s+ — give them generous timeouts.
-const LINKEDIN_TIMEOUT = 150_000;
+// and can take 30-60s — give them enough headroom without letting the user
+// stare at a spinner for too long when something goes wrong.
+const LINKEDIN_TIMEOUT = 90_000;
 
 export const linkedinApi = {
   connect: (payload) => api.post('/linkedin/account', payload, { timeout: LINKEDIN_TIMEOUT }),

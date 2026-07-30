@@ -41,9 +41,8 @@ async def visit_profile(page: Page, profile_url: str) -> dict:
     result = {"visited": False, "profile_name": None, "error": None}
 
     try:
-        # TODO: Decrease timeout for production (currently 120s for local network development)
-        await page.goto(profile_url, wait_until="domcontentloaded", timeout=120000)
-        await random_idle_pause(3, 6)
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+        await random_idle_pause(2, 4)
 
         # Verify we landed on a profile page (not a 404 or login redirect)
         if "/in/" not in page.url:
@@ -63,7 +62,7 @@ async def visit_profile(page: Page, profile_url: str) -> dict:
         # Scroll through the profile naturally (as if reading)
         for _ in range(random.randint(2, 4)):
             await human_scroll(page)
-            await random_idle_pause(1.5, 4.0)
+            await random_idle_pause(1, 2.5)
 
         # Hover on some profile sections (experience, skills) — adds realism
         sections = await page.query_selector_all("section.artdeco-card")
@@ -72,7 +71,7 @@ async def visit_profile(page: Page, profile_url: str) -> dict:
             box = await hover_target.bounding_box()
             if box:
                 await human_mouse_move(page, box["x"] + 50, box["y"] + 20)
-                await random_idle_pause(1.0, 3.0)
+                await random_idle_pause(0.5, 1.5)
 
     except Exception as e:
         result["error"] = str(e)
@@ -97,9 +96,8 @@ async def like_recent_post(page: Page, profile_url: str) -> dict:
 
     try:
         activity_url = profile_url.rstrip("/") + "/recent-activity/all/"
-        # TODO: Decrease timeout for production (currently 120s for local network development)
-        await page.goto(activity_url, wait_until="domcontentloaded", timeout=120000)
-        await random_idle_pause(2, 5)
+        await page.goto(activity_url, wait_until="domcontentloaded", timeout=30000)
+        await random_idle_pause(1, 3)
 
         # Scroll a little to load posts
         await human_scroll(page)

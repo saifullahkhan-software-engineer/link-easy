@@ -403,7 +403,7 @@ export default function LinkedInAccountPage() {
 
             {connecting && (
               <SlowOperationNotice
-                title="Connecting to LinkedIn… this can take up to 30 seconds."
+                title="Connecting to LinkedIn… this usually takes 10–20 seconds."
                 hint="We're logging in through a real browser session. If LinkedIn asks for a verification code, a code entry box will appear here."
                 elapsedSeconds={elapsed}
               />
@@ -421,7 +421,7 @@ export default function LinkedInAccountPage() {
                 {connecting && <Spinner />}
                 {connecting ? 'Connecting…' : 'Connect LinkedIn account'}
               </button>
-              <span className="text-xs text-zinc-500">Takes ~10-30s • Secure & encrypted</span>
+              <span className="text-xs text-zinc-500">Takes ~10-20s • Secure & encrypted</span>
             </div>
 
             <div className="rounded-lg bg-surface-800/60 p-3 text-xs leading-relaxed text-zinc-400">
@@ -504,7 +504,7 @@ export default function LinkedInAccountPage() {
             <div className="mt-5">
               <SlowOperationNotice
                 title="Checking LinkedIn session…"
-                hint="Validating saved cookies and re-logging in if they expired — this can take up to 30 seconds."
+                hint="Validating saved cookies and re-logging in if they expired — this usually takes 10–20 seconds."
                 elapsedSeconds={refreshElapsed}
               />
             </div>
