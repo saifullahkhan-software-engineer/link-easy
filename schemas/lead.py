@@ -2,7 +2,7 @@
 Pydantic schemas for Lead endpoints.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
@@ -70,5 +70,19 @@ class LeadResponse(BaseModel):
     next_action_at: datetime | None
     notes: str | None
     created_at: datetime
+    time_remaining_ms: int | None = None
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def model_validate(cls, obj, **kwargs):
+        instance = super().model_validate(obj, **kwargs)
+        if hasattr(obj, 'next_action_at') and obj.next_action_at and obj.status not in [LeadStatus.COMPLETE, LeadStatus.FAILED]:
+            now = datetime.now(timezone.utc)
+            # Ensure next_action_at is timezone aware for comparison
+            next_at = obj.next_action_at
+            if next_at.tzinfo is None:
+                next_at = next_at.replace(tzinfo=timezone.utc)
+            diff = next_at - now
+            instance.time_remaining_ms = max(0, int(diff.total_seconds() * 1000))
+        return instance

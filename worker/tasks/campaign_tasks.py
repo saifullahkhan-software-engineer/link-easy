@@ -148,6 +148,12 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
         if not lead or not campaign or not step:
             return {"status": "skipped", "reason": "lead, campaign, or step not found"}
         
+        # Check if campaign is active
+        if campaign.status != CampaignStatus.ACTIVE:
+            logger.info(f"⏭️ Skipping task for lead {lead_id} because campaign {campaign_id} is {campaign.status}")
+            # If paused, we don't re-enqueue; the scheduler or reconciler will pick it up when resumed
+            return {"status": "skipped", "reason": f"campaign is {campaign.status}"}
+        
         account = db.query(LinkedInAccount).filter_by(linkedin_email=campaign.account_email).first()
         if not account or account.status != LinkedInAccountStatus.ACTIVE:
             # Create CampaignJob record for audit trail
@@ -343,17 +349,16 @@ def reconcile_stalled_leads():
                 logger.debug(f"⏭️ Lead {lead.id} has recent DONE job, skipping")
                 continue
             
-            # Re-enqueue the task for step 1
+            # Mark for immediate processing by the next account session
             try:
-                celery_app.send_task(
-                    "tasks.execute_campaign_step",
-                    args=[lead.id, lead.campaign_id, 1],
-                    eta=datetime.now(timezone.utc) + timedelta(minutes=5)
-                )
+                lead.next_action_at = datetime.now(timezone.utc)
+                lead.current_step = 1
+                db.commit()
                 requeued_count += 1
-                logger.info(f"🔄 Re-enqueued lead {lead.id} for step 1")
+                logger.info(f"🔄 Reset stalled lead {lead.id} for processing in next session")
             except Exception as e:
-                logger.error(f"❌ Failed to re-enqueue lead {lead.id}: {e}")
+                logger.error(f"❌ Failed to reset lead {lead.id}: {e}")
+                db.rollback()
         
         logger.info(f"✅ Reconciliation complete: {requeued_count} leads re-enqueued")
         return {"requeued_count": requeued_count, "total_stalled": len(stalled_leads)}
@@ -1017,6 +1022,12 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                     logger.warning(f"⚠️ Step mismatch for lead {lead_id}: step_order={step_order}, current_step={lead.current_step}, skipping")
                     continue
                 
+                # Check if campaign is still active (might have been paused since task started)
+                db.refresh(campaign)
+                if campaign.status != CampaignStatus.ACTIVE:
+                    logger.info(f"⏭️ Skipping lead {lead_id} because campaign {campaign_id} is {campaign.status}")
+                    continue
+
                 logger.info(f"📋 Processing lead {lead_id} (step {step_order}: {step_type_val})")
                 
                 # Execute the appropriate action
