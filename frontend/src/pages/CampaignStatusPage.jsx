@@ -211,34 +211,35 @@ export default function CampaignStatusPage() {
     return () => clearInterval(pollRef.current);
   }, [selected?.status, fetchLeads]);
 
-  /* Live 1-second tick for countdown timers — only while campaign is active */
+  /* Live 1-second tick for every visible persisted schedule. */
   useEffect(() => {
     clearInterval(tickRef.current);
-    if (selected?.status === 'active' && leads.length > 0) {
+    if (leads.some((lead) => lead.next_action_at)) {
       setNow(Date.now());
       tickRef.current = setInterval(() => setNow(Date.now()), 1000);
     }
     return () => clearInterval(tickRef.current);
-  }, [selected?.status, leads.length]);
+  }, [selected?.id, leads]);
 
-  /* Compute per-step scheduling info from leads */
+  /* Compute per-step scheduling info from the durable absolute timestamps.
+     Do not rebuild an absolute time from time_remaining_ms on every render: that
+     value is only a server-response snapshot and doing so freezes a countdown. */
   const stepSchedule = (() => {
     if (!steps.length || !leads.length) return {};
     const schedule = {};
     steps.forEach((step) => {
-      const waitingLeads = leads.filter(
-        (l) =>
-          l.current_step === step.step_order &&
-          (l.time_remaining_ms !== null || (l.next_action_at && new Date(l.next_action_at).getTime() > now)) &&
-          !['complete', 'failed'].includes(l.status)
-      );
+      const waitingLeads = leads.filter((lead) => {
+        const nextAt = Date.parse(lead.next_action_at);
+        return (
+          Number(lead.current_step) === Number(step.step_order) &&
+          Number.isFinite(nextAt) &&
+          !['complete', 'failed'].includes(lead.status)
+        );
+      });
       if (waitingLeads.length > 0) {
-        const earliest = waitingLeads.reduce((min, l) => {
-          const t = l.time_remaining_ms !== undefined && l.time_remaining_ms !== null 
-            ? now + l.time_remaining_ms 
-            : new Date(l.next_action_at).getTime();
-          return t < min ? t : min;
-        }, Infinity);
+        const earliest = Math.min(
+          ...waitingLeads.map((lead) => Date.parse(lead.next_action_at))
+        );
         schedule[step.step_order] = {
           nextAt: earliest,
           remainingMs: earliest - now,
@@ -554,17 +555,21 @@ export default function CampaignStatusPage() {
               })()}
             </div>
 
-            {/* Next Action Countdown Banner — shown when campaign is active and leads are queued */}
-            {selected?.status === 'active' && overallNextInfo && (
+            {/* Keep the persisted next step visible even while a campaign is paused. */}
+            {overallNextInfo && (
               <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400/80">Next Action</span>
                   <div className="flex items-center gap-1.5">
                     <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      {selected?.status === 'active' && (
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      )}
                       <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                     </span>
-                    <span className="text-[10px] text-emerald-400/80">Live</span>
+                    <span className="text-[10px] text-emerald-400/80">
+                      {selected?.status === 'active' ? 'Live' : 'Scheduled'}
+                    </span>
                   </div>
                 </div>
                 <div className="flex items-center justify-between">
@@ -576,9 +581,14 @@ export default function CampaignStatusPage() {
                       for {overallNextInfo.leadCount} lead{overallNextInfo.leadCount === 1 ? '' : 's'}
                     </span>
                   </div>
-                  <span className="text-sm font-mono font-bold text-emerald-300 tabular-nums">
-                    {formatCountdown(overallNextInfo.remainingMs)}
-                  </span>
+                  <div className="text-right">
+                    <span className="block text-sm font-mono font-bold text-emerald-300 tabular-nums">
+                      {formatCountdown(overallNextInfo.remainingMs)}
+                    </span>
+                    <span className="block text-[10px] text-zinc-500" title={new Date(overallNextInfo.nextAt).toISOString()}>
+                      {new Date(overallNextInfo.nextAt).toLocaleString()}
+                    </span>
+                  </div>
                 </div>
                 {/* Progress bar showing time elapsed vs total delay */}
                 {(() => {
@@ -752,7 +762,7 @@ export default function CampaignStatusPage() {
 
             {/* leads table */}
             <div className="border-t border-surface-700">
-              <LeadsTable leads={leads} loading={leadsLoading} />
+              <LeadsTable leads={leads} loading={leadsLoading} steps={steps} now={now} />
             </div>
           </div>
 

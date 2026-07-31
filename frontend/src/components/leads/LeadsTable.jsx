@@ -1,7 +1,32 @@
 import { LeadStatusBadge } from '../Badge';
 
+const STEP_LABELS = {
+  visit_profile: 'Visit Profile',
+  like_post: 'Like Post',
+  visit_and_like: 'Visit & Like',
+  send_connection: 'Connection Request',
+  send_message: 'Send Message',
+  follow_up_if_pending: 'Follow up if pending',
+  thanks_if_accepted: 'Thanks if accepted',
+};
+
+function formatRemaining(nextActionAt, now) {
+  const nextAt = Date.parse(nextActionAt);
+  if (!Number.isFinite(nextAt)) return null;
+  const totalSeconds = Math.max(0, Math.floor((nextAt - now) / 1000));
+  if (totalSeconds === 0) return 'Due now';
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (days) return `${days}d ${hours}h ${minutes}m`;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 /** Leads table for the selected campaign. Polling lives in the parent. */
-export default function LeadsTable({ leads, loading }) {
+export default function LeadsTable({ leads, loading, steps = [], now = Date.now() }) {
   if (loading && leads.length === 0) {
     return (
       <div className="animate-pulse space-y-2 p-4">
@@ -34,13 +59,21 @@ export default function LeadsTable({ leads, loading }) {
             <th className="px-4 py-3 font-medium">Name</th>
             <th className="px-4 py-3 font-medium">LinkedIn</th>
             <th className="px-4 py-3 font-medium">Status</th>
-            <th className="px-4 py-3 font-medium">Step</th>
-            <th className="px-4 py-3 font-medium">Next action</th>
+            <th className="px-4 py-3 font-medium">Next step</th>
+            <th className="px-4 py-3 font-medium">Scheduled time</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-surface-700/70">
           {leads.map((lead) => {
             const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || '—';
+            const nextStep = steps.find(
+              (step) => Number(step.step_order) === Number(lead.current_step)
+            );
+            const nextStepLabel = nextStep
+              ? (STEP_LABELS[nextStep.step_type] || nextStep.step_type)
+              : null;
+            const remaining = formatRemaining(lead.next_action_at, now);
+            const isFinished = ['complete', 'failed'].includes(lead.status);
             return (
               <tr key={lead.id} className="transition hover:bg-surface-800/60">
                 <td className="px-4 py-3">
@@ -66,18 +99,32 @@ export default function LeadsTable({ leads, loading }) {
                 <td className="px-4 py-3">
                   <LeadStatusBadge status={lead.status} />
                 </td>
-                <td className="px-4 py-3 text-zinc-400">
-                  {lead.current_step != null ? `Step ${lead.current_step}` : '—'}
+                <td className="px-4 py-3">
+                  {nextStepLabel && !isFinished ? (
+                    <div>
+                      <p className="font-medium text-zinc-300">{nextStepLabel}</p>
+                      <p className="text-[10px] text-zinc-600">Step {lead.current_step}</p>
+                    </div>
+                  ) : (
+                    <span className="text-zinc-500">{isFinished ? 'No next step' : 'Not scheduled'}</span>
+                  )}
                 </td>
-                <td className="px-4 py-3 text-xs text-zinc-500">
-                  {lead.next_action_at
-                    ? new Date(lead.next_action_at).toLocaleString(undefined, {
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })
-                    : '—'}
+                <td className="px-4 py-3 text-xs">
+                  {lead.next_action_at && !isFinished ? (
+                    <div>
+                      <p className="font-mono font-semibold tabular-nums text-emerald-300">{remaining}</p>
+                      <p className="mt-0.5 whitespace-nowrap text-[10px] text-zinc-500" title={new Date(lead.next_action_at).toISOString()}>
+                        {new Date(lead.next_action_at).toLocaleString(undefined, {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </p>
+                    </div>
+                  ) : (
+                    <span className="text-zinc-500">—</span>
+                  )}
                 </td>
               </tr>
             );

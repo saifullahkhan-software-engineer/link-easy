@@ -17,7 +17,7 @@ from sqlalchemy.future import select
  
 from api.dependencies import get_current_user, get_db
 from models.campaign import Campaign, CampaignStatus
-from models.lead import Lead
+from models.lead import Lead, LeadStatus
 from models.user import User
 from models.campaign_job import CampaignJob
 from schemas.campaign import CampaignCreate, CampaignResponse, CampaignUpdate, CampaignStepCreate, CampaignStepUpdate, CampaignStepResponse
@@ -129,7 +129,7 @@ async def start_campaign(
     Sets campaign to ACTIVE and enqueues Step 1 Celery tasks for all pending leads.
     Tasks are spread across a random time window minimum 2-hour window to avoid burst detection.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     import random
     import redis
     from worker.celery_app import celery_app
@@ -166,11 +166,27 @@ async def start_campaign(
     if not first_step:
         raise HTTPException(status_code=400, detail="Campaign has no steps configured")
 
-    # Enqueue a single account session task instead of per-lead tasks
+    # Persist the initial schedule before returning so the UI can immediately
+    # show both the next step and its execution time. Use the same delay for the
+    # Celery task; next_action_at remains the durable source of truth.
+    session_delay_seconds = random.randint(30, 120)
+    scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=session_delay_seconds)
+    leads_result = await db.execute(
+        select(Lead).where(
+            Lead.campaign_id == campaign_id,
+            Lead.status == LeadStatus.PENDING,
+            Lead.last_action_at.is_(None),
+        )
+    )
+    for lead in leads_result.scalars().all():
+        lead.current_step = first_step.step_order
+        lead.next_action_at = scheduled_at
+
+    # Enqueue a single account session task instead of per-lead tasks.
     celery_app.send_task(
         "tasks.run_account_session",
         args=[campaign.account_email],
-        countdown=random.randint(30, 120)  # Random delay before first session
+        countdown=session_delay_seconds,
     )
 
     campaign.status = CampaignStatus.ACTIVE
