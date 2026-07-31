@@ -48,6 +48,12 @@ const CAMPAIGN = {
   started_at: null,
 };
 
+const STEPS = [
+  { id: 'step-1', campaign_id: 'camp-1', step_order: 1, step_type: 'visit_profile', delay_hours: 0, condition: null },
+  { id: 'step-2', campaign_id: 'camp-1', step_order: 2, step_type: 'send_connection', delay_hours: 24, condition: null },
+  { id: 'step-3', campaign_id: 'camp-1', step_order: 3, step_type: 'send_message', delay_hours: 48, condition: 'accepted' },
+];
+
 const LEADS = [
   {
     id: 'lead-1',
@@ -118,9 +124,10 @@ const CASES = [
     api: {
       'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT),
       'GET /api/v1/campaigns': (res) => json(res, 200, [CAMPAIGN]),
+      'GET /api/v1/campaigns/camp-1/steps': (res) => json(res, 200, STEPS),
       'GET /api/v1/leads': (res) => json(res, 200, LEADS),
     },
-    mustContain: ['Q3 Founders', 'Jane Doe', 'replied', 'Add manually', 'Upload CSV', 'Start campaign'],
+    mustContain: ['Q3 Founders', 'Jane Doe', 'replied', 'Add manually', 'Upload CSV', 'Start campaign', 'Next step', 'Scheduled time', 'Send Message', 'Due now'],
   },
   {
     name: 'campaigns page — no account gates the page',

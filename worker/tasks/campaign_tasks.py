@@ -120,9 +120,14 @@ def _schedule_next_step(lead_id: str, campaign_id: str, current_step_order: int)
                 _schedule_next_step(lead_id, campaign_id, current_step_order + 1)
                 return
         
-        # Schedule the next step with its delay
+        # Persist the schedule as well as sending it to Celery. This keeps the
+        # next step name/time visible and recoverable if a worker restarts.
         delay_hours = next_step.delay_hours
         eta = datetime.now(timezone.utc) + timedelta(hours=delay_hours)
+        lead = db.query(Lead).get(lead_id)
+        if lead:
+            lead.current_step = next_step.step_order
+            lead.next_action_at = eta
         celery_app.send_task(
             "tasks.execute_campaign_step",
             args=[lead_id, campaign_id, next_step.step_order],
