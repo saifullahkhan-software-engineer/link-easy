@@ -10,6 +10,7 @@ DELETE /api/v1/leads/{lead_id}          — remove a lead
 """
 
 import csv
+from datetime import datetime, timezone
 import io
 import uuid
 
@@ -94,7 +95,8 @@ async def create_lead(
         last_name=payload.last_name,
         headline=payload.headline,
         status=LeadStatus.PENDING,
-        current_step=0,
+        current_step=1,
+        next_action_at=datetime.now(timezone.utc)
     )
     
     db.add(lead)
@@ -234,7 +236,8 @@ async def upload_leads_csv(
             last_name=row_data['last_name'],
             headline=row_data['headline'],
             status=LeadStatus.PENDING,
-            current_step=0,
+            current_step=1,
+            next_action_at=datetime.now(timezone.utc)
         )
         db.add(lead)
         created_leads.append(lead)

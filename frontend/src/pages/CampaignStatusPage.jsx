@@ -229,13 +229,14 @@ export default function CampaignStatusPage() {
       const waitingLeads = leads.filter(
         (l) =>
           l.current_step === step.step_order &&
-          l.next_action_at &&
-          new Date(l.next_action_at).getTime() > now &&
+          (l.time_remaining_ms !== null || (l.next_action_at && new Date(l.next_action_at).getTime() > now)) &&
           !['complete', 'failed'].includes(l.status)
       );
       if (waitingLeads.length > 0) {
         const earliest = waitingLeads.reduce((min, l) => {
-          const t = new Date(l.next_action_at).getTime();
+          const t = l.time_remaining_ms !== undefined && l.time_remaining_ms !== null 
+            ? now + l.time_remaining_ms 
+            : new Date(l.next_action_at).getTime();
           return t < min ? t : min;
         }, Infinity);
         schedule[step.step_order] = {
