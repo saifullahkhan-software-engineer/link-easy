@@ -6,6 +6,7 @@ import { getErrorMessage } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { CampaignStatusBadge } from '../components/Badge';
 import { Spinner } from '../components/Spinner';
+import Modal from '../components/Modal';
 import ManualLeadForm from '../components/leads/ManualLeadForm';
 import CsvUpload from '../components/leads/CsvUpload';
 import LeadsTable from '../components/leads/LeadsTable';
@@ -66,6 +67,37 @@ function formatHours(hours) {
   return `${hours} hr${hours === 1 ? '' : 's'}`;
 }
 
+function formatTotalHours(hours) {
+  if (hours === 0) return '0 min';
+  if (hours < 1) {
+    const mins = Math.round(hours * 60);
+    return `${mins} min`;
+  }
+  if (hours < 24) {
+    const hrs = Math.floor(hours);
+    const mins = Math.round((hours - hrs) * 60);
+    if (mins === 0) return `${hrs} hr${hrs === 1 ? '' : 's'}`;
+    return `${hrs}h ${mins}m`;
+  }
+  const days = Math.floor(hours / 24);
+  const remainHrs = Math.round(hours % 24);
+  if (remainHrs === 0) return `${days} day${days === 1 ? '' : 's'}`;
+  return `${days}d ${remainHrs}h`;
+}
+
+function formatCountdown(ms) {
+  if (ms <= 0) return 'Due now';
+  const totalSecs = Math.floor(ms / 1000);
+  const days = Math.floor(totalSecs / 86400);
+  const hours = Math.floor((totalSecs % 86400) / 3600);
+  const mins = Math.floor((totalSecs % 3600) / 60);
+  const secs = totalSecs % 60;
+  if (days > 0) return `${days}d ${hours}h ${mins}m`;
+  if (hours > 0) return `${hours}h ${mins}m ${secs}s`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
 export default function CampaignStatusPage() {
   const { email: ownerEmail } = useAuth();
   const location = useLocation();
@@ -83,7 +115,11 @@ export default function CampaignStatusPage() {
   const [leadsLoading, setLeadsLoading] = useState(false);
   const [leadTab, setLeadTab] = useState('manual');     // 'manual' | 'csv'
   const [statusTransitioning, setStatusTransitioning] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [now, setNow] = useState(Date.now());
   const pollRef = useRef(null);
+  const tickRef = useRef(null);
 
   /* bootstrap: linkedin account + campaigns */
   const bootstrap = useCallback(async () => {
@@ -175,6 +211,71 @@ export default function CampaignStatusPage() {
     return () => clearInterval(pollRef.current);
   }, [selected?.status, fetchLeads]);
 
+  /* Live 1-second tick for countdown timers — only while campaign is active */
+  useEffect(() => {
+    clearInterval(tickRef.current);
+    if (selected?.status === 'active' && leads.length > 0) {
+      setNow(Date.now());
+      tickRef.current = setInterval(() => setNow(Date.now()), 1000);
+    }
+    return () => clearInterval(tickRef.current);
+  }, [selected?.status, leads.length]);
+
+  /* Compute per-step scheduling info from leads */
+  const stepSchedule = (() => {
+    if (!steps.length || !leads.length) return {};
+    const schedule = {};
+    steps.forEach((step) => {
+      const waitingLeads = leads.filter(
+        (l) =>
+          l.current_step === step.step_order &&
+          l.next_action_at &&
+          new Date(l.next_action_at).getTime() > now &&
+          !['complete', 'failed'].includes(l.status)
+      );
+      if (waitingLeads.length > 0) {
+        const earliest = waitingLeads.reduce((min, l) => {
+          const t = new Date(l.next_action_at).getTime();
+          return t < min ? t : min;
+        }, Infinity);
+        schedule[step.step_order] = {
+          nextAt: earliest,
+          remainingMs: earliest - now,
+          leadCount: waitingLeads.length,
+        };
+      }
+    });
+    return schedule;
+  })();
+
+  /* Find which step fires next (earliest next_action_at across all steps) */
+  const nextUpStepOrder = (() => {
+    let earliest = Infinity;
+    let stepOrder = null;
+    Object.entries(stepSchedule).forEach(([order, info]) => {
+      if (info.nextAt < earliest) {
+        earliest = info.nextAt;
+        stepOrder = Number(order);
+      }
+    });
+    return stepOrder;
+  })();
+
+  /* Overall next action countdown (earliest across all steps) */
+  const overallNextInfo = (() => {
+    if (nextUpStepOrder == null) return null;
+    const info = stepSchedule[nextUpStepOrder];
+    const step = steps.find((s) => s.step_order === nextUpStepOrder);
+    if (!step || !info) return null;
+    return {
+      stepOrder: nextUpStepOrder,
+      stepLabel: ACTION_LABELS[step.step_type] || step.step_type,
+      remainingMs: info.remainingMs,
+      leadCount: info.leadCount,
+      nextAt: info.nextAt,
+    };
+  })();
+
   /* Campaign Control Actions */
   async function startCampaign() {
     if (!selected?.id) return;
@@ -226,6 +327,34 @@ export default function CampaignStatusPage() {
       toast.error(getErrorMessage(err, 'Could not restart the campaign.'));
     } finally {
       setStatusTransitioning(false);
+    }
+  }
+
+  async function deleteCampaign() {
+    if (!selected?.id) return;
+    setDeleteLoading(true);
+    try {
+      const { data } = await campaignsApi.delete(selected.id, ownerEmail);
+      toast.success(data?.message || 'Campaign deleted successfully.');
+
+      // Remove deleted campaign from the list
+      const remaining = campaigns.filter((c) => c.id !== selected.id);
+      setCampaigns(remaining);
+
+      // Select another campaign if available, otherwise clear selection
+      if (remaining.length > 0) {
+        setSelected(remaining[remaining.length - 1]);
+      } else {
+        setSelected(null);
+      }
+
+      setLeads([]);
+      setSteps([]);
+      setShowDeleteModal(false);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not delete the campaign.'));
+    } finally {
+      setDeleteLoading(false);
     }
   }
 
@@ -318,6 +447,19 @@ export default function CampaignStatusPage() {
         </div>
         {hasSelection && (
           <div className="flex items-center gap-3">
+            {/* Delete Button */}
+            <button
+              onClick={() => setShowDeleteModal(true)}
+              disabled={statusTransitioning}
+              className="inline-flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2.5 text-sm font-semibold text-red-400 transition hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+              title="Delete this campaign and all its data"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0Z" />
+              </svg>
+              <span>Delete</span>
+            </button>
+
             {/* Start Button */}
             {selected.status !== 'active' ? (
               <button
@@ -396,7 +538,65 @@ export default function CampaignStatusPage() {
 
           {/* Campaign Drip Steps Visualizer */}
           <div className="card p-4 space-y-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Outreach Sequence</h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Outreach Sequence</h3>
+              {steps.length > 1 && (() => {
+                const totalHrs = steps.slice(1).reduce((sum, s) => sum + (s.delay_hours || 0), 0);
+                return (
+                  <span className="text-[10px] rounded-full bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 text-amber-300 font-mono flex items-center gap-1">
+                    <svg className="h-2.5 w-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0" />
+                    </svg>
+                    {formatTotalHours(totalHrs)}
+                  </span>
+                );
+              })()}
+            </div>
+
+            {/* Next Action Countdown Banner — shown when campaign is active and leads are queued */}
+            {selected?.status === 'active' && overallNextInfo && (
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400/80">Next Action</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <span className="text-[10px] text-emerald-400/80">Live</span>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-zinc-100">
+                      Step {overallNextInfo.stepOrder}: {overallNextInfo.stepLabel}
+                    </span>
+                    <span className="text-[10px] text-zinc-500">
+                      for {overallNextInfo.leadCount} lead{overallNextInfo.leadCount === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <span className="text-sm font-mono font-bold text-emerald-300 tabular-nums">
+                    {formatCountdown(overallNextInfo.remainingMs)}
+                  </span>
+                </div>
+                {/* Progress bar showing time elapsed vs total delay */}
+                {(() => {
+                  const step = steps.find(s => s.step_order === overallNextInfo.stepOrder);
+                  if (!step || !step.delay_hours) return null;
+                  const totalDelayMs = step.delay_hours * 3600 * 1000;
+                  const elapsedMs = totalDelayMs - overallNextInfo.remainingMs;
+                  const progress = Math.min(100, Math.max(0, (elapsedMs / totalDelayMs) * 100));
+                  return (
+                    <div className="h-1 w-full rounded-full bg-surface-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-emerald-500/60 transition-all duration-1000"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
             
             {stepsLoading ? (
               <div className="flex justify-center py-4">
@@ -413,24 +613,51 @@ export default function CampaignStatusPage() {
                   const label = ACTION_LABELS[step.step_type] || step.step_type;
                   const icon = ACTION_ICONS[step.step_type] || null;
                   const colorClass = ACTION_COLORS[step.step_type] || 'text-zinc-400 bg-surface-800';
+                  const sched = stepSchedule[step.step_order];
+                  const isNextUp = step.step_order === nextUpStepOrder;
                   
                   return (
-                    <div key={step.id} className="relative pl-6 space-y-1">
-                      {/* Timeline dot */}
-                      <div className="absolute left-0 top-1 flex h-4.5 w-4.5 items-center justify-center rounded-full bg-surface-900 border-2 border-surface-700 text-[10px] font-mono font-bold text-zinc-400">
+                    <div key={step.id} className={`relative pl-6 space-y-1 ${isNextUp ? 'py-1' : ''}`}>
+                      {/* Timeline dot — pulses green if this is the next step to fire */}
+                      <div className={`absolute left-0 top-1 flex h-4.5 w-4.5 items-center justify-center rounded-full text-[10px] font-mono font-bold transition-all ${
+                        isNextUp
+                          ? 'bg-emerald-500/20 border-2 border-emerald-500 text-emerald-300 shadow-[0_0_6px_rgba(16,185,129,0.3)]'
+                          : 'bg-surface-900 border-2 border-surface-700 text-zinc-400'
+                      }`}>
                         {idx + 1}
                       </div>
 
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <div className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold border ${colorClass}`}>
                           {icon}
                           <span>{label}</span>
                         </div>
+
+                        {/* Live countdown badge for this step */}
+                        {sched && (
+                          <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-mono font-semibold tabular-nums ${
+                            isNextUp
+                              ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25'
+                              : 'bg-surface-800 text-zinc-400 border border-surface-700'
+                          }`} title={`${sched.leadCount} lead${sched.leadCount === 1 ? '' : 's'} queued`}>
+                            <svg className="h-2.5 w-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2.5">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0" />
+                            </svg>
+                            <span>{formatCountdown(sched.remainingMs)}</span>
+                            <span className="text-zinc-600">·</span>
+                            <span>{sched.leadCount} lead{sched.leadCount === 1 ? '' : 's'}</span>
+                          </span>
+                        )}
                       </div>
 
+                      {/* Delay between this step and next */}
                       {idx < steps.length - 1 && (
-                        <div className="text-[10px] font-mono text-zinc-500 pl-1 py-1">
-                          ⏱️ Delay: {formatHours(steps[idx + 1].delay_hours)}
+                        <div className="text-[10px] font-mono text-zinc-500 pl-1 py-1 flex items-center gap-2">
+                          <span>⏱️ Delay: {formatHours(steps[idx + 1].delay_hours)}</span>
+                          <span className="text-zinc-600">•</span>
+                          <span className="text-zinc-600">
+                            T+{formatTotalHours(steps.slice(0, idx + 2).reduce((sum, s) => sum + (s.delay_hours || 0), 0))}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -544,6 +771,66 @@ export default function CampaignStatusPage() {
           )}
         </div>
       </div>
+
+      {/* Delete Campaign Confirmation Modal */}
+      <Modal
+        open={showDeleteModal}
+        onClose={() => !deleteLoading && setShowDeleteModal(false)}
+        title="Delete Campaign"
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+            <svg className="h-5 w-5 shrink-0 text-red-400 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+            </svg>
+            <div>
+              <p className="text-sm font-semibold text-red-300">This action is irreversible</p>
+              <p className="mt-1 text-xs text-zinc-400 leading-relaxed">
+                Deleting campaign <span className="font-semibold text-zinc-200">"{selected?.name}"</span> will permanently remove:
+              </p>
+              <ul className="mt-2 space-y-1 text-xs text-zinc-400">
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1 w-1 rounded-full bg-red-400" />
+                  All leads associated with this campaign
+                </li>
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1 w-1 rounded-full bg-red-400" />
+                  All outreach sequence steps
+                </li>
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1 w-1 rounded-full bg-red-400" />
+                  All campaign job history
+                </li>
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1 w-1 rounded-full bg-red-400" />
+                  All pending tasks from the task queue
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-3">
+            <button
+              onClick={() => setShowDeleteModal(false)}
+              disabled={deleteLoading}
+              className="rounded-lg border border-surface-700 bg-surface-800 px-4 py-2 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={deleteCampaign}
+              disabled={deleteLoading}
+              className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-50"
+            >
+              {deleteLoading && <Spinner />}
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0Z" />
+              </svg>
+              <span>{deleteLoading ? 'Deleting...' : 'Delete Campaign'}</span>
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
