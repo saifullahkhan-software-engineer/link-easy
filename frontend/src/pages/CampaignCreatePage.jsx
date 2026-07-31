@@ -69,6 +69,24 @@ const ACTION_TYPES = [
   },
 ];
 
+function formatTotalHours(hours) {
+  if (hours === 0) return '0 min';
+  if (hours < 1) {
+    const mins = Math.round(hours * 60);
+    return `${mins} min`;
+  }
+  if (hours < 24) {
+    const hrs = Math.floor(hours);
+    const mins = Math.round((hours - hrs) * 60);
+    if (mins === 0) return `${hrs} hr${hrs === 1 ? '' : 's'}`;
+    return `${hrs}h ${mins}m`;
+  }
+  const days = Math.floor(hours / 24);
+  const remainHrs = Math.round(hours % 24);
+  if (remainHrs === 0) return `${days} day${days === 1 ? '' : 's'}`;
+  return `${days}d ${remainHrs}h`;
+}
+
 export default function CampaignCreatePage() {
   const { email: ownerEmail } = useAuth();
   const navigate = useNavigate();
@@ -94,6 +112,28 @@ export default function CampaignCreatePage() {
   const [newStepAction, setNewStepAction] = useState('visit_profile');
   const [newStepDelayVal, setNewStepDelayVal] = useState(24);
   const [newStepDelayUnit, setNewStepDelayUnit] = useState('hours');
+
+  // Compute total sequence duration in hours
+  const totalDurationHours = steps.reduce((total, step, idx) => {
+    if (idx === 0) return total; // First step fires immediately (delay is ignored)
+    let hrs = Number(step.delay_val) || 0;
+    if (step.delay_unit === 'minutes') hrs = hrs / 60;
+    else if (step.delay_unit === 'days') hrs = hrs * 24;
+    return total + hrs;
+  }, 0);
+
+  // Compute cumulative time for each step (for display)
+  const cumulativeHours = steps.reduce((acc, step, idx) => {
+    if (idx === 0) {
+      acc.push(0);
+    } else {
+      let hrs = Number(step.delay_val) || 0;
+      if (step.delay_unit === 'minutes') hrs = hrs / 60;
+      else if (step.delay_unit === 'days') hrs = hrs * 24;
+      acc.push(acc[acc.length - 1] + hrs);
+    }
+    return acc;
+  }, []);
 
   // Load account
   const bootstrap = useCallback(async () => {
@@ -475,9 +515,19 @@ export default function CampaignCreatePage() {
                   Set delay times and order your outreach events.
                 </p>
               </div>
-              <span className="text-xs rounded-full bg-surface-800 border border-surface-700 px-2.5 py-1 text-zinc-400 font-mono">
-                {steps.length} {steps.length === 1 ? 'Step' : 'Steps'}
-              </span>
+              <div className="flex items-center gap-2">
+                {steps.length > 1 && (
+                  <span className="text-xs rounded-full bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 text-amber-300 font-mono flex items-center gap-1.5">
+                    <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0" />
+                    </svg>
+                    Total: {formatTotalHours(totalDurationHours)}
+                  </span>
+                )}
+                <span className="text-xs rounded-full bg-surface-800 border border-surface-700 px-2.5 py-1 text-zinc-400 font-mono">
+                  {steps.length} {steps.length === 1 ? 'Step' : 'Steps'}
+                </span>
+              </div>
             </div>
 
             {steps.length === 0 ? (
@@ -597,6 +647,9 @@ export default function CampaignCreatePage() {
                               ? "Executes immediately on campaign launch"
                               : `Runs ${step.delay_val} ${step.delay_unit} after previous step completes`}
                           </p>
+                          <span className="text-[10px] font-mono text-zinc-600 shrink-0 ml-2" title="Fires at this time after campaign starts">
+                            T+{formatTotalHours(cumulativeHours[index] || 0)}
+                          </span>
                           
                           {/* Option to change Step Type inline */}
                           <select

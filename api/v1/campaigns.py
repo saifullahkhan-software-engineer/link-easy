@@ -19,6 +19,7 @@ from api.dependencies import get_current_user, get_db
 from models.campaign import Campaign, CampaignStatus
 from models.lead import Lead
 from models.user import User
+from models.campaign_job import CampaignJob
 from schemas.campaign import CampaignCreate, CampaignResponse, CampaignUpdate, CampaignStepCreate, CampaignStepUpdate, CampaignStepResponse
 from models.campaign import CampaignStep
 router = APIRouter(prefix="/api/v1/campaigns", tags=["campaigns"])
@@ -310,6 +311,93 @@ async def restart_campaign(
     await db.commit()
     
     return {"message": f"Campaign restarted. {len(pending_leads)} new leads queued, {len(in_progress_leads)} in-progress leads continuing.", "new_leads_queued": len(pending_leads), "in_progress_leads": len(in_progress_leads)}
+
+
+@router.delete("/{campaign_id}", status_code=200)
+async def delete_campaign(
+    campaign_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),  # Commented for testing
+):
+    """
+    Permanently deletes a campaign and all associated data:
+    - Revokes all pending Celery tasks from Redis
+    - Removes the session lock from Redis
+    - Deletes all campaign jobs (audit log)
+    - Deletes all leads
+    - Deletes all campaign steps
+    - Deletes the campaign itself
+    """
+    import redis
+    from worker.celery_app import celery_app
+    from core.config import settings
+    from models.linkedin_account import LinkedInAccount
+    from sqlalchemy import delete as sa_delete
+
+    # 1. Verify campaign exists and belongs to owner
+    result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    account_email = campaign.account_email
+
+    # 2. Collect all Celery task IDs from campaign_jobs before deleting
+    jobs_result = await db.execute(
+        select(CampaignJob.celery_task_id).where(
+            CampaignJob.campaign_id == campaign_id,
+            CampaignJob.celery_task_id.isnot(None),
+        )
+    )
+    task_ids = [row[0] for row in jobs_result.all() if row[0]]
+
+    # 3. Revoke all Celery tasks via Redis so workers discard them
+    redis_client = redis.from_url(settings.REDIS_URL)
+    revoked_count = 0
+    for task_id in task_ids:
+        try:
+            celery_app.control.revoke(task_id, terminate=False)
+            revoked_count += 1
+        except Exception:
+            pass  # Best-effort; task may already be completed or expired
+
+    # 4. Remove the session lock from Redis (if present for this account)
+    session_lock_key = f"session_lock:{account_email}"
+    lock_removed = bool(redis_client.delete(session_lock_key))
+
+    # 5. Delete campaign jobs
+    await db.execute(
+        sa_delete(CampaignJob).where(CampaignJob.campaign_id == campaign_id)
+    )
+
+    # 6. Delete leads (cascade from campaign)
+    await db.execute(
+        sa_delete(Lead).where(Lead.campaign_id == campaign_id)
+    )
+
+    # 7. Delete campaign steps (cascade from campaign)
+    await db.execute(
+        sa_delete(CampaignStep).where(CampaignStep.campaign_id == campaign_id)
+    )
+
+    # 8. Delete the campaign itself
+    await db.execute(
+        sa_delete(Campaign).where(Campaign.id == campaign_id)
+    )
+
+    await db.commit()
+
+    return {
+        "message": f"Campaign '{campaign_id}' deleted successfully.",
+        "campaign_id": campaign_id,
+        "tasks_revoked": revoked_count,
+        "session_lock_removed": lock_removed,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

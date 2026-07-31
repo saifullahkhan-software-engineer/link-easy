@@ -55,6 +55,10 @@ export const campaignsApi = {
       params: { owner_email: ownerEmail },
       timeout: 60_000,
     }),
+  delete: (campaignId, ownerEmail) =>
+    api.delete(`/campaigns/${campaignId}`, {
+      params: { owner_email: ownerEmail },
+    }),
   listSteps: (campaignId, ownerEmail) =>
     api.get(`/campaigns/${campaignId}/steps`, { params: { owner_email: ownerEmail } }),
 };
