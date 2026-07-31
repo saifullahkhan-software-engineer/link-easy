@@ -30,6 +30,9 @@ celery_app.conf.update(
     timezone                 = "UTC",
     enable_utc               = True,
  
+    # Keep reconnecting when the worker starts (required explicitly by Celery 6).
+    broker_connection_retry_on_startup = True,
+
     # Task behaviour
     task_acks_late           = True,    # Acknowledge AFTER task finishes (not before)
     task_reject_on_worker_lost = True,  # Re-queue if worker dies mid-task
@@ -40,6 +43,12 @@ celery_app.conf.update(
 
     # Celery Beat schedule for periodic tasks
     beat_schedule = {
+        # Database-backed dispatch: survives worker restarts unlike long ETA
+        # tasks held in a worker's in-memory timer.
+        'dispatch-due-account-sessions': {
+            'task': 'tasks.dispatch_due_account_sessions',
+            'schedule': 60.0,  # Every minute
+        },
         'reconcile-stalled-leads': {
             'task': 'tasks.reconcile_stalled_leads',
             'schedule': 900.0,  # Every 15 minutes (900 seconds)

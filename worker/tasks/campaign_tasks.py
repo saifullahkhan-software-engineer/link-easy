@@ -244,6 +244,51 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
             raise self.retry(exc=exc, countdown=random.randint(600, 1800))
 
 
+@celery_app.task(name="tasks.dispatch_due_account_sessions")
+def dispatch_due_account_sessions():
+    """Queue immediate account sessions for actions whose DB due time has arrived.
+
+    This task is run by Celery Beat.  It deliberately does not use a long
+    ``eta``: ``Lead.next_action_at`` remains available after either Redis or a
+    worker is restarted.
+    """
+    from sqlalchemy import or_
+
+    now = datetime.now(timezone.utc)
+    with get_sync_db() as db:
+        initial_due = (
+            ((Lead.current_step == None) | (Lead.current_step == 0))
+            & (Lead.next_action_at == None)
+        )
+        scheduled_due = (
+            (Lead.next_action_at != None) & (Lead.next_action_at <= now)
+        )
+        account_emails = [
+            row[0]
+            for row in db.query(Campaign.account_email).join(
+                Lead, Lead.campaign_id == Campaign.id
+            ).filter(
+                Campaign.status == CampaignStatus.ACTIVE,
+                Lead.status.in_([
+                    LeadStatus.PENDING,
+                    LeadStatus.VISITING,
+                    LeadStatus.REQUESTED,
+                    LeadStatus.ACCEPTED,
+                    LeadStatus.MESSAGED,
+                    LeadStatus.REPLIED,
+                ]),
+                or_(initial_due, scheduled_due),
+            ).distinct().all()
+        ]
+
+    for account_email in account_emails:
+        celery_app.send_task("tasks.run_account_session", args=[account_email])
+
+    if account_emails:
+        logger.info("📅 Dispatched due account sessions for %d account(s)", len(account_emails))
+    return {"accounts_dispatched": len(account_emails)}
+
+
 @celery_app.task(name="tasks.reconcile_stalled_leads")
 def reconcile_stalled_leads():
     """Find stalled leads and re-enqueue them for processing.
@@ -826,10 +871,21 @@ def run_account_session(self, account_email: str):
                 logger.warning(f"⚠️ Account {account_email} not found or not active")
                 return {"status": "skipped", "reason": "account_not_active"}
             
-            # Query all due leads across all ACTIVE campaigns for this account
-            # For leads that haven't started (current_step is NULL/0), match step 1
-            # For leads that have started, match their current step
+            # Query due work from the durable database schedule.  An initial
+            # lead has no next_action_at and is eligible for step 1; later
+            # steps are eligible only once their persisted due time arrives.
             from sqlalchemy import or_
+            now = datetime.now(timezone.utc)
+            initial_step_due = (
+                ((Lead.current_step == None) | (Lead.current_step == 0))
+                & (CampaignStep.step_order == 1)
+                & (Lead.next_action_at == None)
+            )
+            scheduled_step_due = (
+                (Lead.current_step == CampaignStep.step_order)
+                & (Lead.next_action_at != None)
+                & (Lead.next_action_at <= now)
+            )
             due_leads = db.query(Lead, Campaign, CampaignStep).join(
                 Campaign, Lead.campaign_id == Campaign.id
             ).join(
@@ -837,12 +893,15 @@ def run_account_session(self, account_email: str):
             ).filter(
                 Campaign.account_email == account_email,
                 Campaign.status == CampaignStatus.ACTIVE,
-                Lead.status.in_([LeadStatus.PENDING, LeadStatus.VISITING, LeadStatus.REQUESTED, LeadStatus.ACCEPTED]),
-                or_(
-                    (Lead.current_step == None) & (CampaignStep.step_order == 1),
-                    (Lead.current_step == 0) & (CampaignStep.step_order == 1),
-                    Lead.current_step == CampaignStep.step_order
-                )
+                Lead.status.in_([
+                    LeadStatus.PENDING,
+                    LeadStatus.VISITING,
+                    LeadStatus.REQUESTED,
+                    LeadStatus.ACCEPTED,
+                    LeadStatus.MESSAGED,
+                    LeadStatus.REPLIED,
+                ]),
+                or_(initial_step_due, scheduled_step_due),
             ).all()
             
             if not due_leads:
@@ -865,24 +924,11 @@ def run_account_session(self, account_email: str):
             
             logger.info(f"✅ Session completed for account {account_email}. Processed {len(results)} leads.")
             
-            # Calculate next session delay based on the current step's delay_hours
-            # Use the delay_hours from the step that was just processed (step 1 typically)
-            # If delay_hours is 0 or not set, default to 2 hours minimum
-            if due_leads:
-                # Get the step that was processed (first lead's step)
-                _, _, current_step = due_leads[0]
-                delay_hours = current_step.delay_hours if current_step.delay_hours and current_step.delay_hours > 0 else 2
-            else:
-                delay_hours = 2  # Default if no leads processed
-            
-            next_run_delay = int(delay_hours * 3600)
-            self.apply_async(
-                args=[account_email],
-                countdown=next_run_delay,
-                time_limit=7200,
-                soft_time_limit=6600
-            )
-            logger.info(f"📅 Next session scheduled in {delay_hours} hours (based on step delay_hours)")
+            # Do not enqueue a long ETA/countdown task here.  Celery keeps
+            # ETA tasks in the consuming worker's memory, which is why a
+            # worker restart could previously leave a sequence appearing
+            # stuck.  `next_action_at` above is durable; the Beat dispatcher
+            # queues an immediate account session once that time is due.
             
             return {
                 "status": "completed",
@@ -990,10 +1036,24 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                 )
                 db.add(job)
                 
-                # Update lead status and current_step
+                # Persist the next action time.  This is the source of truth
+                # for delayed steps and is safe across Celery/Redis restarts.
                 _update_lead_status(lead, step.step_type)
-                lead.current_step = step_order + 1
-                lead.last_action_at = datetime.now(timezone.utc)
+                next_step = db.query(CampaignStep).filter(
+                    CampaignStep.campaign_id == campaign_id,
+                    CampaignStep.step_order == step_order + 1,
+                ).first()
+                now = datetime.now(timezone.utc)
+                lead.last_action_at = now
+                if next_step:
+                    lead.current_step = next_step.step_order
+                    lead.next_action_at = now + timedelta(
+                        hours=max(float(next_step.delay_hours or 0), 0)
+                    )
+                else:
+                    lead.status = LeadStatus.COMPLETE
+                    lead.completed_at = now
+                    lead.next_action_at = None
                 
                 db.commit()
                 results.append({"lead_id": lead_id, "result": result})
