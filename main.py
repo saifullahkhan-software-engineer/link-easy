@@ -1,9 +1,4 @@
 import asyncio
-import sys
-
-# Fix for Windows asyncio subprocess support - MUST be set before any async operations
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from contextlib import asynccontextmanager
 
@@ -32,11 +27,6 @@ from run_migrations import run_migrations
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run database initializations on startup, start background tasks."""
-    # Ensure Windows asyncio policy is set for this event loop
-    if sys.platform == "win32":
-        if not isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsSelectorEventLoopPolicy):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
     # Fail loudly at startup if the credential encryption key is missing or
     # malformed — a config mistake must not silently corrupt/expose secrets.
     validate_encryption_key()
@@ -105,9 +95,5 @@ async def db_check(
 
 if __name__ == "__main__":
     import uvicorn
-    
-    # Fix for Windows asyncio subprocess support - set before uvicorn starts
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
+
     uvicorn.run(app, host="127.0.0.1", port=8000)
