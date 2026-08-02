@@ -27,6 +27,7 @@ from models.roles import UserRole
 from api.dependencies import get_current_user
 from models.user import User
 from automation.session_manager import start_periodic_cleanup
+from run_migrations import run_migrations
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,6 +40,20 @@ async def lifespan(app: FastAPI):
     # Fail loudly at startup if the credential encryption key is missing or
     # malformed — a config mistake must not silently corrupt/expose secrets.
     validate_encryption_key()
+
+    # Apply any pending schema migrations BEFORE touching the database.
+    # Base.metadata.create_all() only creates missing tables — it never adds
+    # new columns to existing ones, so without this a code pull that adds a
+    # column (e.g. campaign_jobs.action_message) silently breaks every job
+    # with "column does not exist" until someone remembers to run
+    # `python run_migrations.py` by hand.
+    try:
+        await asyncio.to_thread(run_migrations)
+    except Exception as exc:
+        raise RuntimeError(
+            "Database migration failed at startup. Run 'python run_migrations.py' "
+            "manually to see the full error."
+        ) from exc
 
     await init_db()
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)

@@ -124,6 +124,7 @@ CREATE TABLE public.campaign_jobs (
     step_type character varying NOT NULL,
     celery_task_id character varying,
     status public.job_status NOT NULL,
+    action_message text,
     error_message text,
     scheduled_at timestamp with time zone,
     started_at timestamp with time zone,
