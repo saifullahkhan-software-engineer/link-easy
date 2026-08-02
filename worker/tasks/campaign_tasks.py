@@ -968,9 +968,12 @@ def run_account_session(self, account_email: str):
             per_action_seconds = (target_duration_minutes * 60) / len(due_leads)
             logger.info(f"⏱️ Target session duration: {target_duration_minutes} minutes, ~{per_action_seconds:.0f}s per action")
             
-            # Process leads in async loop
+            # Process leads in async loop. Thread the Celery task id down so
+            # the helper (which is a plain async function, not a bound task)
+            # can stamp CampaignJob records with it without referencing `self`.
             results = asyncio.run(_process_leads_session(
-                account, due_leads, per_action_seconds, db
+                account, due_leads, per_action_seconds, db,
+                celery_task_id=self.request.id,
             ))
             
             logger.info(f"✅ Session completed for account {account_email}. Processed {len(results)} leads.")
@@ -1009,7 +1012,8 @@ def run_account_session(self, account_email: str):
             pass
 
 
-async def _process_leads_session(account, due_leads, per_action_seconds, db):
+async def _process_leads_session(account, due_leads, per_action_seconds, db,
+                                 *, celery_task_id: str | None = None):
     """
     Async function that processes leads in a single browser session.
 
@@ -1086,7 +1090,7 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                     lead_id=lead_id,
                     step_type=step_type_val,
                     status=JobStatus.RUNNING,
-                    celery_task_id=self.request.id,
+                    celery_task_id=celery_task_id,
                     action_message=f"Running {action_label}...",
                     started_at=datetime.now(timezone.utc),
                 )
@@ -1172,7 +1176,7 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                         status=JobStatus.FAILED,
                         action_message=f"{action_label} failed unexpectedly.",
                         error_message=str(exc),
-                        celery_task_id=self.request.id,
+                        celery_task_id=celery_task_id,
                         started_at=datetime.now(timezone.utc),
                         completed_at=datetime.now(timezone.utc)
                     )
