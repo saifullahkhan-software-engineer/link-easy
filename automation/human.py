@@ -81,19 +81,60 @@ async def human_click(page: Page, target: str | Locator | ElementHandle) -> None
     else:
         raise TypeError(f"human_click() expects str, Locator, or ElementHandle, got {type(target)}")
 
+    # Elements below the fold have viewport coordinates that point at whatever
+    # is currently painted there, so the click lands on the wrong node.
+    try:
+        await element.scroll_into_view_if_needed(timeout=3000)
+        await asyncio.sleep(random.uniform(0.15, 0.4))
+    except Exception:
+        pass
+
     box = await element.bounding_box()
     if not box:
         # Fallback for elements without a bounding box (e.g., some SVGs)
         await element.click()
         return
- 
+
+    # An element scrolled under a sticky header/footer, or sized 0, cannot be
+    # clicked by coordinates at all.
+    viewport = page.viewport_size or {"width": 1440, "height": 900}
+    if (box["width"] <= 0 or box["height"] <= 0
+            or box["y"] + box["height"] < 0 or box["y"] > viewport["height"]):
+        await element.click()
+        await asyncio.sleep(random.uniform(0.2, 0.6))
+        return
+
     # Click slightly off-centre — humans don't click exact pixel-perfect centres
     target_x = box["x"] + box["width"]  * random.uniform(0.25, 0.75)
     target_y = box["y"] + box["height"] * random.uniform(0.25, 0.75)
 
     await human_mouse_move(page, target_x, target_y)
     await asyncio.sleep(random.uniform(0.08, 0.35))   # Brief pause before clicking
-    await page.mouse.click(target_x, target_y)
+
+    # Verify the point actually belongs to our element; LinkedIn overlays,
+    # hover cards and toasts routinely sit on top of it and swallow the click.
+    hit = True
+    try:
+        hit = bool(await element.evaluate(
+            """(el, pt) => {
+                const top = document.elementFromPoint(pt.x, pt.y);
+                return !!top && (top === el || el.contains(top) || top.contains(el));
+            }""",
+            {"x": target_x, "y": target_y},
+        ))
+    except Exception:
+        hit = True
+
+    if hit:
+        await page.mouse.click(target_x, target_y)
+    else:
+        logger.debug("Click point is covered by another element; using a direct element click")
+        try:
+            await element.click(timeout=3000)
+        except Exception:
+            # Last resort: dispatch the event straight to the element.
+            await element.dispatch_event("click")
+
     await asyncio.sleep(random.uniform(0.2, 0.6))     # Brief pause after clicking
  
  
@@ -103,9 +144,40 @@ async def human_type(page: Page, target: str | Locator | ElementHandle, text: st
     Includes occasional micro-pauses to simulate thinking.
     Accepts selector string, Locator, or ElementHandle.
     """
+    element = None
+    if isinstance(target, str):
+        try:
+            element = await page.wait_for_selector(target, timeout=5000)
+        except Exception:
+            element = None
+    elif isinstance(target, Locator):
+        try:
+            element = await target.element_handle()
+        except Exception:
+            element = None
+    elif isinstance(target, ElementHandle):
+        element = target
+
     await human_click(page, target)
     await asyncio.sleep(random.uniform(0.3, 0.9))
- 
+
+    # If the click was swallowed the field never gains focus and every
+    # keystroke is dropped silently.  Force focus before typing.
+    if element is not None:
+        try:
+            focused = bool(await element.evaluate(
+                "el => el === document.activeElement || el.contains(document.activeElement)"
+            ))
+        except Exception:
+            focused = True
+        if not focused:
+            logger.debug("Field not focused after click; forcing focus before typing")
+            try:
+                await element.focus()
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
     for char in text:
         await page.keyboard.type(char)
  
@@ -121,6 +193,23 @@ async def human_type(page: Page, target: str | Locator | ElementHandle, text: st
             delay += random.uniform(0.5, 2.0)
  
         await asyncio.sleep(delay)
+
+    # Verify the text landed; fall back to a direct fill when it did not.
+    if element is not None and text:
+        try:
+            current = await element.input_value()
+        except Exception:
+            try:
+                current = await element.inner_text()
+            except Exception:
+                current = text
+        if not (current or "").strip():
+            logger.warning("⚠️ Typed text did not land in the field; retrying with fill()")
+            try:
+                await element.fill(text)
+                await asyncio.sleep(0.3)
+            except Exception as exc:
+                logger.debug(f"fill() fallback failed: {exc}")
  
  
 async def human_scroll(page: Page, direction: str = "down", distance: int = None) -> None:

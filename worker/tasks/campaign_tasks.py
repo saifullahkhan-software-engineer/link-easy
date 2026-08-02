@@ -502,6 +502,15 @@ def _step_condition_is_met(
 def _action_outcome(step_type, result: dict) -> tuple[bool, str, str | None]:
     """Turn browser results into truthful, screen-ready action feedback."""
     error = result.get("error")
+
+    # Benign skips (lead has no posts / everything is already liked) are not
+    # failures: the step can never succeed on a retry, so surface the reason
+    # and let the sequence move on.
+    if result.get("skipped") and not result.get("liked_post"):
+        if step_type == CampaignStepType.VISIT_AND_LIKE and not result.get("visited"):
+            return False, f"{_action_label(step_type)} failed: {error}", error
+        return True, f"No post to like — {error}", None
+
     if error:
         return False, f"{_action_label(step_type)} failed: {error}", error
 
