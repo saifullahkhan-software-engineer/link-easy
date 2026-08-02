@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useMemo, useRef, useEffect } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 
@@ -7,11 +7,62 @@ import * as THREE from 'three';
  * professional social graph without aping LinkedIn's branding. One canvas,
  * ~110 nodes, line segments for edges, pointer-parallax tilt. DPR capped
  * for performance.
+ * 
+ * Updated: Nodes are now profile/person icons (instead of plain dots) to denote
+ * connected people / LinkedIn profiles. 3D globe shape, rotation, connections
+ * and parallax behavior remain exactly the same.
  */
 
 const NODE_COUNT = 110;
 const RADIUS = 2.1;
 const EDGE_MAX_DIST = 1.05;
+
+// Create a simple profile icon texture (circle head + shoulders) - LinkedIn-like person icon
+function createProfileIconTexture(size = 64) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d', { alpha: true });
+
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size * 0.42;
+
+  // Background circle (teal accent like original dots)
+  ctx.fillStyle = '#14b8a6';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Inner lighter circle for head
+  ctx.fillStyle = '#0f766e';
+  ctx.beginPath();
+  ctx.arc(cx, cy - size * 0.08, r * 0.48, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Head (circle)
+  ctx.fillStyle = '#f1f5f9';
+  ctx.beginPath();
+  ctx.arc(cx, cy - size * 0.08, r * 0.32, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Shoulders / body (rounded trapezoid shape)
+  ctx.fillStyle = '#e0f2fe';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + size * 0.18, r * 0.72, r * 0.38, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Subtle ring / border
+  ctx.strokeStyle = '#134e4b';
+  ctx.lineWidth = size * 0.06;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
 
 function buildNetwork() {
   // Fibonacci sphere with radial jitter for an organic cloud.
@@ -53,15 +104,25 @@ function buildNetwork() {
       'position',
       new THREE.Float32BufferAttribute(lineVerts, 3)
     ),
+    positions, // keep for sprite placement
   };
 }
 
 function NetworkCloud() {
   const group = useRef();
-  const { pointsGeometry, linesGeometry } = useMemo(buildNetwork, []);
+  const { pointsGeometry, linesGeometry, positions } = useMemo(buildNetwork, []);
   const { pointer } = useThree();
+  const profileTexture = useMemo(() => createProfileIconTexture(64), []);
 
   const target = useRef({ x: 0, y: 0 });
+
+  // Create sprite refs for all profile icons
+  const spritesRef = useRef([]);
+
+  useEffect(() => {
+    // Clean up previous sprites if needed
+    spritesRef.current = [];
+  }, []);
 
   useFrame((state, delta) => {
     if (!group.current) return;
@@ -83,19 +144,28 @@ function NetworkCloud() {
 
   return (
     <group ref={group}>
-      <points geometry={pointsGeometry}>
-        <pointsMaterial
-          size={0.07}
-          color="#2dd4bf"
-          transparent
-          opacity={0.95}
-          sizeAttenuation
-          depthWrite={false}
-        />
-      </points>
+      {/* Profile icon sprites instead of plain dots - same positions & behavior */}
+      {positions.map((pos, index) => (
+        <sprite
+          key={index}
+          position={[pos.x, pos.y, pos.z]}
+          scale={[0.18, 0.18, 0.18]}
+        >
+          <spriteMaterial
+            map={profileTexture}
+            transparent
+            opacity={0.95}
+            depthWrite={false}
+            sizeAttenuation
+          />
+        </sprite>
+      ))}
+
+      {/* Connection lines remain unchanged */}
       <lineSegments geometry={linesGeometry}>
         <lineBasicMaterial color="#14b8a6" transparent opacity={0.18} depthWrite={false} />
       </lineSegments>
+
       {/* faint inner glow sphere */}
       <mesh>
         <sphereGeometry args={[RADIUS * 0.55, 32, 32]} />

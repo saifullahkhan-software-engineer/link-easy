@@ -1,10 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { campaignsApi, linkedinApi } from '../api/endpoints';
+import { campaignsApi, linkedinApi, leadsApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { Spinner } from '../components/Spinner';
+import ManualLeadForm from '../components/leads/ManualLeadForm';
+import CsvUpload from '../components/leads/CsvUpload';
+import LeadsTable from '../components/leads/LeadsTable';
+import Modal from '../components/Modal';
 
 const EMPTY_CAMPAIGN_FORM = {
   name: '',
@@ -96,6 +100,13 @@ export default function CampaignCreatePage() {
   const [account, setAccount] = useState(null);
   const [creating, setCreating] = useState(false);
 
+  // After campaign creation, switch to leads management mode on this page
+  const [createdCampaign, setCreatedCampaign] = useState(null);
+  const [leads, setLeads] = useState([]);
+  const [leadsLoading, setLeadsLoading] = useState(false);
+  const [leadTab, setLeadTab] = useState('manual');
+  const [now, setNow] = useState(Date.now());
+
   // Form fields
   const [form, setForm] = useState(EMPTY_CAMPAIGN_FORM);
   
@@ -112,6 +123,12 @@ export default function CampaignCreatePage() {
   const [newStepAction, setNewStepAction] = useState('visit_profile');
   const [newStepDelayVal, setNewStepDelayVal] = useState(24);
   const [newStepDelayUnit, setNewStepDelayUnit] = useState('hours');
+
+  // Live tick for leads table (if needed)
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Compute total sequence duration in hours
   const totalDurationHours = steps.reduce((total, step, idx) => {
@@ -279,14 +296,116 @@ export default function CampaignCreatePage() {
 
       const { data } = await campaignsApi.create(ownerEmail, payload);
       toast.success(`Campaign "${data.name}" successfully created!`);
-      // Redirect to Campaign Status Page and select this campaign
-      navigate('/app/campaigns', { state: { selectedCampaignId: data.id } });
+
+      // Instead of redirecting, switch to leads management mode on this page
+      setCreatedCampaign(data);
+      setLeads([]);
+      fetchLeadsForCampaign(data.id, false);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Could not create the campaign.'));
     } finally {
       setCreating(false);
     }
   }
+
+  // Fetch leads for a specific campaign (used after creation)
+  const fetchLeadsForCampaign = useCallback(
+    async (campaignId, silent = true) => {
+      if (!campaignId) return;
+      if (!silent) setLeadsLoading(true);
+      try {
+        const { data } = await leadsApi.list(campaignId, ownerEmail);
+        setLeads(data || []);
+      } catch (err) {
+        if (!silent) toast.error(getErrorMessage(err, 'Could not load leads.'));
+      } finally {
+        setLeadsLoading(false);
+      }
+    },
+    [ownerEmail]
+  );
+
+  // Campaign controls for the newly created campaign (pause, delete, refresh)
+  const [statusTransitioning, setStatusTransitioning] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+
+  async function pauseCreatedCampaign() {
+    if (!createdCampaign?.id) return;
+    setStatusTransitioning(true);
+    try {
+      const { data } = await campaignsApi.pause(createdCampaign.id, ownerEmail);
+      toast.success(data?.message || 'Campaign paused successfully.');
+      setCreatedCampaign((prev) => ({ ...prev, status: 'paused' }));
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not pause the campaign.'));
+    } finally {
+      setStatusTransitioning(false);
+    }
+  }
+
+  async function restartCreatedCampaign() {
+    if (!createdCampaign?.id) return;
+    setStatusTransitioning(true);
+    try {
+      const { data } = await campaignsApi.restart(createdCampaign.id, ownerEmail);
+      toast.success(data?.message || 'Campaign restarted successfully.');
+      setCreatedCampaign((prev) => ({ ...prev, status: 'active' }));
+      fetchLeadsForCampaign(createdCampaign.id, true);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not restart the campaign.'));
+    } finally {
+      setStatusTransitioning(false);
+    }
+  }
+
+  async function startCreatedCampaign() {
+    if (!createdCampaign?.id) return;
+    setStatusTransitioning(true);
+    try {
+      const { data } = await campaignsApi.start(createdCampaign.id, ownerEmail);
+      toast.success(data?.message || 'Campaign started — leads are being queued.');
+      setCreatedCampaign((prev) => ({ ...prev, status: 'active' }));
+      fetchLeadsForCampaign(createdCampaign.id, true);
+    } catch (err) {
+      if (err?.response?.status === 409) {
+        toast('Campaign is already running.', { icon: 'ℹ️' });
+        setCreatedCampaign((prev) => ({ ...prev, status: 'active' }));
+      } else {
+        toast.error(getErrorMessage(err, 'Could not start the campaign.'));
+      }
+    } finally {
+      setStatusTransitioning(false);
+    }
+  }
+
+  async function deleteCreatedCampaign() {
+    if (!createdCampaign?.id) return;
+    setDeleteLoading(true);
+    try {
+      const { data } = await campaignsApi.delete(createdCampaign.id, ownerEmail);
+      toast.success(data?.message || 'Campaign deleted successfully.');
+      // Reset to create new campaign mode
+      setCreatedCampaign(null);
+      setLeads([]);
+      setForm(EMPTY_CAMPAIGN_FORM);
+      setSteps([
+        { id: 1, step_type: 'visit_profile', delay_val: 0, delay_unit: 'hours' },
+        { id: 2, step_type: 'send_connection', delay_val: 2, delay_unit: 'hours' },
+      ]);
+      setShowDeleteModal(false);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not delete the campaign.'));
+    } finally {
+      setDeleteLoading(false);
+    }
+  }
+
+  const refreshLeads = () => {
+    if (createdCampaign?.id) {
+      fetchLeadsForCampaign(createdCampaign.id, false);
+    }
+  };
 
   if (booting) {
     return (
@@ -332,6 +451,184 @@ export default function CampaignCreatePage() {
     );
   }
 
+  // If campaign was just created, show Leads management UI (hide sequence builder)
+  if (createdCampaign) {
+    return (
+      <div className="space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-zinc-50">Campaign Created — Manage Leads</h1>
+            <p className="mt-1 text-sm text-zinc-400">
+              {createdCampaign.name} • {createdCampaign.description || 'No description'}
+            </p>
+          </div>
+
+          {/* Action buttons: Refresh, Pause/Start, Delete (instead of latest activity) */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={refreshLeads}
+              disabled={leadsLoading || statusTransitioning}
+              className="inline-flex items-center gap-2 rounded-lg border border-surface-700 bg-surface-800 px-4 py-2 text-sm font-semibold text-zinc-300 transition hover:bg-surface-700"
+              title="Refresh leads"
+            >
+              <svg className={`h-4 w-4 ${leadsLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+              </svg>
+              <span>Refresh</span>
+            </button>
+
+            {/* Pause / Start / Resume buttons */}
+            {createdCampaign.status !== 'active' ? (
+              <button
+                onClick={createdCampaign.status === 'paused' || createdCampaign.status === 'failed' ? restartCreatedCampaign : startCreatedCampaign}
+                disabled={statusTransitioning || leads.length === 0}
+                className={`btn-primary inline-flex items-center gap-2 ${leads.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={leads.length === 0 ? 'Add at least one lead to start' : 'Start / Resume campaign'}
+              >
+                {statusTransitioning && <Spinner />}
+                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M6.3 2.841A1.5 1.5 0 0 0 4 4.11v11.78a1.5 1.5 0 0 0 2.3 1.27l9.344-5.89a1.5 1.5 0 0 0 0-2.538L6.3 2.841Z" />
+                </svg>
+                <span>
+                  {createdCampaign.status === 'paused' || createdCampaign.status === 'failed' ? 'Resume Campaign' : 'Start Campaign'}
+                </span>
+              </button>
+            ) : (
+              <button
+                onClick={pauseCreatedCampaign}
+                disabled={statusTransitioning}
+                className="btn-danger inline-flex items-center gap-2"
+              >
+                {statusTransitioning && <Spinner />}
+                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M5.75 3a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-1.5 0V3.75A.75.75 0 0 1 5.75 3ZM14.25 3a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-1.5 0V3.75a.75.75 0 0 1 .75-.75Z" />
+                </svg>
+                <span>Pause Campaign</span>
+              </button>
+            )}
+
+            {/* Delete Button */}
+            <button
+              onClick={() => setShowDeleteModal(true)}
+              disabled={statusTransitioning}
+              className="inline-flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2 text-sm font-semibold text-red-400 transition hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+              title="Delete this campaign"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0Z" />
+              </svg>
+              <span>Delete</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Leads Management Section (replaces Outreach Actions + Drip Sequence Flow) */}
+        <div className="card">
+          {/* Tab header */}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-700 px-5 pt-4">
+            <div className="flex gap-1" role="tablist" aria-label="Add leads">
+              {[
+                ['manual', 'Add manually'],
+                ['csv', 'Upload CSV'],
+              ].map(([key, label]) => (
+                <button
+                  key={key}
+                  role="tab"
+                  aria-selected={leadTab === key}
+                  onClick={() => setLeadTab(key)}
+                  className={`rounded-t-lg border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                    leadTab === key
+                      ? 'border-accent-400 text-accent-300'
+                      : 'border-transparent text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 pb-2">
+              <span className="text-xs text-zinc-500">
+                {leads.length} lead{leads.length === 1 ? '' : 's'}
+              </span>
+              <button
+                onClick={refreshLeads}
+                className="rounded-md p-1.5 text-zinc-500 transition hover:bg-surface-700 hover:text-zinc-200"
+                title="Refresh leads"
+              >
+                <svg className={`h-4 w-4 ${leadsLoading ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          {/* Tab body */}
+          <div className="p-5">
+            {leadTab === 'manual' ? (
+              <ManualLeadForm
+                campaignId={createdCampaign.id}
+                ownerEmail={ownerEmail}
+                onLeadAdded={() => fetchLeadsForCampaign(createdCampaign.id, true)}
+              />
+            ) : (
+              <CsvUpload
+                campaignId={createdCampaign.id}
+                ownerEmail={ownerEmail}
+                onUploaded={() => fetchLeadsForCampaign(createdCampaign.id, false)}
+              />
+            )}
+          </div>
+
+          {/* Leads table */}
+          <div className="border-t border-surface-700">
+            <LeadsTable leads={leads} loading={leadsLoading} steps={[]} now={now} />
+          </div>
+        </div>
+
+        {/* Delete Confirmation Modal */}
+        <Modal
+          open={showDeleteModal}
+          onClose={() => !deleteLoading && setShowDeleteModal(false)}
+          title="Delete Campaign"
+        >
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+              <svg className="h-5 w-5 shrink-0 text-red-400 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+              </svg>
+              <div>
+                <p className="text-sm font-semibold text-red-300">This action is irreversible</p>
+                <p className="mt-1 text-xs text-zinc-400 leading-relaxed">
+                  Deleting campaign <span className="font-semibold text-zinc-200">"{createdCampaign?.name}"</span> will permanently remove all leads, sequence steps and job history.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowDeleteModal(false)}
+                disabled={deleteLoading}
+                className="rounded-lg border border-surface-700 bg-surface-800 px-4 py-2 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteCreatedCampaign}
+                disabled={deleteLoading}
+                className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-50"
+              >
+                {deleteLoading && <Spinner />}
+                <span>{deleteLoading ? 'Deleting...' : 'Delete Campaign'}</span>
+              </button>
+            </div>
+          </div>
+        </Modal>
+      </div>
+    );
+  }
+
+  // Default: Show the original Create Campaign form (Outreach Actions + Drip Sequence)
   return (
     <div className="space-y-6">
       {/* Header */}
