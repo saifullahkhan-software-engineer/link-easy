@@ -8,7 +8,12 @@ and Day 5 (thanks message if accepted).
 import asyncio
 import random
 from patchright.async_api import Page
-from automation.human import human_click, human_type, human_scroll, random_idle_pause
+from automation.human import (
+    human_click,
+    human_mouse_move,
+    human_scroll,
+    random_idle_pause,
+)
  
  
 async def send_message(page: Page, profile_url: str,

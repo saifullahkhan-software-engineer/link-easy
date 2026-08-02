@@ -718,17 +718,18 @@ export default function CampaignStatusPage() {
               <ul className="scrollbar-thin max-h-64 space-y-2 overflow-auto">
                 {jobs.slice(0, 12).map((job) => {
                   const failed = job.status === 'failed';
+                  const skipped = job.status === 'skipped';
                   const running = job.status === 'running';
                   const timestamp = job.completed_at || job.started_at || job.created_at;
                   return (
-                    <li key={job.id} className={`rounded-lg border p-2.5 ${failed ? 'border-red-500/30 bg-red-500/5' : running ? 'border-amber-500/30 bg-amber-500/5' : 'border-emerald-500/20 bg-emerald-500/5'}`}>
+                    <li key={job.id} className={`rounded-lg border p-2.5 ${failed ? 'border-red-500/30 bg-red-500/5' : running ? 'border-amber-500/30 bg-amber-500/5' : skipped ? 'border-sky-500/20 bg-sky-500/5' : 'border-emerald-500/20 bg-emerald-500/5'}`}>
                       <div className="flex items-center justify-between gap-2">
-                        <span className={`text-xs font-semibold capitalize ${failed ? 'text-red-300' : running ? 'text-amber-300' : 'text-emerald-300'}`}>
-                          {running ? 'Running' : failed ? 'Failed' : 'Completed'} · {(ACTION_LABELS[job.step_type] || job.step_type)}
+                        <span className={`text-xs font-semibold capitalize ${failed ? 'text-red-300' : running ? 'text-amber-300' : skipped ? 'text-sky-300' : 'text-emerald-300'}`}>
+                          {running ? 'Running' : failed ? 'Failed' : skipped ? 'Skipped' : 'Completed'} · {(ACTION_LABELS[job.step_type] || job.step_type)}
                         </span>
                         {timestamp && <time className="shrink-0 text-[10px] text-zinc-500">{new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>}
                       </div>
-                      <p className="mt-1 text-xs leading-relaxed text-zinc-300">{job.action_message || (running ? 'Action is in progress.' : failed ? 'The action failed.' : 'Action completed successfully.')}</p>
+                      <p className="mt-1 text-xs leading-relaxed text-zinc-300">{job.action_message || (running ? 'Action is in progress.' : failed ? 'The action failed.' : skipped ? 'The action was skipped.' : 'Action completed successfully.')}</p>
                     </li>
                   );
                 })}
