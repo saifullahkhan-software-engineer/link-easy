@@ -48,6 +48,25 @@ logger = get_logger(__name__)
 # empty ghost-text container instead of the actual input.
 COMPOSE_BOX_SELECTOR = "div.msg-form__contenteditable[contenteditable='true']"
 
+# LinkedIn keeps the global ``Messaging`` navigation button mounted while a
+# profile is open.  It is *not* the profile's ``Message`` action: clicking it
+# opens a blank "New message" window with a recipient typeahead.  A broad
+# ``[aria-label*='message']`` selector therefore picks the wrong button and
+# leaves the actual message editor covered by that typeahead (the exact
+# interception shown in the worker logs).  Keep discovery scoped to the
+# profile's main content and explicitly reject the navigation control.
+PROFILE_MESSAGE_BUTTON_SELECTORS = [
+    "main button[aria-label^='Message' i]",
+    "main [role='button'][aria-label^='Message' i]",
+    "main button.artdeco-button:has-text('Message')",
+]
+
+# A visible recipient picker means the surrounding form is a blank compose
+# window, not a conversation with the profile we are processing.  Its list
+# sits above the contenteditable and swallows pointer input, so it must never
+# be selected as the editor to type into.
+RECIPIENT_TYPEAHEAD_SELECTOR = ".msg-connections-typeahead-container"
+
 # A single rendered message in a conversation.  Both the mini messaging
 # overlay on the profile page and the full messaging page render conversation
 # entries with this class, and a freshly sent message appears here immediately.
@@ -71,8 +90,9 @@ ERROR_TEXT_HINTS = (
 SEND_BUTTON_SELECTORS = [
     "button.msg-form__send-button",
     "button.msg-form__send-btn",
+    "button[data-control-name*='send' i]",
     ".msg-form__footer button[type='submit']",
-    "button[aria-label*='Send' i]",
+    "button[aria-label^='Send' i]",
     "button:has-text('Send')",
 ]
 
@@ -95,28 +115,64 @@ def _message_tail(message: str, length: int = 40) -> str:
     return _normalize(message)[-length:]
 
 
-async def _find_message_button(page: Page):
-    """
-    Wait for and return the profile's "Message" button (1st-degree only).
+def _is_profile_message_label(text: str | None, aria_label: str | None) -> bool:
+    """Return whether a button label identifies the profile ``Message`` action.
 
-    Returns None instead of raising so callers can fall back to the direct
-    compose URL.  Uses a case-insensitive attribute selector because LinkedIn
-    sometimes renders the aria-label as ``Message ...`` and sometimes as
-    ``message``, and waits for it to become visible because the profile
-    action buttons are lazy-rendered after the initial DOM load.
+    The global navigation control is labelled ``Messaging``.  It is tempting
+    to use a substring selector for both variants, but that opens an
+    unaddressed compose window rather than a conversation with the profile.
+    This deliberately accepts ``Message`` and labels such as ``Message Ada
+    Lovelace`` while rejecting ``Messaging`` and unrelated actions.
     """
-    selectors = [
-        "button[aria-label*='message' i]",          # case-insensitive aria-label
-        "button.artdeco-button:has-text('Message')",
-    ]
-    for selector in selectors:
-        try:
-            # Up to ~12s so slow/lazy-loaded profiles still resolve.
-            btn = await page.wait_for_selector(selector, state="visible", timeout=12000)
-            if btn:
-                return btn
-        except Exception:
-            continue
+    label = _normalize(aria_label).lower()
+    visible_text = _normalize(text).lower()
+    return (
+        (label == "message" or label.startswith("message ")
+         or visible_text == "message")
+        and not label.startswith("messaging")
+        and visible_text not in {"messaging", "new message"}
+    )
+
+
+async def _is_profile_message_button(button) -> bool:
+    """Verify that ``button`` is a visible, enabled action in profile content."""
+    try:
+        if not await button.is_visible() or not await button.is_enabled():
+            return False
+        details = await button.evaluate(
+            """el => ({
+                text: el.innerText || el.textContent || '',
+                ariaLabel: el.getAttribute('aria-label') || '',
+                inMain: Boolean(el.closest('main')),
+            })"""
+        )
+    except Exception:
+        return False
+    return bool(details.get("inMain")) and _is_profile_message_label(
+        details.get("text"), details.get("ariaLabel")
+    )
+
+
+async def _find_message_button(page: Page):
+    """Wait for and return the profile's actual ``Message`` action.
+
+    LinkedIn's persistent header also contains a button named ``Messaging``.
+    The old page-wide substring selector matched it first, opening a blank
+    composer whose recipient picker intercepted every later click.  Search
+    only within ``main`` and verify both the button's semantic label and its
+    profile-page ancestry before returning it.
+    """
+    deadline = asyncio.get_running_loop().time() + 12.0
+    while asyncio.get_running_loop().time() < deadline:
+        for selector in PROFILE_MESSAGE_BUTTON_SELECTORS:
+            try:
+                candidates = await page.query_selector_all(selector)
+            except Exception:
+                continue
+            for candidate in candidates:
+                if await _is_profile_message_button(candidate):
+                    return candidate
+        await asyncio.sleep(0.35)
     return None
 
 
@@ -168,33 +224,46 @@ async def _open_compose_direct(page: Page, profile_url: str) -> bool:
     return await _wait_for_compose_box(page)
 
 
-async def _wait_for_compose_box(page: Page) -> bool:
-    """Wait up to ~12s for the message compose box to be visible."""
-    try:
-        await page.wait_for_selector(
-            COMPOSE_BOX_SELECTOR, state="visible", timeout=12000
-        )
-        return True
-    except Exception:
-        return False
+async def _compose_has_visible_recipient_picker(box) -> bool:
+    """Return whether ``box`` belongs to an unaddressed ``New message`` form.
 
-
-async def _resolve_compose_box(page: Page, timeout_ms: int = 8000):
-    """Return the composer we should actually type into.
-
-    ``query_selector`` returns the *first* match, but LinkedIn frequently keeps
-    stale/minimised message overlays mounted, so the first contenteditable can
-    be an invisible bubble while the real (just opened) composer is the last
-    one.  Typing into the wrong one is exactly how the draft "disappears".
+    The picker is normally a sibling of the editor rather than its child, so
+    looking only below ``box`` misses it.  Resolve the nearest overlay/form
+    root first; this avoids a recipient picker in an unrelated, minimised
+    overlay affecting the active conversation.
     """
     try:
-        await page.wait_for_selector(COMPOSE_BOX_SELECTOR, state="visible", timeout=timeout_ms)
+        return bool(await box.evaluate(
+            """(el, selector) => {
+                // Use the outer overlay before the immediate .msg-form: the
+                // typeahead can be a sibling of the form rather than a child.
+                const root = el.closest('.msg-overlay-conversation-bubble')
+                    || el.closest('.msg-overlay')
+                    || el.closest('.msg-compose-form')
+                    || el.closest('form')
+                    || el.closest('main');
+                if (!root) return false;
+                return Array.from(root.querySelectorAll(selector)).some(node => {
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden'
+                        && rect.width > 0 && rect.height > 0;
+                });
+            }""",
+            RECIPIENT_TYPEAHEAD_SELECTOR,
+        ))
     except Exception:
-        return None
+        # A detached/re-rendered editor cannot safely receive a draft either.
+        return True
+
+
+async def _visible_compose_boxes(page: Page):
+    """Return visible, attached compose editors, newest overlay first."""
     try:
         boxes = await page.query_selector_all(COMPOSE_BOX_SELECTOR)
     except Exception:
-        boxes = []
+        return []
+
     visible = []
     for box in boxes:
         try:
@@ -202,9 +271,59 @@ async def _resolve_compose_box(page: Page, timeout_ms: int = 8000):
                 visible.append(box)
         except Exception:
             continue
-    if not visible:
-        return None
-    return visible[-1]
+    return visible
+
+
+async def _has_visible_recipient_typeahead(page: Page) -> bool:
+    """Return whether any blank-compose recipient picker is currently visible."""
+    try:
+        typeaheads = await page.query_selector_all(RECIPIENT_TYPEAHEAD_SELECTOR)
+    except Exception:
+        return False
+    for typeahead in typeaheads:
+        try:
+            if await typeahead.is_visible() and await typeahead.bounding_box():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _wait_for_compose_box(page: Page, timeout_ms: int = 12000) -> bool:
+    """Wait for a visible *addressed* message compose box.
+
+    A raw contenteditable is insufficient: the blank compose window opened by
+    the header's ``Messaging`` navigation has one too, but its recipient
+    typeahead covers the editor and Send remains disabled.  Only report a
+    composer as ready after resolving one that is not covered by that picker.
+    """
+    return await _resolve_compose_box(page, timeout_ms=timeout_ms) is not None
+
+
+async def _resolve_compose_box(page: Page, timeout_ms: int = 8000):
+    """Return the ready composer we should actually type into.
+
+    LinkedIn retains stale/minimised overlays in the DOM.  We prefer the last
+    visible editor (the latest overlay) but reject any editor inside a visible
+    recipient typeahead: that form has no selected recipient, so typing into
+    it cannot create a sendable message.
+    """
+    deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+    saw_unaddressed_composer = False
+    while asyncio.get_running_loop().time() < deadline:
+        boxes = await _visible_compose_boxes(page)
+        for box in reversed(boxes):
+            if not await _compose_has_visible_recipient_picker(box):
+                return box
+            saw_unaddressed_composer = True
+        await asyncio.sleep(0.25)
+
+    if saw_unaddressed_composer:
+        logger.debug(
+            "🔎 Ignoring a blank message composer because its recipient "
+            "typeahead is still visible"
+        )
+    return None
 
 
 async def _focus_compose_box(page: Page, box) -> bool:
@@ -232,7 +351,20 @@ async def _focus_compose_box(page: Page, box) -> bool:
     if await _focused():
         return True
 
-    logger.debug("🔎 Composer not focused after human click; retrying with a direct click")
+    # Focusing an already-addressed contenteditable does not require a mouse
+    # click.  It is more reliable than coordinates when LinkedIn temporarily
+    # paints a tooltip/toast over the editor, and unlike dispatching a click it
+    # performs the browser's normal focus action.
+    logger.debug("🔎 Composer not focused after human click; retrying with element.focus()")
+    try:
+        await box.focus()
+        await asyncio.sleep(0.25)
+    except Exception as exc:
+        logger.debug("🔎 Element focus on the composer failed: %s", exc)
+    if await _focused():
+        return True
+
+    logger.debug("🔎 Composer not focused after element.focus(); retrying with a direct click")
     try:
         await box.click(timeout=3000)
         await asyncio.sleep(0.4)
@@ -347,27 +479,27 @@ async def _type_into_compose_box(page: Page, box, message: str, tail: str) -> st
 
 
 async def _pick_enabled_send_button(scope, timeout_ms: int = 2500):
-    """Return the first visible, enabled Send button found under ``scope``.
+    """Return the newest visible, enabled Send button found under ``scope``.
 
-    ``scope`` may be a Page or an ElementHandle (a specific composer form);
-    ElementHandle lookups are scoped relative to the element, so the button is
-    guaranteed to belong to that composer rather than any other ``msg-form``
-    on the page.
+    ``wait_for_selector`` returns only the first matching element.  LinkedIn
+    may retain an older disabled form next to the active conversation, so
+    checking just that first match makes a valid Send button look absent.
+    Inspect every matching button and prefer the newest one instead.
     """
-    for selector in SEND_BUTTON_SELECTORS:
-        try:
-            button = await scope.wait_for_selector(
-                selector, state="visible", timeout=timeout_ms
-            )
-        except Exception:
-            button = None
-        if not button:
-            continue
-        try:
-            if await button.is_enabled():
-                return button
-        except Exception:
-            continue
+    deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+    while asyncio.get_running_loop().time() < deadline:
+        for selector in SEND_BUTTON_SELECTORS:
+            try:
+                buttons = await scope.query_selector_all(selector)
+            except Exception:
+                continue
+            for button in reversed(buttons):
+                try:
+                    if await button.is_visible() and await button.is_enabled():
+                        return button
+                except Exception:
+                    continue
+        await asyncio.sleep(0.15)
     return None
 
 
@@ -391,7 +523,11 @@ async def _send_button_for_box(page: Page, box):
                 return button
         except Exception:
             pass
-        logger.debug("🔎 Send button not found inside the typed composer; falling back to page-wide search")
+        # Do not click a page-wide Send button when we know which form was
+        # typed into.  Another retained conversation can have its own enabled
+        # Send action, and submitting that one would deliver the wrong draft.
+        logger.debug("🔎 Send button not found inside the typed composer")
+        return None
     return await _pick_enabled_send_button(page)
 
 
@@ -528,6 +664,13 @@ async def _type_and_send(page: Page, message: str,
 
     box = await _resolve_compose_box(page)
     if not box:
+        if await _has_visible_recipient_typeahead(page):
+            error = (
+                "Message composer is still showing LinkedIn's recipient picker; "
+                "no recipient-specific conversation was opened."
+            )
+            logger.warning("⚠️ %s", error)
+            return False, error
         logger.warning("⚠️ Message compose box not found or not visible")
         return False, "Message compose box not found or not visible."
 
