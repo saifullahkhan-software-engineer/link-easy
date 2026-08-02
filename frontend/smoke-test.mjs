@@ -127,7 +127,7 @@ const CASES = [
       'GET /api/v1/campaigns/camp-1/steps': (res) => json(res, 200, STEPS),
       'GET /api/v1/leads': (res) => json(res, 200, LEADS),
     },
-    mustContain: ['Q3 Founders', 'Jane Doe', 'replied', 'Add manually', 'Upload CSV', 'Start campaign', 'Next step', 'Scheduled time', 'Send Message', 'Due now'],
+    mustContain: ['Q3 Founders', 'Jane Doe', 'replied', 'Lead Status', 'Start campaign', 'Next step', 'Scheduled time', 'Send Message', 'Due now'],
   },
   {
     name: 'campaigns page — no account gates the page',

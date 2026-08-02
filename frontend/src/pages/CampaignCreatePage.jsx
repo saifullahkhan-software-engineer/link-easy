@@ -62,7 +62,7 @@ const ACTION_TYPES = [
   {
     type: 'send_message',
     label: 'Send Message',
-    desc: 'Sends a personalized LinkedIn message once the lead accepts',
+    desc: 'Sends a personalized message to an existing connection, or after a connection request is accepted',
     icon: (
       <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
         <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375 3.375 0 1 1-.75 0 .375 3.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375 3.375 0 1 1-.75 0 .375 3.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375 3.375 0 1 1-.75 0 .375 3.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025 10.314 10.314 0 0 1-2.22-3.847C1.58 14.905 1 13.522 1 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
@@ -278,7 +278,14 @@ export default function CampaignCreatePage() {
           step_order: idx + 1,
           step_type: s.step_type,
           delay_hours: delay_hours,
-          condition: s.step_type === 'send_message' ? 'accepted' : null,
+          // Direct messages can target existing first-degree connections.
+          // Only gate a message on acceptance when this sequence actually
+          // sends a connection request before it.
+          condition:
+            s.step_type === 'send_message' &&
+            steps.slice(0, idx).some((prior) => prior.step_type === 'send_connection')
+              ? 'accepted'
+              : null,
         };
       });
 

@@ -48,6 +48,7 @@ MAX_ACTIONS_PER_SESSION = 20  # Maximum leads to process per session run
 SESSION_DURATION_MIN = 15    # Minimum session duration in minutes
 SESSION_DURATION_MAX = 20   # Maximum session duration in minutes
 INTERSTITIAL_ACTION_RATE = 0.3  # 30% chance of interstitial action between leads
+CONDITION_RETRY_HOURS = 24  # Re-check conditional steps once per day
 
 
 # ── Custom Exceptions ───────────────────────────────────────────────────────
@@ -261,7 +262,8 @@ def dispatch_due_account_sessions():
 
     This task is run by Celery Beat.  It deliberately does not use a long
     ``eta``: ``Lead.next_action_at`` remains available after either Redis or a
-    worker is restarted.
+    worker is restarted.  A running account session is already processing the
+    due rows, so do not enqueue another session for that account every minute.
     """
     from sqlalchemy import or_
 
@@ -292,12 +294,23 @@ def dispatch_due_account_sessions():
             ).distinct().all()
         ]
 
+    # Avoid filling the queue with one task per Beat tick while a long browser
+    # session is still running.  The lock in ``run_account_session`` remains
+    # the final race-safe guard; this check simply prevents the expected
+    # duplicate "session already running" tasks in the normal case.
+    import redis
+    redis_client = redis.from_url(settings.REDIS_URL)
+    dispatched = 0
     for account_email in account_emails:
+        if redis_client.exists(f"session_lock:{account_email}"):
+            logger.debug("⏭️ Session already active for %s; no duplicate dispatch", account_email)
+            continue
         celery_app.send_task("tasks.run_account_session", args=[account_email])
+        dispatched += 1
 
-    if account_emails:
-        logger.info("📅 Dispatched due account sessions for %d account(s)", len(account_emails))
-    return {"accounts_dispatched": len(account_emails)}
+    if dispatched:
+        logger.info("📅 Dispatched due account sessions for %d account(s)", dispatched)
+    return {"accounts_dispatched": dispatched}
 
 
 @celery_app.task(name="tasks.reconcile_stalled_leads")
@@ -442,6 +455,39 @@ def _action_label(step_type) -> str:
         CampaignStepType.THANKS_IF_ACCEPTED: "Thank-you message",
     }
     return labels.get(step_type, str(step_type))
+
+
+def _step_condition_is_met(
+    condition: str | None,
+    lead,
+    *,
+    has_prior_connection_step: bool = False,
+) -> bool:
+    """Return whether a campaign step may run for the current lead state.
+
+    Conditional steps are evaluated in the account-session path as well as in
+    the legacy per-step path.  In particular, a message step that follows a
+    connection request must not open LinkedIn until the request is accepted.
+    A message step without a preceding connection step is a direct-message
+    campaign for existing first-degree connections, so an old campaign that
+    was saved with the UI's former default ``accepted`` condition remains
+    runnable.
+    """
+    if not condition:
+        return True
+    if condition == "accepted" and not has_prior_connection_step:
+        return True
+
+    status = lead.status.value if hasattr(lead.status, "value") else lead.status
+    if condition == "accepted":
+        return status == LeadStatus.ACCEPTED.value
+    if condition == "not_accepted":
+        return status != LeadStatus.ACCEPTED.value
+
+    # Keep older/custom campaigns runnable if they contain an unknown
+    # condition.  The condition is still visible in logs for correction.
+    logger.warning("⚠️ Unknown campaign step condition %r; treating it as unconditional", condition)
+    return True
 
 
 def _action_outcome(step_type, result: dict) -> tuple[bool, str, str | None]:
@@ -1079,6 +1125,75 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db,
                     logger.info(f"⏭️ Skipping lead {lead_id} because campaign {campaign_id} is {campaign.status}")
                     continue
 
+                # Conditions are part of the persisted campaign definition and
+                # must be enforced here too.  The account-session executor is
+                # the normal execution path; checking them only in the legacy
+                # scheduler would otherwise attempt a message before a
+                # connection is accepted.
+                prior_connection_step = None
+                if step.condition == "accepted":
+                    prior_connection_step = db.query(CampaignStep).filter(
+                        CampaignStep.campaign_id == campaign_id,
+                        CampaignStep.step_order < step_order,
+                        CampaignStep.step_type == CampaignStepType.SEND_CONNECTION,
+                    ).first()
+
+                if not _step_condition_is_met(
+                    step.condition,
+                    lead,
+                    has_prior_connection_step=prior_connection_step is not None,
+                ):
+                    now = datetime.now(timezone.utc)
+                    condition_message = (
+                        "Waiting for the lead to accept the connection before sending the message."
+                        if step.condition == "accepted"
+                        else "Skipped because the lead is already connected."
+                    )
+                    job = CampaignJob(
+                        id=str(uuid.uuid4()),
+                        campaign_id=campaign_id,
+                        lead_id=lead_id,
+                        step_type=step_type_val,
+                        status=JobStatus.SKIPPED,
+                        celery_task_id=celery_task_id,
+                        action_message=condition_message,
+                        started_at=now,
+                        completed_at=now,
+                    )
+                    db.add(job)
+
+                    if step.condition == "accepted":
+                        # Keep the lead on this step and poll for acceptance
+                        # later.  Do not mark it failed or advance past the
+                        # message permanently.
+                        lead.next_action_at = now + timedelta(hours=CONDITION_RETRY_HOURS)
+                    else:
+                        # A not_accepted branch is no longer applicable after
+                        # acceptance, so continue with the next configured
+                        # step without touching LinkedIn.
+                        next_step = db.query(CampaignStep).filter(
+                            CampaignStep.campaign_id == campaign_id,
+                            CampaignStep.step_order == step_order + 1,
+                        ).first()
+                        if next_step:
+                            lead.current_step = next_step.step_order
+                            lead.next_action_at = now + timedelta(
+                                hours=max(float(next_step.delay_hours or 0), 0)
+                            )
+                        else:
+                            lead.status = LeadStatus.COMPLETE
+                            lead.completed_at = now
+                            lead.next_action_at = None
+
+                    db.commit()
+                    results.append({
+                        "lead_id": lead_id,
+                        "status": "skipped",
+                        "message": condition_message,
+                    })
+                    logger.info("⏭️ %s for lead %s: %s", action_label, lead_id, condition_message)
+                    continue
+
                 logger.info(f"📋 Processing lead {lead_id} (step {step_order}: {step_type_val})")
 
                 # Record an in-progress job *before* touching LinkedIn. This
@@ -1138,6 +1253,15 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db,
                 
                 db.commit()
                 results.append({"lead_id": lead_id, "result": result})
+                logger.info("✅ %s for lead %s: %s", action_label, lead_id, message)
+                if next_step:
+                    logger.info(
+                        "📅 Scheduled step %s (%s) for lead %s at %s",
+                        next_step.step_order,
+                        _action_label(next_step.step_type),
+                        lead_id,
+                        lead.next_action_at.isoformat(),
+                    )
 
                 # No explicit "save session" step: Chromium already persisted
                 # any cookie/storage changes to the profile dir on disk as a
