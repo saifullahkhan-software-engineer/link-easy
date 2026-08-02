@@ -212,21 +212,30 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
             # Execute the appropriate action based on step type
             result = asyncio.run(_execute_step_action(step.step_type, account, lead, campaign))
             
-            # Update job status
-            job.status = JobStatus.DONE
+            # Do not mark a browser interaction successful merely because it
+            # completed without raising.  In particular, message actions must
+            # report ``sent=True`` after LinkedIn clears the composer.
+            succeeded, action_message, error_message = _action_outcome(step.step_type, result)
+            job.status = JobStatus.DONE if succeeded else JobStatus.FAILED
+            job.action_message = action_message
+            job.error_message = error_message
             job.completed_at = datetime.now(timezone.utc)
-            
-            # Update lead status based on step type
+
+            if not succeeded:
+                lead.status = LeadStatus.FAILED
+                lead.next_action_at = None
+                lead.last_action_at = datetime.now(timezone.utc)
+                db.commit()
+                logger.warning("⚠️ %s", action_message)
+                return result
+
             _update_lead_status(lead, step.step_type)
-            
-            # Schedule next step - wrap in try/except to separate scheduling failures
             try:
                 _schedule_next_step(lead_id, campaign_id, step_order)
             except Exception as scheduling_exc:
-                # Log scheduling failure but don't fail the step itself
                 logger.error(f"Failed to schedule next step: {scheduling_exc}")
                 job.error_message = f"Step completed but failed to schedule next: {scheduling_exc}"
-            
+
             db.commit()
             return result
             

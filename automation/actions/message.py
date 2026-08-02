@@ -26,7 +26,6 @@ from automation.human import (
     human_mouse_move,
     human_scroll,
     random_idle_pause,
-    find_and_click_resilient,
 )
 from core.logging_config import get_logger, should_take_screenshots
 
@@ -130,22 +129,69 @@ async def _wait_for_compose_box(page: Page) -> bool:
         return False
 
 
+async def _find_visible_send_button(page: Page):
+    """Return the enabled Send button belonging to the active message form.
+
+    LinkedIn can keep hidden compose forms and unrelated ``Send`` buttons in
+    the DOM.  A page-wide text selector can therefore report a click although
+    it never submits the message being composed.
+    """
+    selectors = [
+        "form.msg-form button.msg-form__send-button:not([disabled])",
+        "form.msg-form button.msg-form__send-btn:not([disabled])",
+        ".msg-form__footer button[type='submit']:not([disabled])",
+    ]
+    for selector in selectors:
+        try:
+            button = await page.wait_for_selector(selector, state="visible", timeout=3000)
+            if button and await button.is_enabled():
+                return button
+        except Exception:
+            continue
+    return None
+
+
+async def _compose_box_cleared(page: Page, timeout_seconds: float = 8) -> bool:
+    """Wait for LinkedIn to accept the submission and clear the draft."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            box = await page.query_selector(COMPOSE_BOX_SELECTOR)
+            if box is None or not await box.is_visible():
+                # LinkedIn sometimes closes the inline composer after sending.
+                return True
+            if not (await box.inner_text()).strip():
+                return True
+        except Exception:
+            # A composer removed after submit is a positive confirmation.
+            return True
+        await asyncio.sleep(0.4)
+    return False
+
+
 async def _type_and_send(page: Page, message: str) -> bool:
-    """Click the compose box, type the message humanly, then send it. Returns True if sent."""
+    """Type and submit a message, returning True only after UI confirmation.
+
+    We intentionally do not use Enter as a fallback.  LinkedIn's "press Enter
+    to send" preference is account/UI dependent; when disabled it merely adds
+    a newline.  Clicking the enabled Send button works independently of that
+    preference and is the only path counted as a sent message.
+    """
+    if not message or not message.strip():
+        logger.warning("⚠️ Refusing to send an empty LinkedIn message")
+        return False
+
     box = await page.wait_for_selector(COMPOSE_BOX_SELECTOR, state="visible", timeout=8000)
     if not box:
         logger.warning("⚠️ Message compose box not found or not visible")
         return False
 
-    await human_click(page, COMPOSE_BOX_SELECTOR)
+    await human_click(page, box)
     await random_idle_pause(0.5, 1.2)
-
-    # Clear any existing text (just in case)
     await page.keyboard.press("Control+A")
     await page.keyboard.press("Backspace")
     await random_idle_pause(0.2, 0.5)
 
-    # Type character by character with human speed
     for char in message:
         await page.keyboard.type(char)
         delay = random.uniform(0.03, 0.15)
@@ -154,50 +200,23 @@ async def _type_and_send(page: Page, message: str) -> bool:
         await asyncio.sleep(delay)
 
     await random_idle_pause(1.5, 3.0)
+    send_button = await _find_visible_send_button(page)
+    if not send_button:
+        logger.error("❌ Enabled Send button not found; message was not submitted")
+        return False
 
-    # Try to find and click the send button
-    send_selectors = [
-        "button.msg-form__send-button",
-        "button.msg-form__send-btn",
-        ".msg-form__footer button[type='submit']",
-        "button:has-text('Send')",
-        "button[aria-label*='Send' i]",
-    ]
-
-    sent = False
     try:
-        # Use a resilient search for the send button
-        await find_and_click_resilient(page, send_selectors, "Send Message button")
-        sent = True
-        logger.info("✅ Clicked Send button")
-    except Exception as e:
-        logger.warning("⚠️ Could not find or click Send button, trying Enter fallback: %s", e)
-        # Fallback to Control+Enter which is more reliable than just Enter
-        await page.keyboard.press("Control+Enter")
-        await asyncio.sleep(1)
-        # Also try plain Enter just in case
-        await page.keyboard.press("Enter")
-        sent = True # Assume it worked if no exception
+        await human_click(page, send_button)
+    except Exception as exc:
+        logger.error("❌ Failed to click the active Send button: %s", exc)
+        return False
 
-    # Verification: check if the box is cleared
-    await asyncio.sleep(2)
-    try:
-        content = await page.inner_text(COMPOSE_BOX_SELECTOR)
-        if content.strip() != "":
-            logger.warning("⚠️ Compose box still contains text after send attempt: %r", content.strip())
-            # If text remains, maybe it didn't send. Try one last Enter.
-            await page.keyboard.press("Control+Enter")
-            await asyncio.sleep(1)
-            content = await page.inner_text(COMPOSE_BOX_SELECTOR)
-            if content.strip() != "":
-                 logger.error("❌ Message failed to send — text still in box")
-                 return False
-    except Exception as e:
-        logger.debug("Failed to verify box content (might be closed): %s", e)
-        # If box is gone, that's usually a good sign
-        pass
+    if await _compose_box_cleared(page):
+        logger.info("✅ LinkedIn accepted the message submission (composer cleared)")
+        return True
 
-    return sent
+    logger.error("❌ LinkedIn did not confirm sending; draft text remained in the composer")
+    return False
 
 
 async def send_message(page: Page, profile_url: str,
