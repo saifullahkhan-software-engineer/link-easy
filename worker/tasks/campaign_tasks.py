@@ -1022,17 +1022,16 @@ def run_account_session(self, account_email: str):
                 celery_task_id=self.request.id,
             ))
             
-            logger.info(f"✅ Session completed for account {account_email}. Processed {len(results)} leads.")
+            succeeded_count = sum(1 for r in results if r.get("status") != "failed")
+            failed_count = sum(1 for r in results if r.get("status") == "failed")
             
-            # Do not enqueue a long ETA/countdown task here.  Celery keeps
-            # ETA tasks in the consuming worker's memory, which is why a
-            # worker restart could previously leave a sequence appearing
-            # stuck.  `next_action_at` above is durable; the Beat dispatcher
-            # queues an immediate account session once that time is due.
+            logger.info(f"✅ Session completed for account {account_email}. Processed {len(results)} leads ({succeeded_count} succeeded, {failed_count} failed).")
             
             return {
                 "status": "completed",
                 "leads_processed": len(results),
+                "succeeded": succeeded_count,
+                "failed": failed_count,
                 "session_duration_minutes": target_duration_minutes
             }
     
@@ -1291,6 +1290,7 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db,
                 # any ORM attributes or issuing new statements.
                 db.rollback()
                 logger.error(f"❌ Failed to process lead {lead_id}: {exc}")
+                results.append({"lead_id": lead_id, "status": "failed", "error": str(exc)})
                 try:
                     job = CampaignJob(
                         id=str(uuid.uuid4()),
