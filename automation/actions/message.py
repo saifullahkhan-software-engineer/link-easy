@@ -26,6 +26,7 @@ from automation.human import (
     human_mouse_move,
     human_scroll,
     random_idle_pause,
+    find_and_click_resilient,
 )
 from core.logging_config import get_logger, should_take_screenshots
 
@@ -129,36 +130,74 @@ async def _wait_for_compose_box(page: Page) -> bool:
         return False
 
 
-async def _type_and_send(page: Page, message: str) -> None:
-    """Click the compose box, type the message humanly, then send it."""
-    box = await page.query_selector(COMPOSE_BOX_SELECTOR)
-    if box:
-        box_rect = await box.bounding_box()
-        if box_rect:
-            await human_mouse_move(
-                page, box_rect["x"] + 20, box_rect["y"] + 10
-            )
+async def _type_and_send(page: Page, message: str) -> bool:
+    """Click the compose box, type the message humanly, then send it. Returns True if sent."""
+    box = await page.wait_for_selector(COMPOSE_BOX_SELECTOR, state="visible", timeout=8000)
+    if not box:
+        logger.warning("⚠️ Message compose box not found or not visible")
+        return False
 
     await human_click(page, COMPOSE_BOX_SELECTOR)
-    await random_idle_pause(0.3, 0.8)
+    await random_idle_pause(0.5, 1.2)
+
+    # Clear any existing text (just in case)
+    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Backspace")
+    await random_idle_pause(0.2, 0.5)
 
     # Type character by character with human speed
     for char in message:
         await page.keyboard.type(char)
-        delay = random.uniform(0.04, 0.18)
+        delay = random.uniform(0.03, 0.15)
         if char in " .,!?":
-            delay = random.uniform(0.08, 0.25)
+            delay = random.uniform(0.08, 0.22)
         await asyncio.sleep(delay)
 
-    await random_idle_pause(1.0, 2.5)
+    await random_idle_pause(1.5, 3.0)
 
-    # Send with Enter key (more natural than clicking the Send button)
-    if random.random() < 0.7:
+    # Try to find and click the send button
+    send_selectors = [
+        "button.msg-form__send-button",
+        "button.msg-form__send-btn",
+        ".msg-form__footer button[type='submit']",
+        "button:has-text('Send')",
+        "button[aria-label*='Send' i]",
+    ]
+
+    sent = False
+    try:
+        # Use a resilient search for the send button
+        await find_and_click_resilient(page, send_selectors, "Send Message button")
+        sent = True
+        logger.info("✅ Clicked Send button")
+    except Exception as e:
+        logger.warning("⚠️ Could not find or click Send button, trying Enter fallback: %s", e)
+        # Fallback to Control+Enter which is more reliable than just Enter
+        await page.keyboard.press("Control+Enter")
+        await asyncio.sleep(1)
+        # Also try plain Enter just in case
         await page.keyboard.press("Enter")
-    else:
-        await human_click(page, "button.msg-form__send-button")
+        sent = True # Assume it worked if no exception
 
-    await random_idle_pause(2, 4)
+    # Verification: check if the box is cleared
+    await asyncio.sleep(2)
+    try:
+        content = await page.inner_text(COMPOSE_BOX_SELECTOR)
+        if content.strip() != "":
+            logger.warning("⚠️ Compose box still contains text after send attempt: %r", content.strip())
+            # If text remains, maybe it didn't send. Try one last Enter.
+            await page.keyboard.press("Control+Enter")
+            await asyncio.sleep(1)
+            content = await page.inner_text(COMPOSE_BOX_SELECTOR)
+            if content.strip() != "":
+                 logger.error("❌ Message failed to send — text still in box")
+                 return False
+    except Exception as e:
+        logger.debug("Failed to verify box content (might be closed): %s", e)
+        # If box is gone, that's usually a good sign
+        pass
+
+    return sent
 
 
 async def send_message(page: Page, profile_url: str,
@@ -181,6 +220,7 @@ async def send_message(page: Page, profile_url: str,
         # Path 2: direct compose URL fallback — covers slow/lazy-rendered
         # profiles and LinkedIn A/B layout changes.
         if not compose_opened:
+            logger.info("🔄 Message button not on profile, trying direct compose URL...")
             compose_opened = await _open_compose_direct(page, profile_url)
 
         if not compose_opened:
@@ -197,8 +237,9 @@ async def send_message(page: Page, profile_url: str,
             )
             return result
 
-        await _type_and_send(page, message)
-        result["sent"] = True
+        result["sent"] = await _type_and_send(page, message)
+        if not result["sent"]:
+            result["error"] = "Failed to send message: compose box did not clear after sending."
 
     except Exception as e:
         result["error"] = str(e)
