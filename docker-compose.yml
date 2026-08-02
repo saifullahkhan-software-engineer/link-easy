@@ -60,7 +60,7 @@ services:
   worker:
     build: .
     container_name: linkeflow-worker
-    environment:
+    environment: &celery_environment
       - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeflow
       - REDIS_URL=redis://redis:6379/0
       - JWT_SECRET_KEY=your_jwt_secret_key_here
@@ -68,14 +68,24 @@ services:
       - ENCRYPTION_KEY=your_encryption_key_here
       - RESEND_API_KEY=your_resend_api_key_here
       - ENVIRONMENT=production
-    depends_on:
+    depends_on: &celery_dependencies
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
+    volumes: &application_volume
       - .:/app
     command: celery -A worker.celery_app worker --loglevel=info --concurrency=2
+
+  # Beat is required for delayed campaign steps. It reads next_action_at every
+  # minute and queues an account session when a lead becomes due.
+  beat:
+    build: .
+    container_name: linkeflow-beat
+    environment: *celery_environment
+    depends_on: *celery_dependencies
+    volumes: *application_volume
+    command: celery -A worker.celery_app beat --loglevel=info
 
 volumes:
   postgres_data:

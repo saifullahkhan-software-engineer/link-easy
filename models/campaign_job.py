@@ -30,7 +30,10 @@ class CampaignJob(Base):
                              values_callable=lambda enum_cls: [e.value for e in enum_cls]),
                              nullable=False, default=JobStatus.QUEUED)
  
-    error_message   = Column(Text, nullable=True)       # Store failure reason
+    # Human-readable result shown in the campaign activity feed.  Keep the
+    # technical exception separate so users are not shown a traceback.
+    action_message  = Column(Text, nullable=True)
+    error_message   = Column(Text, nullable=True)       # Store technical failure reason
     scheduled_at    = Column(DateTime(timezone=True), nullable=True)
     started_at      = Column(DateTime(timezone=True), nullable=True)
     completed_at    = Column(DateTime(timezone=True), nullable=True)

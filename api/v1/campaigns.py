@@ -236,7 +236,6 @@ async def restart_campaign(
     Resets failed leads back to pending and enqueues tasks.
     """
     from datetime import datetime, timezone
-    import random
     from worker.celery_app import celery_app
     from models.linkedin_account import LinkedInAccount
     from models.campaign import CampaignStep
@@ -299,34 +298,28 @@ async def restart_campaign(
     if not first_step:
         raise HTTPException(status_code=400, detail="Campaign has no steps configured")
     
-    # Enqueue pending leads for step 1
-    for i, lead in enumerate(pending_leads):
-        base_delay = random.randint(30, 120)
-        position_delay = i * random.randint(30, 60)
-        delay_seconds = base_delay + position_delay
-        celery_app.send_task(
-            "tasks.execute_campaign_step",
-            args=[lead.id, campaign_id, first_step.step_order],
-            countdown=delay_seconds,
-        )
-    
-    # Enqueue in-progress leads for their next step (current_step + 1)
-    for i, lead in enumerate(in_progress_leads):
-        next_step_order = lead.current_step + 1
-        base_delay = random.randint(30, 120)
-        position_delay = i * random.randint(30, 60)
-        delay_seconds = base_delay + position_delay
-        celery_app.send_task(
-            "tasks.execute_campaign_step",
-            args=[lead.id, campaign_id, next_step_order],
-            countdown=delay_seconds,
-        )
-    
+    # The account-session dispatcher uses current_step + next_action_at as the
+    # durable schedule. Do not enqueue the retired per-lead task here: it can
+    # race the account session and was the source of "step not found" skips.
+    now = datetime.now(timezone.utc)
+    for lead in pending_leads:
+        lead.current_step = first_step.step_order
+        lead.next_action_at = now
+    for lead in in_progress_leads:
+        lead.next_action_at = now
+
     campaign.status = CampaignStatus.ACTIVE
-    campaign.started_at = datetime.now(timezone.utc)
+    campaign.started_at = now
     await db.commit()
-    
-    return {"message": f"Campaign restarted. {len(pending_leads)} new leads queued, {len(in_progress_leads)} in-progress leads continuing.", "new_leads_queued": len(pending_leads), "in_progress_leads": len(in_progress_leads)}
+
+    # Start promptly; Beat will dispatch all subsequent due actions.
+    celery_app.send_task("tasks.run_account_session", args=[campaign.account_email], countdown=5)
+
+    return {
+        "message": f"Campaign restarted. {len(pending_leads)} lead(s) reset and {len(in_progress_leads)} lead(s) resumed.",
+        "new_leads_queued": len(pending_leads),
+        "in_progress_leads": len(in_progress_leads),
+    }
 
 
 @router.delete("/{campaign_id}", status_code=200)
@@ -600,6 +593,7 @@ async def list_campaign_jobs(
             "step_type": job.step_type,
             "celery_task_id": job.celery_task_id,
             "status": job.status.value if hasattr(job.status, 'value') else job.status,
+            "action_message": job.action_message,
             "error_message": job.error_message,
             "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None,
             "started_at": job.started_at.isoformat() if job.started_at else None,
@@ -649,6 +643,7 @@ async def get_campaign_job(
         "step_type": job.step_type,
         "celery_task_id": job.celery_task_id,
         "status": job.status.value if hasattr(job.status, 'value') else job.status,
+        "action_message": job.action_message,
         "error_message": job.error_message,
         "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,

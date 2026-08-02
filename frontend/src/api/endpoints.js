@@ -59,6 +59,8 @@ export const campaignsApi = {
     api.delete(`/campaigns/${campaignId}`, {
       params: { owner_email: ownerEmail },
     }),
+  listJobs: (campaignId, ownerEmail) =>
+    api.get(`/campaigns/${campaignId}/jobs`, { params: { owner_email: ownerEmail } }),
   listSteps: (campaignId, ownerEmail) =>
     api.get(`/campaigns/${campaignId}/steps`, { params: { owner_email: ownerEmail } }),
 };
