@@ -37,14 +37,6 @@ async def lifespan(app: FastAPI):
     # column (e.g. campaign_jobs.action_message) silently breaks every job
     # with "column does not exist" until someone remembers to run
     # `python run_migrations.py` by hand.
-    try:
-        await asyncio.to_thread(run_migrations)
-    except Exception as exc:
-        raise RuntimeError(
-            "Database migration failed at startup. Run 'python run_migrations.py' "
-            "manually to see the full error."
-        ) from exc
-
     await init_db()
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)
     try:
