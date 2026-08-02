@@ -7,7 +7,7 @@ and Day 5 (thanks message if accepted).
 
 LinkedIn only allows messaging 1st-degree connections, so the action is
 expected to fail gracefully for non-connections.  To keep it reliable we use
-two paths:
+two paths to open a composer:
 
 1. The profile page's "Message" button — found with a *case-insensitive*
    ``aria-label`` selector and a real wait (LinkedIn lazy-renders the profile
@@ -17,13 +17,25 @@ two paths:
    without depending on the profile DOM at all.  This still only works for
    1st-degree connections, but is far more robust to LinkedIn A/B tests and
    slow page loads.
+
+Send confirmation is *positive*, never inferred.  An earlier version treated
+"the composer cleared/closed" as proof of delivery, but the composer also
+clears when the Send click lands on close/discard after a layout shift, when
+the typed text never actually landed in the box, or when LinkedIn rejects the
+submission (rate limit, spam guard, recipient not reachable).  We therefore:
+
+  * read the typed draft back before submitting and refuse to click Send if
+    the text never landed in the composer,
+  * click the Send button that belongs to the *same* composer we typed into,
+  * confirm a new bubble containing our message appeared in the conversation
+    (falling back to the full messaging thread when the composer closes), and
+  * surface LinkedIn's own error banners instead of reporting a false success.
 """
 import asyncio
 import random
 from patchright.async_api import Page
 from automation.human import (
     human_click,
-    human_mouse_move,
     human_scroll,
     random_idle_pause,
 )
@@ -36,6 +48,34 @@ logger = get_logger(__name__)
 # empty ghost-text container instead of the actual input.
 COMPOSE_BOX_SELECTOR = "div.msg-form__contenteditable[contenteditable='true']"
 
+# A single rendered message in a conversation.  Both the mini messaging
+# overlay on the profile page and the full messaging page render conversation
+# entries with this class, and a freshly sent message appears here immediately.
+SENT_EVENT_SELECTOR = "li.msg-s-message-list__event"
+
+# Surfaces LinkedIn uses when a submission is rejected (toast + inline forms).
+ERROR_SURFACE_SELECTORS = [
+    "div[data-test-artdeco-toast-item-type='error']",
+    ".artdeco-toast-item--error",
+    ".msg-form__error",
+]
+ERROR_TEXT_HINTS = (
+    "couldn't send", "could not send", "wasn't sent", "was not sent",
+    "not be delivered", "limit reached", "try again",
+)
+
+# Send-button variants, in preference order.  These are intentionally free of
+# visibility/disabled clauses so the same list works for both page-wide and
+# composer-scoped lookups; visibility and enabled state are checked on the
+# resolved handle instead.
+SEND_BUTTON_SELECTORS = [
+    "button.msg-form__send-button",
+    "button.msg-form__send-btn",
+    ".msg-form__footer button[type='submit']",
+    "button[aria-label*='Send' i]",
+    "button:has-text('Send')",
+]
+
 
 def _profile_slug(profile_url: str) -> str | None:
     """Extract the public /in/<slug> identifier from a profile URL."""
@@ -43,6 +83,16 @@ def _profile_slug(profile_url: str) -> str | None:
     if "/in/" not in url:
         return None
     return url.rsplit("/", 1)[-1]
+
+
+def _normalize(text: str | None) -> str:
+    """Collapse all whitespace so DOM and template text compare reliably."""
+    return " ".join((text or "").split())
+
+
+def _message_tail(message: str, length: int = 40) -> str:
+    """The distinctive suffix we look for in the conversation after sending."""
+    return _normalize(message)[-length:]
 
 
 async def _find_message_button(page: Page):
@@ -129,40 +179,61 @@ async def _wait_for_compose_box(page: Page) -> bool:
         return False
 
 
-async def _find_visible_send_button(page: Page):
-    """Return the enabled Send button belonging to a visible composer.
+async def _pick_enabled_send_button(scope, timeout_ms: int = 2500):
+    """Return the first visible, enabled Send button found under ``scope``.
 
-    LinkedIn uses more than one markup variant for its mini composer, full
-    messaging page, and experiment layouts.  In particular, the full-page
-    composer does not always put the button under ``form.msg-form``.  Keep the
-    search anchored to a *visible* ``msg-form`` first, then use accessible and
-    text fallbacks only when necessary.
+    ``scope`` may be a Page or an ElementHandle (a specific composer form);
+    ElementHandle lookups are scoped relative to the element, so the button is
+    guaranteed to belong to that composer rather than any other ``msg-form``
+    on the page.
     """
-    selectors = [
-        # Normal mini and full-page composer variants.
-        ".msg-form:visible button.msg-form__send-button:not([disabled])",
-        ".msg-form:visible button.msg-form__send-btn:not([disabled])",
-        ".msg-form:visible .msg-form__footer button[type='submit']:not([disabled])",
-        # LinkedIn has shipped these variants without the usual send classes.
-        ".msg-form:visible button[aria-label*='Send' i]:not([disabled])",
-        ".msg-form:visible button:has-text('Send'):not([disabled])",
-    ]
-    for selector in selectors:
+    for selector in SEND_BUTTON_SELECTORS:
         try:
-            button = await page.wait_for_selector(selector, state="visible", timeout=2500)
-            if button and await button.is_enabled():
+            button = await scope.wait_for_selector(
+                selector, state="visible", timeout=timeout_ms
+            )
+        except Exception:
+            button = None
+        if not button:
+            continue
+        try:
+            if await button.is_enabled():
                 return button
         except Exception:
             continue
     return None
 
 
+async def _send_button_for_box(page: Page, box):
+    """Return the Send button belonging to the composer that contains ``box``.
+
+    Anchoring the button to the typed composer's own ``.msg-form`` prevents a
+    mismatch where we type into one composer but click (and verify against)
+    another composer on the same page.  Falls back to a page-wide search only
+    if the form ancestor cannot be resolved.
+    """
+    form = None
+    try:
+        form = await box.evaluate_handle("el => el.closest('.msg-form')")
+    except Exception:
+        form = None
+    if form:
+        try:
+            button = await _pick_enabled_send_button(form)
+            if button:
+                return button
+        except Exception:
+            pass
+        logger.debug("🔎 Send button not found inside the typed composer; falling back to page-wide search")
+    return await _pick_enabled_send_button(page)
+
+
 async def _compose_box_cleared(box, timeout_seconds: float = 8) -> bool:
     """Wait for the *same* composer used for typing to clear or disappear.
 
-    Querying the page again can select a hidden stale composer while the active
-    draft remains visible, producing a false success (or false failure).  An
-    ElementHandle for the typed box lets us confirm the actual submission.
+    This is only a *gate* for deeper verification — a cleared composer on its
+    own is NOT proof of delivery (the draft may have been discarded or the
+    submission rejected), so callers must still confirm the message bubble.
     """
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while asyncio.get_running_loop().time() < deadline:
@@ -179,22 +250,131 @@ async def _compose_box_cleared(box, timeout_seconds: float = 8) -> bool:
     return False
 
 
-async def _type_and_send(page: Page, message: str) -> bool:
-    """Type and submit a message, returning True only after UI confirmation.
+async def _count_matching_events(page: Page, tail: str) -> int:
+    """How many visible conversation bubbles currently contain ``tail``."""
+    if not tail:
+        return 0
+    try:
+        events = await page.query_selector_all(SENT_EVENT_SELECTOR)
+    except Exception:
+        return 0
+    matches = 0
+    for event in events[-12:]:
+        try:
+            if tail in _normalize(await event.inner_text()):
+                matches += 1
+        except Exception:
+            continue
+    return matches
 
-    We intentionally do not use Enter as a fallback.  LinkedIn's "press Enter
-    to send" preference is account/UI dependent; when disabled it merely adds
-    a newline.  Clicking the enabled Send button works independently of that
+
+async def _wait_for_new_bubble(page: Page, tail: str, previous_count: int,
+                               timeout_seconds: float = 8.0) -> bool:
+    """Wait until the conversation shows a *new* bubble containing our text.
+
+    Comparing against the pre-send count keeps this truthful even when the
+    exact same message was sent to this recipient on a previous run.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if await _count_matching_events(page, tail) > previous_count:
+            return True
+        await asyncio.sleep(0.4)
+    return False
+
+
+async def _error_banner_text(page: Page) -> str | None:
+    """Return LinkedIn's own failure text, if it rejected the submission."""
+    for selector in ERROR_SURFACE_SELECTORS:
+        try:
+            nodes = await page.query_selector_all(selector)
+        except Exception:
+            continue
+        for node in nodes:
+            try:
+                if not await node.is_visible():
+                    continue
+                text = _normalize(await node.inner_text())
+            except Exception:
+                continue
+            if text:
+                return text[:240]
+    # Last resort: an inline banner inside any visible message form.
+    try:
+        forms = await page.query_selector_all(".msg-form")
+    except Exception:
+        forms = []
+    for form in forms:
+        try:
+            if not await form.is_visible():
+                continue
+            text = _normalize(await form.inner_text())
+        except Exception:
+            continue
+        lowered = text.lower()
+        if any(hint in lowered for hint in ERROR_TEXT_HINTS):
+            return text[:240]
+    return None
+
+
+async def _verify_delivery_in_thread(page: Page, profile_url: str, tail: str) -> bool:
+    """Fallback delivery check on the full messaging thread.
+
+    Used when the inline composer closed after the click (so the overlay's
+    event list is gone).  After a real send, the direct compose URL redirects
+    to the existing conversation, whose event list contains our bubble.  If
+    LinkedIn discarded the submission, the thread never shows the text.
+    """
+    slug = _profile_slug(profile_url)
+    if not slug:
+        return False
+    try:
+        await page.goto(
+            f"https://www.linkedin.com/messaging/compose/?recipient={slug}",
+            wait_until="domcontentloaded",
+        )
+        await random_idle_pause(2, 4)
+    except Exception as e:
+        logger.warning("⚠️ Could not open messaging thread for delivery verification: %s", e)
+        return False
+    try:
+        await page.wait_for_selector(SENT_EVENT_SELECTOR, state="visible", timeout=8000)
+    except Exception:
+        return False
+    return await _count_matching_events(page, tail) > 0
+
+
+async def _type_and_send(page: Page, message: str,
+                         profile_url: str) -> tuple[bool, str | None]:
+    """Type and submit a message, returning ``(sent, error)``.
+
+    Success requires *positive* confirmation that the message reached the
+    conversation — never the mere disappearance of the composer.  We
+    intentionally do not use Enter as a fallback: LinkedIn's "press Enter to
+    send" preference is account/UI dependent; when disabled it merely adds a
+    newline.  Clicking the enabled Send button works independently of that
     preference and is the only path counted as a sent message.
     """
     if not message or not message.strip():
         logger.warning("⚠️ Refusing to send an empty LinkedIn message")
-        return False
+        return False, "Refusing to send an empty LinkedIn message."
 
-    box = await page.wait_for_selector(COMPOSE_BOX_SELECTOR, state="visible", timeout=8000)
+    try:
+        box = await page.wait_for_selector(COMPOSE_BOX_SELECTOR, state="visible", timeout=8000)
+    except Exception:
+        box = None
     if not box:
         logger.warning("⚠️ Message compose box not found or not visible")
-        return False
+        return False, "Message compose box not found or not visible."
+
+    try:
+        await box.scroll_into_view_if_needed()
+    except Exception:
+        pass
+
+    tail = _message_tail(message)
+    # Baseline used to prove a *new* bubble appears after we click Send.
+    bubbles_before = await _count_matching_events(page, tail)
 
     await human_click(page, box)
     await random_idle_pause(0.5, 1.2)
@@ -209,26 +389,64 @@ async def _type_and_send(page: Page, message: str) -> bool:
             delay = random.uniform(0.08, 0.22)
         await asyncio.sleep(delay)
 
-    await random_idle_pause(1.5, 3.0)
-    send_button = await _find_visible_send_button(page)
+    await random_idle_pause(1.0, 2.0)
+
+    # Read the draft back.  If focus was lost (or the click into the box was
+    # intercepted) the keystrokes landed nowhere; the old flow still reported
+    # success afterwards because the empty composer looked "cleared".
+    try:
+        typed = _normalize(await box.inner_text())
+    except Exception:
+        typed = ""
+    if not typed or tail not in typed:
+        logger.error("❌ Typed text did not land in the composer (found %r)", typed[:80])
+        return False, "Typed message never appeared in the composer; nothing was submitted."
+
+    send_button = await _send_button_for_box(page, box)
     if not send_button:
         # A disabled button means LinkedIn did not register the draft (or the
         # UI changed); it is not evidence that a message was sent.
         logger.error("❌ Enabled Send button not found; message was not submitted")
-        return False
+        return False, "Enabled Send button not found; message was not submitted."
+
+    try:
+        await send_button.scroll_into_view_if_needed()
+    except Exception:
+        pass
 
     try:
         await human_click(page, send_button)
     except Exception as exc:
         logger.error("❌ Failed to click the active Send button: %s", exc)
-        return False
+        return False, f"Failed to click the Send button: {exc}"
 
-    if await _compose_box_cleared(box):
-        logger.info("✅ LinkedIn accepted the message submission (composer cleared)")
-        return True
+    # Confirmation path 1: a new bubble with our text appears in the live
+    # conversation (mini overlay or full messaging page).
+    if await _wait_for_new_bubble(page, tail, bubbles_before):
+        logger.info("✅ Delivery confirmed: message bubble appeared in the conversation")
+        return True, None
+
+    # LinkedIn's own error surface beats any inference.
+    error_text = await _error_banner_text(page)
+    if error_text:
+        logger.error("❌ LinkedIn rejected the message: %s", error_text)
+        return False, f"LinkedIn rejected the message: {error_text}"
+
+    # Confirmation path 2: the composer closed on submit, so verify the
+    # message exists in the full messaging thread.  A cleared composer alone
+    # is never enough — the draft may have been discarded.
+    if await _compose_box_cleared(box, timeout_seconds=4):
+        logger.info("🔎 Composer closed; verifying delivery in the messaging thread...")
+        if await _verify_delivery_in_thread(page, profile_url, tail):
+            logger.info("✅ Delivery confirmed in the messaging thread")
+            return True, None
+        return False, (
+            "Composer cleared but the message was not found in the conversation "
+            "thread; LinkedIn likely discarded the submission."
+        )
 
     logger.error("❌ LinkedIn did not confirm sending; draft text remained in the composer")
-    return False
+    return False, "LinkedIn did not confirm sending; the draft stayed in the composer."
 
 
 async def send_message(page: Page, profile_url: str,
@@ -238,6 +456,10 @@ async def send_message(page: Page, profile_url: str,
     Sends a direct message to a LinkedIn profile.
     The Message button is only available for 1st-degree connections.
     For non-connections this will fail gracefully.
+
+    ``sent`` is True only when delivery was positively confirmed (the message
+    was seen in the conversation); otherwise ``error`` explains why LinkedIn
+    could not confirm it.
     """
     result = {"sent": False, "error": None}
 
@@ -268,9 +490,19 @@ async def send_message(page: Page, profile_url: str,
             )
             return result
 
-        result["sent"] = await _type_and_send(page, message)
+        result["sent"], send_error = await _type_and_send(page, message, profile_url)
         if not result["sent"]:
-            result["error"] = "Failed to send message: compose box did not clear after sending."
+            if should_take_screenshots():
+                try:
+                    await page.screenshot(
+                        path="message_send_unconfirmed_debug.png", full_page=True
+                    )
+                except Exception:
+                    pass
+            result["error"] = (
+                send_error
+                or "Failed to send message: LinkedIn did not confirm delivery."
+            )
 
     except Exception as e:
         result["error"] = str(e)
