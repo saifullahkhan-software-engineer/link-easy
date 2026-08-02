@@ -7,8 +7,6 @@ import { useAuth } from '../context/AuthContext';
 import { CampaignStatusBadge } from '../components/Badge';
 import { Spinner } from '../components/Spinner';
 import Modal from '../components/Modal';
-import ManualLeadForm from '../components/leads/ManualLeadForm';
-import CsvUpload from '../components/leads/CsvUpload';
 import LeadsTable from '../components/leads/LeadsTable';
 
 const POLL_INTERVAL_MS = 20_000;
@@ -114,7 +112,6 @@ export default function CampaignStatusPage() {
   const [leads, setLeads] = useState([]);
   const [leadsLoading, setLeadsLoading] = useState(false);
   const [jobs, setJobs] = useState([]);
-  const [leadTab, setLeadTab] = useState('manual');     // 'manual' | 'csv'
   const [statusTransitioning, setStatusTransitioning] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
@@ -466,7 +463,7 @@ export default function CampaignStatusPage() {
         <div>
           <h1 className="text-2xl font-bold text-zinc-50">Campaign Status & Control</h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Monitor and run your sequences, manage campaign leads, and track execution schedules.
+            Monitor and run your sequences, view lead statuses, and track execution schedules.
           </p>
         </div>
         {hasSelection && (
@@ -761,39 +758,23 @@ export default function CampaignStatusPage() {
           )}
         </div>
 
-        {/* ----------------------- RIGHT: Leads Panel ------------------------ */}
+        {/* ----------------------- RIGHT: Lead Status ------------------------- */}
         <div className="relative lg:col-span-7">
           <div className={`card transition ${!hasSelection ? 'pointer-events-none select-none opacity-40 blur-[0.5px]' : ''}`}>
-            {/* tab header */}
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-700 px-5 pt-4">
-              <div className="flex gap-1" role="tablist" aria-label="Add leads">
-                {[
-                  ['manual', 'Add manually'],
-                  ['csv', 'Upload CSV'],
-                ].map(([key, label]) => (
-                  <button
-                    key={key}
-                    role="tab"
-                    aria-selected={leadTab === key}
-                    onClick={() => setLeadTab(key)}
-                    className={`rounded-t-lg border-b-2 px-4 py-2.5 text-sm font-medium transition ${
-                      leadTab === key
-                        ? 'border-accent-400 text-accent-300'
-                        : 'border-transparent text-zinc-500 hover:text-zinc-300'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-700 px-5 py-4">
+              <div>
+                <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-300">Lead Status</h2>
+                <p className="mt-1 text-xs text-zinc-500">Monitor the current status and next scheduled action for each lead.</p>
               </div>
-              <div className="flex items-center gap-2 pb-2">
+              <div className="flex items-center gap-2">
                 <span className="text-xs text-zinc-500">
                   {leads.length} lead{leads.length === 1 ? '' : 's'}
                 </span>
                 <button
                   onClick={() => fetchLeads(false)}
-                  className="rounded-md p-1.5 text-zinc-500 transition hover:bg-surface-700 hover:text-zinc-200"
-                  title="Refresh leads"
+                  disabled={leadsLoading}
+                  className="rounded-md p-1.5 text-zinc-500 transition hover:bg-surface-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Refresh lead statuses"
                 >
                   <svg className={`h-4 w-4 ${leadsLoading ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
@@ -802,27 +783,7 @@ export default function CampaignStatusPage() {
               </div>
             </div>
 
-            {/* tab body */}
-            <div className="p-5">
-              {leadTab === 'manual' ? (
-                <ManualLeadForm
-                  campaignId={selected?.id}
-                  ownerEmail={ownerEmail}
-                  onLeadAdded={() => fetchLeads(true)}
-                />
-              ) : (
-                <CsvUpload
-                  campaignId={selected?.id}
-                  ownerEmail={ownerEmail}
-                  onUploaded={() => fetchLeads(false)}
-                />
-              )}
-            </div>
-
-            {/* leads table */}
-            <div className="border-t border-surface-700">
-              <LeadsTable leads={leads} loading={leadsLoading} steps={steps} now={now} />
-            </div>
+            <LeadsTable leads={leads} loading={leadsLoading} steps={steps} now={now} />
           </div>
 
           {/* locked overlay */}
