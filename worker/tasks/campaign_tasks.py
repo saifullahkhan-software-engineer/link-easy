@@ -430,6 +430,47 @@ async def _execute_step_with_page(step_type, account, lead, campaign, page) -> d
         raise Exception(f"Unknown step type: {step_type}")
 
 
+def _action_label(step_type) -> str:
+    """Stable, non-technical labels used in the UI activity feed."""
+    labels = {
+        CampaignStepType.VISIT_PROFILE: "Profile visit",
+        CampaignStepType.LIKE_POST: "Post like",
+        CampaignStepType.VISIT_AND_LIKE: "Profile visit and post like",
+        CampaignStepType.SEND_CONNECTION: "Connection request",
+        CampaignStepType.SEND_MESSAGE: "Message",
+        CampaignStepType.FOLLOW_UP_IF_PENDING: "Follow-up message",
+        CampaignStepType.THANKS_IF_ACCEPTED: "Thank-you message",
+    }
+    return labels.get(step_type, str(step_type))
+
+
+def _action_outcome(step_type, result: dict) -> tuple[bool, str, str | None]:
+    """Turn browser results into truthful, screen-ready action feedback."""
+    error = result.get("error")
+    if error:
+        return False, f"{_action_label(step_type)} failed: {error}", error
+
+    if step_type == CampaignStepType.VISIT_PROFILE:
+        success = bool(result.get("visited"))
+        return success, ("Profile visited successfully." if success else "Profile visit was not completed."), None
+    if step_type == CampaignStepType.LIKE_POST:
+        success = bool(result.get("liked_post"))
+        return success, ("Post liked successfully." if success else "Post was not liked; LinkedIn did not confirm the action."), None
+    if step_type == CampaignStepType.VISIT_AND_LIKE:
+        visited, liked = bool(result.get("visited")), bool(result.get("liked_post"))
+        if visited and liked:
+            return True, "Profile visited and post liked successfully.", None
+        if visited:
+            return False, "Profile was visited, but LinkedIn did not confirm the post like.", None
+        return False, "Profile visit and post like were not completed.", None
+
+    success = bool(result.get("sent"))
+    return success, (
+        f"{_action_label(step_type)} sent successfully." if success
+        else f"{_action_label(step_type)} was not sent; LinkedIn did not confirm the action."
+    ), None
+
+
 def _update_lead_status(lead, step_type) -> None:
     """Update lead status based on executed step type."""
     if step_type == CampaignStepType.VISIT_PROFILE or step_type == CampaignStepType.LIKE_POST or step_type == CampaignStepType.VISIT_AND_LIKE:
@@ -1014,6 +1055,7 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
             lead_id = lead.id
             campaign_id = campaign.id
             step_type_val = step.step_type.value
+            action_label = _action_label(step.step_type)
             step_order = step.step_order
 
             try:
@@ -1034,24 +1076,43 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                     continue
 
                 logger.info(f"📋 Processing lead {lead_id} (step {step_order}: {step_type_val})")
-                
-                # Execute the appropriate action
-                result = await _execute_step_action(step.step_type, account, lead, campaign, page)
-                
-                # Create CampaignJob record
-                job_id = str(uuid.uuid4())
+
+                # Record an in-progress job *before* touching LinkedIn. This
+                # gives the UI an honest live status rather than reporting an
+                # action as successful merely because the browser task ended.
                 job = CampaignJob(
-                    id=job_id,
+                    id=str(uuid.uuid4()),
                     campaign_id=campaign_id,
                     lead_id=lead_id,
                     step_type=step_type_val,
-                    status=JobStatus.DONE,
-                    celery_task_id=None,
+                    status=JobStatus.RUNNING,
+                    celery_task_id=self.request.id,
+                    action_message=f"Running {action_label}...",
                     started_at=datetime.now(timezone.utc),
-                    completed_at=datetime.now(timezone.utc)
                 )
                 db.add(job)
-                
+                db.commit()
+
+                # Execute the appropriate action and translate its structured
+                # result into a user-safe status/message.
+                result = await _execute_step_action(step.step_type, account, lead, campaign, page)
+                succeeded, message, error_message = _action_outcome(step.step_type, result)
+                job.status = JobStatus.DONE if succeeded else JobStatus.FAILED
+                job.action_message = message
+                job.error_message = error_message
+                job.completed_at = datetime.now(timezone.utc)
+
+                if not succeeded:
+                    # Do not silently advance a failed action to the next step.
+                    # The activity feed now shows exactly why this lead stopped.
+                    lead.status = LeadStatus.FAILED
+                    lead.next_action_at = None
+                    lead.last_action_at = datetime.now(timezone.utc)
+                    db.commit()
+                    results.append({"lead_id": lead_id, "result": result, "status": "failed", "message": message})
+                    logger.warning("⚠️ %s for lead %s: %s", _action_label(step.step_type), lead_id, message)
+                    continue
+
                 # Persist the next action time.  This is the source of truth
                 # for delayed steps and is safe across Celery/Redis restarts.
                 _update_lead_status(lead, step.step_type)
@@ -1109,8 +1170,9 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db):
                         lead_id=lead_id,
                         step_type=step_type_val,
                         status=JobStatus.FAILED,
+                        action_message=f"{action_label} failed unexpectedly.",
                         error_message=str(exc),
-                        celery_task_id=None,
+                        celery_task_id=self.request.id,
                         started_at=datetime.now(timezone.utc),
                         completed_at=datetime.now(timezone.utc)
                     )
