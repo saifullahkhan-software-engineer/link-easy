@@ -179,6 +179,173 @@ async def _wait_for_compose_box(page: Page) -> bool:
         return False
 
 
+async def _resolve_compose_box(page: Page, timeout_ms: int = 8000):
+    """Return the composer we should actually type into.
+
+    ``query_selector`` returns the *first* match, but LinkedIn frequently keeps
+    stale/minimised message overlays mounted, so the first contenteditable can
+    be an invisible bubble while the real (just opened) composer is the last
+    one.  Typing into the wrong one is exactly how the draft "disappears".
+    """
+    try:
+        await page.wait_for_selector(COMPOSE_BOX_SELECTOR, state="visible", timeout=timeout_ms)
+    except Exception:
+        return None
+    try:
+        boxes = await page.query_selector_all(COMPOSE_BOX_SELECTOR)
+    except Exception:
+        boxes = []
+    visible = []
+    for box in boxes:
+        try:
+            if await box.is_visible() and await box.bounding_box():
+                visible.append(box)
+        except Exception:
+            continue
+    if not visible:
+        return None
+    return visible[-1]
+
+
+async def _focus_compose_box(page: Page, box) -> bool:
+    """Put the caret inside ``box``, verifying focus actually landed there.
+
+    ``human_click`` clicks raw viewport coordinates, which LinkedIn's hover
+    cards, sticky headers and overlay chrome routinely intercept — the click
+    is swallowed, focus never moves, and every keystroke is then typed into
+    nothing.  We therefore verify ``document.activeElement`` and escalate:
+    human click → element click → JS focus + caret placement.
+    """
+    async def _focused() -> bool:
+        try:
+            return bool(await box.evaluate(
+                "el => el === document.activeElement || el.contains(document.activeElement)"
+            ))
+        except Exception:
+            return False
+
+    try:
+        await human_click(page, box)
+        await random_idle_pause(0.3, 0.8)
+    except Exception as exc:
+        logger.debug("🔎 Human click on the composer failed: %s", exc)
+    if await _focused():
+        return True
+
+    logger.debug("🔎 Composer not focused after human click; retrying with a direct click")
+    try:
+        await box.click(timeout=3000)
+        await asyncio.sleep(0.4)
+    except Exception as exc:
+        logger.debug("🔎 Direct click on the composer failed: %s", exc)
+    if await _focused():
+        return True
+
+    logger.debug("🔎 Composer still not focused; forcing focus via JS caret placement")
+    try:
+        await box.evaluate(
+            """el => {
+                el.focus();
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                range.collapse(false);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+            }"""
+        )
+        await asyncio.sleep(0.3)
+    except Exception as exc:
+        logger.debug("🔎 JS focus of the composer failed: %s", exc)
+    return await _focused()
+
+
+async def _box_text(box) -> str:
+    """Read the composer's current draft text."""
+    try:
+        return _normalize(await box.evaluate("el => el.innerText"))
+    except Exception:
+        pass
+    try:
+        return _normalize(await box.inner_text())
+    except Exception:
+        return ""
+
+
+async def _type_into_compose_box(page: Page, box, message: str, tail: str) -> str:
+    """Type ``message`` into ``box``, escalating until the text lands.
+
+    Returns the draft text finally present in the composer ("" if every
+    strategy failed).  Character-by-character keyboard typing stays the
+    preferred (most human) path; the fallbacks only run when the composer is
+    still empty, which is otherwise a guaranteed dead end.
+    """
+    # Clear whatever is there (previous draft / ghost content).
+    try:
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+    except Exception:
+        pass
+    await random_idle_pause(0.2, 0.5)
+
+    for char in message:
+        await page.keyboard.type(char)
+        delay = random.uniform(0.03, 0.15)
+        if char in " .,!?":
+            delay = random.uniform(0.08, 0.22)
+        await asyncio.sleep(delay)
+
+    await random_idle_pause(1.0, 2.0)
+
+    typed = await _box_text(box)
+    if typed and tail in typed:
+        return typed
+
+    # Fallback 1: re-focus and insert the text in one shot.  This survives the
+    # case where focus was stolen mid-typing (LinkedIn re-renders the form).
+    logger.warning("⚠️ Keystrokes did not land in the composer (found %r); retrying with insert_text", typed[:80])
+    if await _focus_compose_box(page, box):
+        try:
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
+            await page.keyboard.insert_text(message)
+            await asyncio.sleep(1.0)
+        except Exception as exc:
+            logger.debug("🔎 insert_text fallback failed: %s", exc)
+        typed = await _box_text(box)
+        if typed and tail in typed:
+            logger.info("✅ Draft landed in the composer via insert_text fallback")
+            return typed
+
+    # Fallback 2: write straight into the DOM and fire the input events
+    # LinkedIn's editor listens for, so the Send button becomes enabled.
+    logger.warning("⚠️ insert_text fallback did not land either; writing the draft via the DOM")
+    try:
+        await box.evaluate(
+            """(el, text) => {
+                el.focus();
+                el.innerHTML = '';
+                const p = document.createElement('p');
+                p.textContent = text;
+                el.appendChild(p);
+                el.dispatchEvent(new InputEvent('input', {
+                    bubbles: true, cancelable: true, inputType: 'insertText', data: text,
+                }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a' }));
+            }""",
+            message,
+        )
+        await asyncio.sleep(1.0)
+    except Exception as exc:
+        logger.debug("🔎 DOM insertion fallback failed: %s", exc)
+
+    typed = await _box_text(box)
+    if typed and tail in typed:
+        logger.info("✅ Draft landed in the composer via the DOM fallback")
+    return typed
+
+
 async def _pick_enabled_send_button(scope, timeout_ms: int = 2500):
     """Return the first visible, enabled Send button found under ``scope``.
 
@@ -359,10 +526,7 @@ async def _type_and_send(page: Page, message: str,
         logger.warning("⚠️ Refusing to send an empty LinkedIn message")
         return False, "Refusing to send an empty LinkedIn message."
 
-    try:
-        box = await page.wait_for_selector(COMPOSE_BOX_SELECTOR, state="visible", timeout=8000)
-    except Exception:
-        box = None
+    box = await _resolve_compose_box(page)
     if not box:
         logger.warning("⚠️ Message compose box not found or not visible")
         return False, "Message compose box not found or not visible."
@@ -376,30 +540,21 @@ async def _type_and_send(page: Page, message: str,
     # Baseline used to prove a *new* bubble appears after we click Send.
     bubbles_before = await _count_matching_events(page, tail)
 
-    await human_click(page, box)
-    await random_idle_pause(0.5, 1.2)
-    await page.keyboard.press("Control+A")
-    await page.keyboard.press("Backspace")
-    await random_idle_pause(0.2, 0.5)
+    if not await _focus_compose_box(page, box):
+        logger.warning("⚠️ Could not focus the composer; typing may not land")
 
-    for char in message:
-        await page.keyboard.type(char)
-        delay = random.uniform(0.03, 0.15)
-        if char in " .,!?":
-            delay = random.uniform(0.08, 0.22)
-        await asyncio.sleep(delay)
-
-    await random_idle_pause(1.0, 2.0)
+    typed = await _type_into_compose_box(page, box, message, tail)
 
     # Read the draft back.  If focus was lost (or the click into the box was
     # intercepted) the keystrokes landed nowhere; the old flow still reported
     # success afterwards because the empty composer looked "cleared".
-    try:
-        typed = _normalize(await box.inner_text())
-    except Exception:
-        typed = ""
     if not typed or tail not in typed:
         logger.error("❌ Typed text did not land in the composer (found %r)", typed[:80])
+        if should_take_screenshots():
+            try:
+                await page.screenshot(path="message_compose_empty_debug.png", full_page=True)
+            except Exception:
+                pass
         return False, "Typed message never appeared in the composer; nothing was submitted."
 
     send_button = await _send_button_for_box(page, box)
