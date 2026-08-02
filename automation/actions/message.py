@@ -130,20 +130,26 @@ async def _wait_for_compose_box(page: Page) -> bool:
 
 
 async def _find_visible_send_button(page: Page):
-    """Return the enabled Send button belonging to the active message form.
+    """Return the enabled Send button belonging to a visible composer.
 
-    LinkedIn can keep hidden compose forms and unrelated ``Send`` buttons in
-    the DOM.  A page-wide text selector can therefore report a click although
-    it never submits the message being composed.
+    LinkedIn uses more than one markup variant for its mini composer, full
+    messaging page, and experiment layouts.  In particular, the full-page
+    composer does not always put the button under ``form.msg-form``.  Keep the
+    search anchored to a *visible* ``msg-form`` first, then use accessible and
+    text fallbacks only when necessary.
     """
     selectors = [
-        "form.msg-form button.msg-form__send-button:not([disabled])",
-        "form.msg-form button.msg-form__send-btn:not([disabled])",
-        ".msg-form__footer button[type='submit']:not([disabled])",
+        # Normal mini and full-page composer variants.
+        ".msg-form:visible button.msg-form__send-button:not([disabled])",
+        ".msg-form:visible button.msg-form__send-btn:not([disabled])",
+        ".msg-form:visible .msg-form__footer button[type='submit']:not([disabled])",
+        # LinkedIn has shipped these variants without the usual send classes.
+        ".msg-form:visible button[aria-label*='Send' i]:not([disabled])",
+        ".msg-form:visible button:has-text('Send'):not([disabled])",
     ]
     for selector in selectors:
         try:
-            button = await page.wait_for_selector(selector, state="visible", timeout=3000)
+            button = await page.wait_for_selector(selector, state="visible", timeout=2500)
             if button and await button.is_enabled():
                 return button
         except Exception:
@@ -151,19 +157,23 @@ async def _find_visible_send_button(page: Page):
     return None
 
 
-async def _compose_box_cleared(page: Page, timeout_seconds: float = 8) -> bool:
-    """Wait for LinkedIn to accept the submission and clear the draft."""
+async def _compose_box_cleared(box, timeout_seconds: float = 8) -> bool:
+    """Wait for the *same* composer used for typing to clear or disappear.
+
+    Querying the page again can select a hidden stale composer while the active
+    draft remains visible, producing a false success (or false failure).  An
+    ElementHandle for the typed box lets us confirm the actual submission.
+    """
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while asyncio.get_running_loop().time() < deadline:
         try:
-            box = await page.query_selector(COMPOSE_BOX_SELECTOR)
-            if box is None or not await box.is_visible():
+            if not await box.is_visible():
                 # LinkedIn sometimes closes the inline composer after sending.
                 return True
             if not (await box.inner_text()).strip():
                 return True
         except Exception:
-            # A composer removed after submit is a positive confirmation.
+            # The typed composer was removed after submit.
             return True
         await asyncio.sleep(0.4)
     return False
@@ -202,6 +212,8 @@ async def _type_and_send(page: Page, message: str) -> bool:
     await random_idle_pause(1.5, 3.0)
     send_button = await _find_visible_send_button(page)
     if not send_button:
+        # A disabled button means LinkedIn did not register the draft (or the
+        # UI changed); it is not evidence that a message was sent.
         logger.error("❌ Enabled Send button not found; message was not submitted")
         return False
 
@@ -211,7 +223,7 @@ async def _type_and_send(page: Page, message: str) -> bool:
         logger.error("❌ Failed to click the active Send button: %s", exc)
         return False
 
-    if await _compose_box_cleared(page):
+    if await _compose_box_cleared(box):
         logger.info("✅ LinkedIn accepted the message submission (composer cleared)")
         return True
 
