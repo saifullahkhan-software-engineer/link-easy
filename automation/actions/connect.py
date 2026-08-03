@@ -252,16 +252,17 @@ async def send_connection_request(page: Page, profile_url: str,
     result = {"sent": False, "with_note": False, "error": None}
 
     try:
-        # Wait for networkidle to ensure LinkedIn's JavaScript has fully
-        # rendered the page (not just DOMContentLoaded which only waits for HTML)
-        await page.goto(profile_url, wait_until="networkidle", timeout=30000)
+        # Use domcontentloaded (not networkidle) — LinkedIn pages have
+        # continuous background requests that prevent networkidle from
+        # ever firing, causing a 30 s timeout on every navigation.
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
         await random_idle_pause(3, 6)
 
         # Detect white/blank page — LinkedIn sometimes shows this when
         # bot detection triggers or session is stale
         if await is_blank_page(page):
             logger.warning("⚠️ Blank page detected, reloading...")
-            await page.reload(wait_until="networkidle", timeout=30000)
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
             await random_idle_pause(3, 6)
             if await is_blank_page(page):
                 if should_take_screenshots():

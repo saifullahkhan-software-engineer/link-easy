@@ -36,13 +36,13 @@ async def scroll_feed_and_collect(
     try:
         # Navigate to the feed
         logger.info("Navigating to LinkedIn feed...")
-        await page.goto("https://www.linkedin.com/feed/", wait_until="networkidle", timeout=30000)
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
         await random_idle_pause(2, 4)
 
         # Handle blank page — reload once
         if await is_blank_page(page):
             logger.warning("️ Blank page detected on feed, reloading...")
-            await page.reload(wait_until="networkidle", timeout=30000)
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
             await random_idle_pause(2, 4)
 
         # Verify we're on the feed
