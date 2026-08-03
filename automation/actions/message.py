@@ -39,6 +39,7 @@ from automation.human import (
     human_scroll,
     random_idle_pause,
 )
+from automation.actions.utils import is_blank_page
 from core.logging_config import get_logger, should_take_screenshots
 
 logger = get_logger(__name__)
@@ -182,8 +183,14 @@ async def _open_compose_on_profile(page: Page, profile_url: str) -> bool:
     compose box appeared, False if the profile isn't a 1st-degree connection
     (or the button never rendered).
     """
-    await page.goto(profile_url, wait_until="domcontentloaded")
+    await page.goto(profile_url, wait_until="networkidle", timeout=30000)
     await random_idle_pause(3, 5)
+
+    # Handle blank page — reload once
+    if await is_blank_page(page):
+        logger.warning("⚠️ Blank page detected, reloading...")
+        await page.reload(wait_until="networkidle", timeout=30000)
+        await random_idle_pause(2, 4)
 
     if "/in/" not in page.url:
         logger.warning("⚠️ Not a profile page: %s", page.url)
@@ -215,8 +222,13 @@ async def _open_compose_direct(page: Page, profile_url: str) -> bool:
     compose_url = f"https://www.linkedin.com/messaging/compose/?recipient={slug}"
     logger.info("💬 Opening direct compose: %s", compose_url)
     try:
-        await page.goto(compose_url, wait_until="domcontentloaded")
+        await page.goto(compose_url, wait_until="networkidle", timeout=30000)
         await random_idle_pause(2, 4)
+        # Handle blank page — reload once
+        if await is_blank_page(page):
+            logger.warning("️ Blank page on compose, reloading...")
+            await page.reload(wait_until="networkidle", timeout=30000)
+            await random_idle_pause(2, 4)
     except Exception as e:
         logger.warning("⚠️ Failed to open direct compose: %s", e)
         return False
@@ -634,7 +646,8 @@ async def _verify_delivery_in_thread(page: Page, profile_url: str, tail: str) ->
     try:
         await page.goto(
             f"https://www.linkedin.com/messaging/compose/?recipient={slug}",
-            wait_until="domcontentloaded",
+            wait_until="networkidle",
+            timeout=30000,
         )
         await random_idle_pause(2, 4)
     except Exception as e:

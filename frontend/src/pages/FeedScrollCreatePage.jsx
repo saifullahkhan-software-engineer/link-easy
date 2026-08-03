@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import { feedScrollApi, linkedinApi } from '../api/endpoints';
 import { getUserEmail, getErrorMessage } from '../api/client';
 import TagInput from '../components/feed/TagInput';
-import Spinner from '../components/Spinner';
+import { Spinner } from '../components/Spinner';
 
 export default function FeedScrollCreatePage() {
   const navigate = useNavigate();

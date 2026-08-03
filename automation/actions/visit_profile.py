@@ -19,6 +19,7 @@ Provides three public coroutines:
 import random
 from patchright.async_api import Page
 from automation.human import human_scroll, human_mouse_move, random_idle_pause
+from automation.actions.utils import is_blank_page
 from core.logging_config import get_logger, should_log_debug, should_take_screenshots
 
 logger = get_logger(__name__)
@@ -41,8 +42,14 @@ async def visit_profile(page: Page, profile_url: str) -> dict:
     result = {"visited": False, "profile_name": None, "error": None}
 
     try:
-        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(profile_url, wait_until="networkidle", timeout=30000)
         await random_idle_pause(2, 4)
+
+        # Handle blank page — reload once
+        if await is_blank_page(page):
+            logger.warning("⚠️ Blank page detected on profile visit, reloading...")
+            await page.reload(wait_until="networkidle", timeout=30000)
+            await random_idle_pause(2, 4)
 
         # Verify we landed on a profile page (not a 404 or login redirect)
         if "/in/" not in page.url:
@@ -141,8 +148,14 @@ async def like_recent_post(page: Page, profile_url: str) -> dict:
 
     try:
         activity_url = profile_url.rstrip("/") + "/recent-activity/all/"
-        await page.goto(activity_url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(activity_url, wait_until="networkidle", timeout=30000)
         await random_idle_pause(1, 3)
+
+        # Handle blank page — reload once
+        if await is_blank_page(page):
+            logger.warning("⚠️ Blank page detected on activity feed, reloading...")
+            await page.reload(wait_until="networkidle", timeout=30000)
+            await random_idle_pause(1, 3)
 
         if "/recent-activity" not in page.url:
             result["error"] = f"Unexpected URL after navigating to activity feed: {page.url}"
