@@ -1,22 +1,100 @@
 import { useState } from 'react';
 
-export default function TagInput({ tags, onChange, placeholder = 'Add tag...' }) {
+export default function TagInput({
+  tags = [],
+  onChange,
+  onPendingChange,
+  placeholder = 'Add tag...'
+}) {
   const [input, setInput] = useState('');
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && input.trim()) {
-      e.preventDefault();
-      if (!tags.includes(input.trim())) {
-        onChange([...tags, input.trim()]);
+  const parseTags = (text) => {
+    if (!text) return [];
+    return text
+      .split(/[,;\n]+/)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  };
+
+  const updateInput = (val) => {
+    setInput(val);
+    if (onPendingChange) {
+      onPendingChange(val);
+    }
+  };
+
+  const addTagsFromText = (text, currentTags = tags) => {
+    const newItems = parseTags(text);
+    if (newItems.length === 0) return currentTags;
+
+    const updatedTags = [...currentTags];
+    let changed = false;
+
+    for (const item of newItems) {
+      const exists = updatedTags.some(
+        (t) => t.toLowerCase() === item.toLowerCase()
+      );
+      if (!exists) {
+        updatedTags.push(item);
+        changed = true;
       }
-      setInput('');
+    }
+
+    if (changed && onChange) {
+      onChange(updatedTags);
+    }
+    return updatedTags;
+  };
+
+  const handleChange = (e) => {
+    const val = e.target.value;
+
+    if (val.includes(',') || val.includes(';') || val.includes('\n')) {
+      const parts = val.split(/[,;\n]+/);
+      const completeParts = parts.slice(0, -1).join(',');
+      const remainder = parts[parts.length - 1];
+
+      addTagsFromText(completeParts);
+      updateInput(remainder);
+    } else {
+      updateInput(val);
+    }
+  };
+
+  const handlePaste = (e) => {
+    const pastedText = e.clipboardData?.getData('text');
+    if (pastedText && (pastedText.includes(',') || pastedText.includes(';') || pastedText.includes('\n'))) {
+      e.preventDefault();
+      addTagsFromText(pastedText);
+      updateInput('');
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ',' || e.key === 'Tab') {
+      if (input.trim()) {
+        e.preventDefault();
+        addTagsFromText(input);
+        updateInput('');
+      }
     } else if (e.key === 'Backspace' && !input && tags.length > 0) {
-      onChange(tags.slice(0, -1));
+      if (onChange) {
+        onChange(tags.slice(0, -1));
+      }
+    }
+  };
+
+  const handleBlur = () => {
+    if (input.trim()) {
+      addTagsFromText(input);
+      updateInput('');
     }
   };
 
   const removeTag = (tagToRemove) => {
-    onChange(tags.filter((t) => t !== tagToRemove));
+    if (onChange) {
+      onChange(tags.filter((t) => t !== tagToRemove));
+    }
   };
 
   return (
@@ -41,10 +119,12 @@ export default function TagInput({ tags, onChange, placeholder = 'Add tag...' })
       <input
         type="text"
         value={input}
-        onChange={(e) => setInput(e.target.value)}
+        onChange={handleChange}
+        onPaste={handlePaste}
         onKeyDown={handleKeyDown}
+        onBlur={handleBlur}
         placeholder={tags.length === 0 ? placeholder : ''}
-        className="min-w-[120px] flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
+        className="min-w-[140px] flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
       />
     </div>
   );

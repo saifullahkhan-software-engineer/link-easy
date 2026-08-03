@@ -1,12 +1,34 @@
 """
 Pydantic schemas for Feed Scroll endpoints.
 """
+import re
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from models.feed_scroll_job import FeedScrollMode, FeedScrollJobStatus
+
+
+def normalize_tags(v: Any) -> Optional[list[str]]:
+    """Split comma/semicolon/newline-separated strings into a list of trimmed unique strings."""
+    if not v:
+        return None
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list):
+        return None
+
+    result = []
+    for item in v:
+        if not item:
+            continue
+        parts = re.split(r"[,;\n]+", str(item))
+        for part in parts:
+            cleaned = part.strip()
+            if cleaned and cleaned not in result:
+                result.append(cleaned)
+    return result or None
 
 
 class FeedScrollJobCreate(BaseModel):
@@ -29,6 +51,11 @@ class FeedScrollJobCreate(BaseModel):
     feed_interval_hours: int = Field(1, ge=1, le=24)
     posts_per_scan: int = Field(10, ge=1, le=50)
 
+    @field_validator("job_titles", "skill_set", "keywords", mode="before")
+    @classmethod
+    def clean_tag_fields(cls, v: Any) -> Optional[list[str]]:
+        return normalize_tags(v)
+
 
 class FeedScrollJobUpdate(BaseModel):
     """Payload to update a feed scroll job."""
@@ -41,6 +68,11 @@ class FeedScrollJobUpdate(BaseModel):
     keywords: Optional[list[str]] = None
     feed_interval_hours: Optional[int] = Field(None, ge=1, le=24)
     posts_per_scan: Optional[int] = Field(None, ge=1, le=50)
+
+    @field_validator("job_titles", "skill_set", "keywords", mode="before")
+    @classmethod
+    def clean_tag_fields(cls, v: Any) -> Optional[list[str]]:
+        return normalize_tags(v)
 
 
 class FeedScrollJobResponse(BaseModel):
