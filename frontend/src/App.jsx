@@ -12,6 +12,9 @@ import ResetPassword from './pages/ResetPassword';
 import LinkedInAccountPage from './pages/LinkedInAccountPage';
 import CampaignCreatePage from './pages/CampaignCreatePage';
 import CampaignStatusPage from './pages/CampaignStatusPage';
+import FeedScrollJobsPage from './pages/FeedScrollJobsPage';
+import FeedScrollCreatePage from './pages/FeedScrollCreatePage';
+import FeedScrollResultsPage from './pages/FeedScrollResultsPage';
 
 export default function App() {
   return (
@@ -53,6 +56,9 @@ export default function App() {
             <Route path="account" element={<LinkedInAccountPage />} />
             <Route path="campaigns" element={<CampaignStatusPage />} />
             <Route path="campaigns/create" element={<CampaignCreatePage />} />
+            <Route path="feed-scroll" element={<FeedScrollJobsPage />} />
+            <Route path="feed-scroll/create" element={<FeedScrollCreatePage />} />
+            <Route path="feed-scroll/jobs/:jobId" element={<FeedScrollResultsPage />} />
           </Route>
 
           {/* catch-all */}

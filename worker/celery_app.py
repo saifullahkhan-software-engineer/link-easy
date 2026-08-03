@@ -17,7 +17,7 @@ celery_app = Celery(
     "LinkeFlow",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["worker.tasks.campaign_tasks"],
+    include=["worker.tasks.campaign_tasks", "worker.tasks.feed_scroll_tasks"],
 )
  
 celery_app.conf.update(

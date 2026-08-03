@@ -15,6 +15,7 @@ from api.v1.campaigns import router as campaign_router
 from api.v1.leads import router as leads_router
 
 from api.v1.test_automation import router as test_automation_router
+from api.v1.feed_scroll import router as feed_scroll_router
 from core.config import settings
 from core.security import validate_encryption_key
 from database import init_db
@@ -61,7 +62,8 @@ app.include_router(users_router)
 app.include_router(linkedin_router)
 app.include_router(campaign_router)
 app.include_router(leads_router)
-app.include_router(test_automation_router) 
+app.include_router(test_automation_router)
+app.include_router(feed_scroll_router)
 
 
 @app.get("/")
