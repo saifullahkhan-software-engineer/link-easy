@@ -5,7 +5,7 @@ import { feedScrollApi } from '../api/endpoints';
 import { getUserEmail } from '../api/client';
 import { getErrorMessage } from '../api/client';
 import FeedScrollJobCard from '../components/feed/FeedScrollJobCard';
-import Spinner from '../components/Spinner';
+import { Spinner } from '../components/Spinner';
 
 export default function FeedScrollJobsPage() {
   const [jobs, setJobs] = useState([]);

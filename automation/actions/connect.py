@@ -16,6 +16,7 @@ import asyncio
 import random
 from patchright.async_api import Page
 from automation.human import human_click, human_type, human_scroll, random_idle_pause
+from automation.actions.utils import is_blank_page
 from core.logging_config import get_logger, should_take_screenshots
 
 logger = get_logger(__name__)
@@ -40,7 +41,10 @@ MORE_BUTTON_SELECTORS = [
 OVERFLOW_CONNECT_SELECTORS = [
     "div[aria-label*='Invite' i][aria-label*='connect' i]",
     "div[aria-label*='Connect' i]",
+    "button[aria-label*='Connect' i]",
+    "[role='menuitem']:has-text('Connect')",
     ".artdeco-dropdown__content li:has-text('Connect')",
+    ".artdeco-dropdown__content div:has-text('Connect')",
 ]
 
 ADD_NOTE_SELECTORS = [
@@ -62,8 +66,20 @@ SEND_BUTTON_SELECTORS = [
 
 MODAL_SELECTOR = ".artdeco-modal, div[role='dialog']"
 
-# States that mean "no invitation can be sent", not "the action failed".
-ALREADY_CONNECTED_HINTS = ("pending", "message", "withdraw", "following")
+# Selectors for specific buttons that definitively indicate the lead's
+# connection state.  Checked *as elements* rather than as text substrings so
+# that a "Message" or "Follow" button on a 2nd-degree profile is never
+# confused with a "we're already connected" state.
+_CONNECTED_INDICATOR_SELECTORS = (
+    "button[aria-label*='Connected' i]",
+    "button[aria-label*='Following' i]",
+    "button[aria-label*='Pending' i]",
+    "button[aria-label*='Withdraw' i]",
+    "button:has-text('Connected')",
+    "button:has-text('Following')",
+    "button:has-text('Pending')",
+    "button:has-text('Withdraw')",
+)
 
 # LinkedIn's invite throttling / rejection copy.
 BLOCKED_HINTS = (
@@ -108,6 +124,32 @@ async def _page_state_text(page: Page) -> str:
         except Exception:
             continue
     return ""
+
+
+async def _is_already_connected(page: Page) -> bool:
+    """Check if the profile shows we're already connected / following / pending.
+
+    Uses element selectors (not text substrings) so that a "Message" or "Follow"
+    button on a 2nd-degree profile is never confused with an "already connected"
+    state.  Returns ``True`` only when a specific Connected / Following / Pending
+    / Withdraw button is visible in the top-card action row.
+    """
+    for selector in [".pv-top-card-v2-ctas", ".ph5.pb5", "main"]:
+        try:
+            container = await page.query_selector(selector)
+            if not container:
+                continue
+            for indicator in _CONNECTED_INDICATOR_SELECTORS:
+                try:
+                    element = await container.query_selector(indicator)
+                    if element and await element.is_visible():
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    # Fallback: no container was found — don't claim "already connected".
+    return False
 
 
 async def _blocked_reason(page: Page) -> str | None:
@@ -169,8 +211,8 @@ async def _invite_confirmed(page: Page, timeout_seconds: float = 8.0) -> bool:
     return False
 
 
-async def _open_connect_dialog(page: Page) -> tuple[bool, str | None]:
-    """Click Connect (top card, else More menu).  Returns ``(opened, error)``."""
+async def _open_connect_dialog(page: Page) -> tuple[bool, str | None, bool]:
+    """Click Connect (top card, else More menu).  Returns ``(opened, error, already_connected)``."""
     connect_btn = await _first_visible(page, CONNECT_BUTTON_SELECTORS, timeout_ms=6000)
 
     if not connect_btn:
@@ -182,17 +224,16 @@ async def _open_connect_dialog(page: Page) -> tuple[bool, str | None]:
             connect_btn = await _first_visible(page, OVERFLOW_CONNECT_SELECTORS, timeout_ms=4000)
 
     if not connect_btn:
-        state = await _page_state_text(page)
-        if any(hint in state for hint in ALREADY_CONNECTED_HINTS):
+        if await _is_already_connected(page):
             return False, (
                 "Connect button not available — the lead is already connected, "
                 "or an invitation is already pending."
-            )
-        return False, "Connect button not found on the profile."
+            ), True
+        return False, "Connect button not found on the profile.", False
 
     await human_click(page, connect_btn)
     await random_idle_pause(1.0, 2.5)
-    return True, None
+    return True, None, False
 
 
 async def send_connection_request(page: Page, profile_url: str,
@@ -211,8 +252,25 @@ async def send_connection_request(page: Page, profile_url: str,
     result = {"sent": False, "with_note": False, "error": None}
 
     try:
-        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+        # Wait for networkidle to ensure LinkedIn's JavaScript has fully
+        # rendered the page (not just DOMContentLoaded which only waits for HTML)
+        await page.goto(profile_url, wait_until="networkidle", timeout=30000)
         await random_idle_pause(3, 6)
+
+        # Detect white/blank page — LinkedIn sometimes shows this when
+        # bot detection triggers or session is stale
+        if await is_blank_page(page):
+            logger.warning("⚠️ Blank page detected, reloading...")
+            await page.reload(wait_until="networkidle", timeout=30000)
+            await random_idle_pause(3, 6)
+            if await is_blank_page(page):
+                if should_take_screenshots():
+                    try:
+                        await page.screenshot(path="connect_blank_page_debug.png", full_page=True)
+                    except Exception:
+                        pass
+                result["error"] = "Page failed to load (blank page after reload). Session may be stale."
+                return result
 
         if "/in/" not in page.url:
             result["error"] = f"Not a profile page: {page.url}"
@@ -222,15 +280,18 @@ async def send_connection_request(page: Page, profile_url: str,
         # a send either.  Detect it up front so it isn't retried forever.
         if await _invite_confirmed(page, timeout_seconds=1.5):
             result["error"] = "An invitation is already pending for this lead."
+            result["already_connected"] = True
             return result
 
         # Scroll a bit before clicking connect (natural behaviour)
         await human_scroll(page)
         await random_idle_pause(1.5, 4.0)
 
-        opened, open_error = await _open_connect_dialog(page)
+        opened, open_error, already_connected = await _open_connect_dialog(page)
         if not opened:
             result["error"] = open_error
+            if already_connected:
+                result["already_connected"] = True
             return result
 
         blocked = await _blocked_reason(page)

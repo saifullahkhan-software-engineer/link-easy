@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import { feedScrollApi } from '../api/endpoints';
 import { getUserEmail, getErrorMessage } from '../api/client';
 import ScoredPostCard from '../components/feed/ScoredPostCard';
-import Spinner from '../components/Spinner';
+import { Spinner } from '../components/Spinner';
 
 export default function FeedScrollResultsPage() {
   const { jobId } = useParams();

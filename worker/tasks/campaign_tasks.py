@@ -511,6 +511,12 @@ def _action_outcome(step_type, result: dict) -> tuple[bool, str, str | None]:
             return False, f"{_action_label(step_type)} failed: {error}", error
         return True, f"No post to like — {error}", None
 
+    # "Already connected" or "invitation already pending" is not a failure —
+    # the desired end state is already reached.  Treat it as success so the
+    # campaign can continue to the next step.
+    if result.get("already_connected"):
+        return True, f"{_action_label(step_type)} skipped: {error}", None
+
     if error:
         return False, f"{_action_label(step_type)} failed: {error}", error
 
