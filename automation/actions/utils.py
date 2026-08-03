@@ -53,14 +53,14 @@ async def navigate_to_profile(page: Page, profile_url: str) -> str | None:
     On a blank page the function reloads once and retries.
     """
     try:
-        await page.goto(profile_url, wait_until="networkidle", timeout=30000)
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
     except Exception as exc:
         return f"Navigation failed: {exc}"
 
     # Detect blank page — reload once
     if await is_blank_page(page):
         try:
-            await page.reload(wait_until="networkidle", timeout=30000)
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
         except Exception as exc:
             return f"Reload after blank page failed: {exc}"
         if await is_blank_page(page):
