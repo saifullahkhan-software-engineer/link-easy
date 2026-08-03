@@ -28,7 +28,8 @@ MAX_NOTE_LENGTH = 300
 # renders both `Connect` and `Invite <name> to connect`.
 CONNECT_BUTTON_SELECTORS = [
     "button[aria-label*='Invite' i][aria-label*='connect' i]",
-    "button[aria-label*='Connect' i]",
+    "button[aria-label='Connect' i]",
+    "main [data-control-name='connect']",
     "main button.artdeco-button:has-text('Connect')",
 ]
 
@@ -39,9 +40,21 @@ MORE_BUTTON_SELECTORS = [
     "main button.artdeco-dropdown__trigger:has-text('More')",
 ]
 OVERFLOW_CONNECT_SELECTORS = [
+    # LinkedIn has used all of these shapes for the item in the overflow
+    # menu: a button, a role=menuitem, and an unadorned dropdown <li>.  Keep
+    # the selectors scoped to a menu so the global "Connect" help/navigation
+    # controls can never be selected.
+    "div[role='menu'] button[aria-label*='Invite' i][aria-label*='connect' i]",
+    "div[role='menu'] button[aria-label='Connect' i]",
+    "div[role='menu'] [role='menuitem']",
+    ".artdeco-dropdown__content [role='menuitem']",
+    ".artdeco-dropdown__content li.artdeco-dropdown__item",
+    ".artdeco-dropdown__content button",
+    "[role='menu'] [data-control-name*='connect' i]",
+    ".artdeco-dropdown__content [data-control-name*='connect' i]",
     "div[aria-label*='Invite' i][aria-label*='connect' i]",
-    "div[aria-label*='Connect' i]",
-    "button[aria-label*='Connect' i]",
+    "div[aria-label='Connect' i]",
+    "button[aria-label='Connect' i]",
     "[role='menuitem']:has-text('Connect')",
     ".artdeco-dropdown__content li:has-text('Connect')",
     ".artdeco-dropdown__content div:has-text('Connect')",
@@ -211,6 +224,37 @@ async def _invite_confirmed(page: Page, timeout_seconds: float = 8.0) -> bool:
     return False
 
 
+async def _find_menu_connect(page: Page):
+    """Find the actual Connect item after opening More actions.
+
+    A bare ``[role=menuitem]`` selector is intentionally used as a fallback
+    because LinkedIn changes the markup frequently.  It must be filtered by
+    its accessible label/text, though: otherwise the first item (usually
+    Follow or Message) is clicked when the menu contains several actions.
+    """
+    for selector in OVERFLOW_CONNECT_SELECTORS:
+        try:
+            elements = await page.query_selector_all(selector)
+        except Exception:
+            continue
+        for element in elements:
+            try:
+                if not await element.is_visible() or not await element.is_enabled():
+                    continue
+                label = await element.get_attribute("aria-label") or ""
+                text = await element.inner_text()
+                value = _normalize(f"{label} {text}").lower()
+                # Do not let "Disconnect", "Remove connection", or another
+                # action that happens to contain the word connect through.
+                if "disconnect" in value or "remove connection" in value:
+                    continue
+                if "connect" in value or "invite" in value:
+                    return element
+            except Exception:
+                continue
+    return None
+
+
 async def _open_connect_dialog(page: Page) -> tuple[bool, str | None, bool]:
     """Click Connect (top card, else More menu).  Returns ``(opened, error, already_connected)``."""
     connect_btn = await _first_visible(page, CONNECT_BUTTON_SELECTORS, timeout_ms=6000)
@@ -221,7 +265,7 @@ async def _open_connect_dialog(page: Page) -> tuple[bool, str | None, bool]:
         if more_btn:
             await human_click(page, more_btn)
             await random_idle_pause(0.8, 1.8)
-            connect_btn = await _first_visible(page, OVERFLOW_CONNECT_SELECTORS, timeout_ms=4000)
+            connect_btn = await _find_menu_connect(page)
 
     if not connect_btn:
         if await _is_already_connected(page):
