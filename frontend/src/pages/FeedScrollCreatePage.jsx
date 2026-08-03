@@ -28,6 +28,11 @@ export default function FeedScrollCreatePage() {
   // Post Search fields
   const [keywords, setKeywords] = useState([]);
 
+  // Pending text inputs (before tag conversion)
+  const [pendingJobTitle, setPendingJobTitle] = useState('');
+  const [pendingSkill, setPendingSkill] = useState('');
+  const [pendingKeyword, setPendingKeyword] = useState('');
+
   // Scheduling
   const [intervalHours, setIntervalHours] = useState(1);
 
@@ -51,6 +56,26 @@ export default function FeedScrollCreatePage() {
     }
   };
 
+  const parseTags = (text) => {
+    if (!text) return [];
+    return text
+      .split(/[,;\n]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  };
+
+  const combineTags = (existingTags, pendingText) => {
+    const extra = parseTags(pendingText);
+    if (extra.length === 0) return existingTags;
+    const combined = [...existingTags];
+    for (const item of extra) {
+      if (!combined.some((t) => t.toLowerCase() === item.toLowerCase())) {
+        combined.push(item);
+      }
+    }
+    return combined;
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -63,13 +88,17 @@ export default function FeedScrollCreatePage() {
       return;
     }
 
+    const finalJobTitles = combineTags(jobTitles, pendingJobTitle);
+    const finalSkillSet = combineTags(skillSet, pendingSkill);
+    const finalKeywords = combineTags(keywords, pendingKeyword);
+
     if (mode === 'job_search') {
-      if (jobTitles.length === 0 && skillSet.length === 0) {
+      if (finalJobTitles.length === 0 && finalSkillSet.length === 0) {
         toast.error('Please add at least one job title or skill');
         return;
       }
     } else {
-      if (keywords.length === 0) {
+      if (finalKeywords.length === 0) {
         toast.error('Please add at least one keyword');
         return;
       }
@@ -87,10 +116,10 @@ export default function FeedScrollCreatePage() {
     if (mode === 'job_search') {
       payload.experience_min_years = experienceMin ? parseInt(experienceMin) : null;
       payload.experience_max_years = experienceMax ? parseInt(experienceMax) : null;
-      payload.job_titles = jobTitles;
-      payload.skill_set = skillSet;
+      payload.job_titles = finalJobTitles;
+      payload.skill_set = finalSkillSet;
     } else {
-      payload.keywords = keywords;
+      payload.keywords = finalKeywords;
     }
 
     try {
@@ -222,7 +251,8 @@ export default function FeedScrollCreatePage() {
               <TagInput
                 tags={jobTitles}
                 onChange={setJobTitles}
-                placeholder="Type a title and press Enter..."
+                onPendingChange={setPendingJobTitle}
+                placeholder="Type or paste titles (separated by commas or Enter)..."
               />
             </div>
 
@@ -234,7 +264,8 @@ export default function FeedScrollCreatePage() {
               <TagInput
                 tags={skillSet}
                 onChange={setSkillSet}
-                placeholder="Type a skill and press Enter..."
+                onPendingChange={setPendingSkill}
+                placeholder="Type or paste skills (separated by commas or Enter)..."
               />
             </div>
           </div>
@@ -252,10 +283,11 @@ export default function FeedScrollCreatePage() {
               <TagInput
                 tags={keywords}
                 onChange={setKeywords}
-                placeholder="Type a keyword and press Enter..."
+                onPendingChange={setPendingKeyword}
+                placeholder="Type or paste keywords (separated by commas or Enter)..."
               />
               <p className="mt-1 text-xs text-zinc-500">
-                Posts matching these keywords will be scored and shown.
+                Add single words/phrases or paste comma-separated keywords. Posts matching these keywords will be scored and shown.
               </p>
             </div>
           </div>
