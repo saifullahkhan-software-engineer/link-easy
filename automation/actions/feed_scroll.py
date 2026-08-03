@@ -8,7 +8,7 @@ for scoring. Uses existing human-like behavior functions.
 import random
 from patchright.async_api import Page
 from automation.human import human_scroll, random_idle_pause
-from automation.actions.utils import is_blank_page
+from automation.actions.utils import recover_blank_page
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -36,14 +36,15 @@ async def scroll_feed_and_collect(
     try:
         # Navigate to the feed
         logger.info("Navigating to LinkedIn feed...")
-        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+        feed_url = "https://www.linkedin.com/feed/"
+        await page.goto(feed_url, wait_until="domcontentloaded", timeout=30000)
         await random_idle_pause(2, 4)
 
-        # Handle blank page — reload once
-        if await is_blank_page(page):
-            logger.warning("️ Blank page detected on feed, reloading...")
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-            await random_idle_pause(2, 4)
+        # Blank-page recovery (wait for render → reload → session probe → retry)
+        recovered, load_error, session_stale = await recover_blank_page(page, feed_url)
+        if not recovered:
+            logger.error("❌ Feed failed to load: %s (session_stale=%s)", load_error, session_stale)
+            return []
 
         # Verify we're on the feed
         if "/feed" not in page.url:

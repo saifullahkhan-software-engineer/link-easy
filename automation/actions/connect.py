@@ -16,7 +16,7 @@ import asyncio
 import random
 from patchright.async_api import Page
 from automation.human import human_click, human_type, human_scroll, random_idle_pause
-from automation.actions.utils import is_blank_page
+from automation.actions.utils import recover_blank_page
 from core.logging_config import get_logger, should_take_screenshots
 
 logger = get_logger(__name__)
@@ -255,23 +255,29 @@ async def send_connection_request(page: Page, profile_url: str,
         # Use domcontentloaded (not networkidle) — LinkedIn pages have
         # continuous background requests that prevent networkidle from
         # ever firing, causing a 30 s timeout on every navigation.
-        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as nav_exc:
+            # A goto timeout/error is not necessarily fatal — the page may
+            # have partially loaded.  Let the recovery path decide.
+            logger.warning("⚠️ Navigation to %s raised: %s", profile_url, nav_exc)
         await random_idle_pause(3, 6)
 
-        # Detect white/blank page — LinkedIn sometimes shows this when
-        # bot detection triggers or session is stale
-        if await is_blank_page(page):
-            logger.warning("⚠️ Blank page detected, reloading...")
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-            await random_idle_pause(3, 6)
-            if await is_blank_page(page):
-                if should_take_screenshots():
-                    try:
-                        await page.screenshot(path="connect_blank_page_debug.png", full_page=True)
-                    except Exception:
-                        pass
-                result["error"] = "Page failed to load (blank page after reload). Session may be stale."
-                return result
+        # Blank/white-page recovery: wait for the SPA to mount, reload once,
+        # then probe the session on /feed/ and retry.  ``session_stale`` is
+        # True only when the session itself is dead (login/checkpoint
+        # redirect or LinkedIn no longer serving any page).
+        recovered, load_error, session_stale = await recover_blank_page(page, profile_url)
+        if not recovered:
+            if should_take_screenshots():
+                try:
+                    await page.screenshot(path="connect_blank_page_debug.png", full_page=True)
+                except Exception:
+                    pass
+            result["error"] = load_error or "Page failed to load (blank page after recovery attempts)."
+            result["page_load_failed"] = True
+            result["session_stale"] = session_stale
+            return result
 
         if "/in/" not in page.url:
             result["error"] = f"Not a profile page: {page.url}"

@@ -39,7 +39,7 @@ from automation.human import (
     human_scroll,
     random_idle_pause,
 )
-from automation.actions.utils import is_blank_page
+from automation.actions.utils import recover_blank_page
 from core.logging_config import get_logger, should_take_screenshots
 
 logger = get_logger(__name__)
@@ -177,24 +177,27 @@ async def _find_message_button(page: Page):
     return None
 
 
-async def _open_compose_on_profile(page: Page, profile_url: str) -> bool:
+async def _open_compose_on_profile(page: Page, profile_url: str) -> tuple[bool, str | None, bool]:
     """
-    Navigate to the profile and click its Message button.  Returns True if the
-    compose box appeared, False if the profile isn't a 1st-degree connection
-    (or the button never rendered).
+    Navigate to the profile and click its Message button.
+
+    Returns ``(opened, load_error, session_stale)``: ``opened`` is True when
+    the compose box appeared; when the page itself failed to load,
+    ``load_error`` explains why and ``session_stale`` says whether the
+    session is dead (False otherwise — the profile may simply not be a
+    1st-degree connection or the button never rendered).
     """
     await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
     await random_idle_pause(3, 5)
 
-    # Handle blank page — reload once
-    if await is_blank_page(page):
-        logger.warning("⚠️ Blank page detected, reloading...")
-        await page.reload(wait_until="domcontentloaded", timeout=30000)
-        await random_idle_pause(2, 4)
+    # Blank-page recovery (wait for render → reload → session probe → retry)
+    recovered, load_error, session_stale = await recover_blank_page(page, profile_url)
+    if not recovered:
+        return False, load_error, session_stale
 
     if "/in/" not in page.url:
         logger.warning("⚠️ Not a profile page: %s", page.url)
-        return False
+        return False, None, False
 
     # Natural scroll before clicking
     await human_scroll(page)
@@ -202,38 +205,42 @@ async def _open_compose_on_profile(page: Page, profile_url: str) -> bool:
 
     message_btn = await _find_message_button(page)
     if not message_btn:
-        return False
+        return False, None, False
 
     await human_click(page, message_btn)
     await random_idle_pause(1.0, 2.5)
 
-    return await _wait_for_compose_box(page)
+    opened = await _wait_for_compose_box(page)
+    return opened, None, False
 
 
-async def _open_compose_direct(page: Page, profile_url: str) -> bool:
+async def _open_compose_direct(page: Page, profile_url: str) -> tuple[bool, str | None, bool]:
     """
     Fallback: open LinkedIn's messaging compose page with the recipient
     pre-filled from the profile slug.  Avoids the profile DOM entirely.
+
+    Returns ``(opened, load_error, session_stale)`` like
+    ``_open_compose_on_profile``.
     """
     slug = _profile_slug(profile_url)
     if not slug:
-        return False
+        return False, None, False
 
     compose_url = f"https://www.linkedin.com/messaging/compose/?recipient={slug}"
     logger.info("💬 Opening direct compose: %s", compose_url)
     try:
         await page.goto(compose_url, wait_until="domcontentloaded", timeout=30000)
         await random_idle_pause(2, 4)
-        # Handle blank page — reload once
-        if await is_blank_page(page):
-            logger.warning("️ Blank page on compose, reloading...")
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-            await random_idle_pause(2, 4)
     except Exception as e:
         logger.warning("⚠️ Failed to open direct compose: %s", e)
-        return False
 
-    return await _wait_for_compose_box(page)
+    # Blank-page recovery (wait for render → reload → session probe → retry)
+    recovered, load_error, session_stale = await recover_blank_page(page, compose_url)
+    if not recovered:
+        return False, load_error, session_stale
+
+    opened = await _wait_for_compose_box(page)
+    return opened, None, False
 
 
 async def _compose_has_visible_recipient_picker(box) -> bool:
@@ -779,13 +786,27 @@ async def send_message(page: Page, profile_url: str,
 
     try:
         # Path 1: profile page's Message button (1st-degree connections only).
-        compose_opened = await _open_compose_on_profile(page, profile_url)
+        compose_opened, load_error, session_stale = await _open_compose_on_profile(page, profile_url)
+
+        if not compose_opened and load_error:
+            # The page itself failed to load — surface the reason with flags
+            # so the worker can retry the step or stop a stale session.
+            result["error"] = load_error
+            result["page_load_failed"] = True
+            result["session_stale"] = session_stale
+            return result
 
         # Path 2: direct compose URL fallback — covers slow/lazy-rendered
         # profiles and LinkedIn A/B layout changes.
         if not compose_opened:
             logger.info("🔄 Message button not on profile, trying direct compose URL...")
-            compose_opened = await _open_compose_direct(page, profile_url)
+            compose_opened, load_error, session_stale = await _open_compose_direct(page, profile_url)
+
+        if not compose_opened and load_error:
+            result["error"] = load_error
+            result["page_load_failed"] = True
+            result["session_stale"] = session_stale
+            return result
 
         if not compose_opened:
             if should_take_screenshots():
