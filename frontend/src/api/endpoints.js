@@ -66,6 +66,34 @@ export const campaignsApi = {
 };
 
 /* --------------------------------- leads --------------------------------- */
+/* ------------------------------ feed scroll ------------------------------ */
+export const feedScrollApi = {
+  listJobs: (ownerEmail) =>
+    api.get('/feed-scroll/jobs', { params: { owner_email: ownerEmail } }),
+  getJob: (jobId, ownerEmail) =>
+    api.get(`/feed-scroll/jobs/${jobId}`, { params: { owner_email: ownerEmail } }),
+  createJob: (payload) =>
+    api.post('/feed-scroll/jobs', payload),
+  updateJob: (jobId, ownerEmail, payload) =>
+    api.patch(`/feed-scroll/jobs/${jobId}`, payload, { params: { owner_email: ownerEmail } }),
+  deleteJob: (jobId, ownerEmail) =>
+    api.delete(`/feed-scroll/jobs/${jobId}`, { params: { owner_email: ownerEmail } }),
+  getResults: (jobId, ownerEmail, scanBatchId) =>
+    api.get(`/feed-scroll/jobs/${jobId}/results`, {
+      params: { owner_email: ownerEmail, ...(scanBatchId ? { scan_batch_id: scanBatchId } : {}) },
+    }),
+  activateJob: (jobId, ownerEmail) =>
+    api.post(`/feed-scroll/jobs/${jobId}/activate`, null, { params: { owner_email: ownerEmail } }),
+  pauseJob: (jobId, ownerEmail) =>
+    api.post(`/feed-scroll/jobs/${jobId}/pause`, null, { params: { owner_email: ownerEmail } }),
+  triggerScan: (jobId, ownerEmail) =>
+    api.post(`/feed-scroll/jobs/${jobId}/scan`, null, {
+      params: { owner_email: ownerEmail },
+      timeout: 60_000,
+    }),
+};
+
+/* --------------------------------- leads --------------------------------- */
 export const leadsApi = {
   add: (payload) => api.post('/leads', payload),
   list: (campaignId, ownerEmail) =>
