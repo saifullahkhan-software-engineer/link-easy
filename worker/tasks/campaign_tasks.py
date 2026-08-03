@@ -50,6 +50,12 @@ SESSION_DURATION_MAX = 20   # Maximum session duration in minutes
 INTERSTITIAL_ACTION_RATE = 0.3  # 30% chance of interstitial action between leads
 CONDITION_RETRY_HOURS = 24  # Re-check conditional steps once per day
 
+# Transient page-load failures (LinkedIn served a blank page while the session
+# is still healthy) are retried a bounded number of times, spaced hours apart,
+# before the lead is failed permanently.
+MAX_PAGE_LOAD_RETRIES = 3
+PAGE_LOAD_RETRY_DELAY_HOURS = (2.0, 6.0)
+
 
 # ── Custom Exceptions ───────────────────────────────────────────────────────
 class SessionFailureException(Exception):
@@ -209,6 +215,27 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
         result = None  # Initialize result to avoid UnboundLocalError
         
         try:
+            # Enforce the daily/warm-up rate limits before opening LinkedIn —
+            # the legacy per-step tasks each did this; the generic executor
+            # must too or campaign limits are bypassed on this path.
+            action_key, action_limit = _rate_limit_for_step(step.step_type, campaign)
+            if action_key and not check_and_increment(
+                account.owner_email, action_key, action_limit,
+                warmup_stage=warmup_stage_for_account(account),
+            ):
+                job.status = JobStatus.SKIPPED
+                job.action_message = f"Daily {_action_label(step.step_type).lower()} limit reached."
+                job.completed_at = datetime.now(timezone.utc)
+                eta = datetime.now(timezone.utc) + timedelta(hours=random.uniform(18, 26))
+                lead.next_action_at = eta
+                db.commit()
+                celery_app.send_task(
+                    "tasks.execute_campaign_step",
+                    args=[lead_id, campaign_id, step_order],
+                    eta=eta,
+                )
+                return {"status": "rate_limited", "requeued_at": eta.isoformat()}
+
             # Execute the appropriate action based on step type
             result = asyncio.run(_execute_step_action(step.step_type, account, lead, campaign))
             
@@ -222,6 +249,44 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
             job.completed_at = datetime.now(timezone.utc)
 
             if not succeeded:
+                # The session itself is dead (login/checkpoint redirect or
+                # LinkedIn no longer serving pages).  Suspend the account —
+                # same policy as SessionFailureException — instead of burning
+                # through more leads against a broken session.
+                if result and result.get("session_stale"):
+                    account.status = LinkedInAccountStatus.SUSPENDED
+                    account.updated_at = datetime.now(timezone.utc)
+                    lead.status = LeadStatus.FAILED
+                    db.commit()
+                    logger.error("❌ Session unusable during %s: %s", _action_label(step.step_type), error_message)
+                    return {"status": "failed", "reason": "session_failure", "error": error_message}
+
+                # Transient blank page while the session is healthy — the same
+                # step can succeed later, so retry it a bounded number of
+                # times instead of failing the lead permanently.
+                if result and result.get("page_load_failed"):
+                    prior_failures = db.query(CampaignJob).filter(
+                        CampaignJob.lead_id == lead_id,
+                        CampaignJob.campaign_id == campaign_id,
+                        CampaignJob.step_type == step.step_type.value,
+                        CampaignJob.status == JobStatus.FAILED,
+                    ).count()
+                    if prior_failures < MAX_PAGE_LOAD_RETRIES:
+                        eta = datetime.now(timezone.utc) + timedelta(
+                            hours=random.uniform(*PAGE_LOAD_RETRY_DELAY_HOURS)
+                        )
+                        lead.next_action_at = eta
+                        lead.last_action_at = datetime.now(timezone.utc)
+                        job.action_message = f"{action_message} Retrying automatically."
+                        db.commit()
+                        celery_app.send_task(
+                            "tasks.execute_campaign_step",
+                            args=[lead_id, campaign_id, step_order],
+                            eta=eta,
+                        )
+                        logger.info("🔁 %s — step rescheduled for %s", action_message, eta.isoformat())
+                        return result
+
                 lead.status = LeadStatus.FAILED
                 lead.next_action_at = None
                 lead.last_action_at = datetime.now(timezone.utc)
@@ -450,6 +515,32 @@ async def _execute_step_with_page(step_type, account, lead, campaign, page) -> d
         return await send_message(page, lead.linkedin_url, message_text, lead.first_name)
     else:
         raise Exception(f"Unknown step type: {step_type}")
+
+
+def _rate_limit_for_step(step_type, campaign) -> tuple[str | None, int | None]:
+    """Map a campaign step to its rate-limit action and per-campaign cap.
+
+    ``check_and_increment()`` applies the warm-up stage caps and HARD_CAPS on
+    top of the campaign limit, so passing ``None`` as the cap still bounds
+    the action.
+    """
+    if step_type == CampaignStepType.VISIT_PROFILE:
+        return "visit_profile", campaign.daily_visit_limit
+    if step_type == CampaignStepType.VISIT_AND_LIKE:
+        # Counted as a profile visit, matching the legacy step1 task.
+        return "visit_profile", campaign.daily_visit_limit
+    if step_type == CampaignStepType.LIKE_POST:
+        # No per-campaign like cap exists; hard caps + warm-up caps apply.
+        return "like_post", None
+    if step_type == CampaignStepType.SEND_CONNECTION:
+        return "send_connection", campaign.daily_connection_limit
+    if step_type in (
+        CampaignStepType.SEND_MESSAGE,
+        CampaignStepType.FOLLOW_UP_IF_PENDING,
+        CampaignStepType.THANKS_IF_ACCEPTED,
+    ):
+        return "send_message", campaign.daily_message_limit
+    return None, None
 
 
 def _action_label(step_type) -> str:
@@ -1046,16 +1137,24 @@ def run_account_session(self, account_email: str):
                 celery_task_id=self.request.id,
             ))
             
-            succeeded_count = sum(1 for r in results if r.get("status") != "failed")
             failed_count = sum(1 for r in results if r.get("status") == "failed")
-            
-            logger.info(f"✅ Session completed for account {account_email}. Processed {len(results)} leads ({succeeded_count} succeeded, {failed_count} failed).")
-            
+            retried_count = sum(1 for r in results if r.get("status") == "retry_scheduled")
+            rate_limited_count = sum(1 for r in results if r.get("status") == "rate_limited")
+            succeeded_count = len(results) - failed_count - retried_count - rate_limited_count
+
+            logger.info(
+                f"✅ Session completed for account {account_email}. Processed {len(results)} leads "
+                f"({succeeded_count} succeeded, {failed_count} failed, {retried_count} rescheduled after transient "
+                f"page-load failures, {rate_limited_count} deferred by daily limits)."
+            )
+
             return {
                 "status": "completed",
                 "leads_processed": len(results),
                 "succeeded": succeeded_count,
                 "failed": failed_count,
+                "retry_scheduled": retried_count,
+                "rate_limited": rate_limited_count,
                 "session_duration_minutes": target_duration_minutes
             }
     
@@ -1219,6 +1318,51 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db,
 
                 logger.info(f"📋 Processing lead {lead_id} (step {step_order}: {step_type_val})")
 
+                # Enforce the daily/warm-up rate limits in this primary
+                # execution path as well (previously only the legacy
+                # per-step tasks called check_and_increment).  Connection
+                # requests are the action LinkedIn throttles hardest; an
+                # uncapped burst of invites is a common trigger for the
+                # blank-page / checkpoint throttling that fails steps.
+                action_key, action_limit = _rate_limit_for_step(step.step_type, campaign)
+                if action_key and not check_and_increment(
+                    account.owner_email, action_key, action_limit,
+                    warmup_stage=warmup_stage_for_account(account),
+                ):
+                    now = datetime.now(timezone.utc)
+                    resume_at = now + timedelta(hours=random.uniform(18, 26))
+                    limit_message = (
+                        f"Daily {_action_label(step.step_type).lower()} limit reached — "
+                        f"rescheduled for tomorrow."
+                    )
+                    job = CampaignJob(
+                        id=str(uuid.uuid4()),
+                        campaign_id=campaign_id,
+                        lead_id=lead_id,
+                        step_type=step_type_val,
+                        status=JobStatus.SKIPPED,
+                        celery_task_id=celery_task_id,
+                        action_message=limit_message,
+                        started_at=now,
+                        completed_at=now,
+                    )
+                    db.add(job)
+                    # Keep the lead on this step; the next session after the
+                    # counter resets picks it up.
+                    lead.next_action_at = resume_at
+                    lead.last_action_at = now
+                    db.commit()
+                    results.append({
+                        "lead_id": lead_id,
+                        "status": "rate_limited",
+                        "message": limit_message,
+                    })
+                    logger.info(
+                        "⏳ Daily %s limit reached; lead %s deferred to %s",
+                        action_key, lead_id, resume_at.isoformat(),
+                    )
+                    continue
+
                 # Record an in-progress job *before* touching LinkedIn. This
                 # gives the UI an honest live status rather than reporting an
                 # action as successful merely because the browser task ended.
@@ -1245,6 +1389,48 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db,
                 job.completed_at = datetime.now(timezone.utc)
 
                 if not succeeded:
+                    # The session itself is dead (login/checkpoint redirect or
+                    # LinkedIn no longer serving pages).  Persist the failed
+                    # job, then stop the whole session and suspend the account
+                    # — continuing would burn every remaining lead against a
+                    # broken session and increase bot-detection risk.
+                    if result and result.get("session_stale"):
+                        db.commit()
+                        raise SessionFailureException(
+                            error_message or "LinkedIn session became unusable mid-session."
+                        )
+
+                    # Transient blank page while the session is healthy — keep
+                    # the lead on this step and retry it later instead of
+                    # failing it permanently.  Bounded so a persistently
+                    # unreachable lead still stops after MAX_PAGE_LOAD_RETRIES.
+                    if result and result.get("page_load_failed"):
+                        prior_failures = db.query(CampaignJob).filter(
+                            CampaignJob.lead_id == lead_id,
+                            CampaignJob.campaign_id == campaign_id,
+                            CampaignJob.step_type == step_type_val,
+                            CampaignJob.status == JobStatus.FAILED,
+                        ).count()
+                        if prior_failures < MAX_PAGE_LOAD_RETRIES:
+                            retry_at = datetime.now(timezone.utc) + timedelta(
+                                hours=random.uniform(*PAGE_LOAD_RETRY_DELAY_HOURS)
+                            )
+                            job.action_message = f"{message} Retrying automatically."
+                            lead.next_action_at = retry_at
+                            lead.last_action_at = datetime.now(timezone.utc)
+                            db.commit()
+                            results.append({
+                                "lead_id": lead_id,
+                                "result": result,
+                                "status": "retry_scheduled",
+                                "message": message,
+                            })
+                            logger.info(
+                                "🔁 %s for lead %s: blank page (session healthy) — retrying at %s",
+                                action_label, lead_id, retry_at.isoformat(),
+                            )
+                            continue
+
                     # Do not silently advance a failed action to the next step.
                     # The activity feed now shows exactly why this lead stopped.
                     lead.status = LeadStatus.FAILED

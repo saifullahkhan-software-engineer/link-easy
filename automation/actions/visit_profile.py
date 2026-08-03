@@ -19,7 +19,7 @@ Provides three public coroutines:
 import random
 from patchright.async_api import Page
 from automation.human import human_scroll, human_mouse_move, random_idle_pause
-from automation.actions.utils import is_blank_page
+from automation.actions.utils import recover_blank_page
 from core.logging_config import get_logger, should_log_debug, should_take_screenshots
 
 logger = get_logger(__name__)
@@ -45,11 +45,14 @@ async def visit_profile(page: Page, profile_url: str) -> dict:
         await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
         await random_idle_pause(2, 4)
 
-        # Handle blank page — reload once
-        if await is_blank_page(page):
-            logger.warning("⚠️ Blank page detected on profile visit, reloading...")
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-            await random_idle_pause(2, 4)
+        # Blank-page recovery: wait for the SPA to mount, reload once, then
+        # probe the session on /feed/ and retry the navigation.
+        recovered, load_error, session_stale = await recover_blank_page(page, profile_url)
+        if not recovered:
+            result["error"] = load_error or "Page failed to load (blank page after recovery attempts)."
+            result["page_load_failed"] = True
+            result["session_stale"] = session_stale
+            return result
 
         # Verify we landed on a profile page (not a 404 or login redirect)
         if "/in/" not in page.url:
@@ -151,11 +154,13 @@ async def like_recent_post(page: Page, profile_url: str) -> dict:
         await page.goto(activity_url, wait_until="domcontentloaded", timeout=30000)
         await random_idle_pause(1, 3)
 
-        # Handle blank page — reload once
-        if await is_blank_page(page):
-            logger.warning("⚠️ Blank page detected on activity feed, reloading...")
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-            await random_idle_pause(1, 3)
+        # Blank-page recovery (wait for render → reload → session probe → retry)
+        recovered, load_error, session_stale = await recover_blank_page(page, activity_url)
+        if not recovered:
+            result["error"] = load_error or "Page failed to load (blank page after recovery attempts)."
+            result["page_load_failed"] = True
+            result["session_stale"] = session_stale
+            return result
 
         if "/recent-activity" not in page.url:
             result["error"] = f"Unexpected URL after navigating to activity feed: {page.url}"
