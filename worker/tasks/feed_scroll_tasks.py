@@ -224,7 +224,7 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
                     # Verify LinkedIn session
                     logger.info(f"🔐 Verifying LinkedIn session for {account_email}...")
                     session_status = await verify_session(page)
-                    if session_status != LinkedInSessionStatus.VALID:
+                    if session_status.status != LinkedInSessionStatus.VALID:
                         logger.error(f"❌ Invalid session for feed scan: {session_status}")
                         if _should_screenshot():
                             try:
