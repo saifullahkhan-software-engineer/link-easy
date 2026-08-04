@@ -59,6 +59,7 @@ if "core.logging_config" not in sys.modules:
 
 from automation.actions import connect as connect_mod
 from automation.actions.connect import (
+    _ACTION_CANDIDATE_SELECTOR,
     _FOLLOWING_STATE_JS,
     _FOLLOW_BUTTON_JS,
     _MENU_CONNECT_JS,
@@ -227,6 +228,21 @@ class TopCardClassificationTests(unittest.TestCase):
             info(text="Connect", visible=False)))
         self.assertIsNone(_classify_top_card_action(
             info(text="Connect", disabled=True)))
+
+    def test_anchor_rendered_connect_is_a_candidate(self):
+        # Regression: LinkedIn renders the Connect action on follow-first /
+        # creator-mode profiles as an <a> anchor carrying aria-label
+        # "Invite <name> to connect" and componentkey="...ConnectButton...connect",
+        # with NO role="button". The top-card candidate selector must match such
+        # anchors or that Connect is invisible to the scanner (worker logs the
+        # misleading "Connect did not appear even after following").
+        lowered = _ACTION_CANDIDATE_SELECTOR.lower()
+        self.assertIn("a[componentkey*='connectbutton']", lowered)
+        self.assertIn("a[aria-label*='connect' i]", lowered)
+        self.assertIn("a[aria-label*='invite' i]", lowered)
+        # The anchor's label classifies as Connect (same rule as button CTAs).
+        self.assertEqual("connect", _classify_top_card_action(
+            info(text="Connect", aria="Invite Syed Dawood Shah to connect")))
 
 
 class StructuralDiscoveryTests(unittest.IsolatedAsyncioTestCase):
