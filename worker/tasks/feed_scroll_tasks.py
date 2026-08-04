@@ -176,7 +176,7 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
         if not acquired:
             return {"posts": [], "error": "Timed out waiting for a Playwright session slot"}
 
-        lock = await acquire_profile_lock(account_email, timeout_seconds=60)
+        lock = acquire_profile_lock(account.id, blocking_timeout=60)
         try:
             pw, _, context, page = await launch_persistent_browser(account, headless=True)
 
@@ -198,7 +198,7 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
                 await pw.stop()
 
         finally:
-            await release_profile_lock(lock)
+            release_profile_lock(lock)
 
 
 def _schedule_next_scan(job_id: str, interval_hours: int):
