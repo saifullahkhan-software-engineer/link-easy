@@ -28,9 +28,14 @@ logger = get_logger(__name__)
 
 
 # ── Sync DB session for Celery ──
+# expire_on_commit=False: objects stay usable after the session commits/closes
+# (they keep their loaded state instead of being marked stale and requiring a
+# refresh). The async app session in database.py already uses this; without it,
+# a committed-then-closed session leaves ORM instances detached AND expired,
+# and any attribute access raises DetachedInstanceError.
 _sync_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
 _engine = create_engine(_sync_url, pool_pre_ping=True)
-SyncSession = sessionmaker(bind=_engine)
+SyncSession = sessionmaker(bind=_engine, expire_on_commit=False)
 
 
 def get_sync_db():
@@ -159,6 +164,19 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
     """Async wrapper for browser automation."""
     from models.linkedin_account import LinkedInAccount
 
+    # IMPORTANT: the `account` ORM instance must stay bound to its DB session
+    # while its attributes are read and the browser is launched.
+    # `launch_persistent_browser()` reads account.* (profile_dir, proxy_*,
+    # pinned fingerprint...) and on the first-ever launch MUTATES the row to
+    # pin the fingerprint — so the launch happens INSIDE the `with` block and
+    # the commit on block-exit persists any freshly pinned fingerprint.
+    #
+    # (Before this fix the account was queried in a short-lived session, then
+    # that session was committed+closed, leaving the account detached AND
+    # expired — the next attribute access raised:
+    #   DetachedInstanceError: Instance <LinkedInAccount> is not bound to a
+    #   Session; attribute refresh operation cannot proceed
+    # ...and every feed scan failed before the browser even launched.)
     with get_sync_db() as db:
         account = (
             db.query(LinkedInAccount)
@@ -168,37 +186,37 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
         if not account:
             return {"posts": [], "error": "LinkedIn account not found"}
 
-    # Acquire locks
-    # acquire_playwright_session is a synchronous context manager because the
-    # semaphore uses the synchronous Redis client.  This task runs the browser
-    # in an asyncio loop, but the Redis guard must still be entered with `with`.
-    with acquire_playwright_session() as acquired:
-        if not acquired:
-            return {"posts": [], "error": "Timed out waiting for a Playwright session slot"}
+        # Acquire locks
+        # acquire_playwright_session is a synchronous context manager because the
+        # semaphore uses the synchronous Redis client.  This task runs the browser
+        # in an asyncio loop, but the Redis guard must still be entered with `with`.
+        with acquire_playwright_session() as acquired:
+            if not acquired:
+                return {"posts": [], "error": "Timed out waiting for a Playwright session slot"}
 
-        lock = acquire_profile_lock(account.id, blocking_timeout=60)
-        try:
-            pw, _, context, page = await launch_persistent_browser(account, headless=True)
-
+            lock = acquire_profile_lock(account.id, blocking_timeout=60)
             try:
-                # Verify LinkedIn session
-                session_status = await verify_session(page)
-                if session_status != LinkedInSessionStatus.VALID:
-                    return {"posts": [], "error": f"Invalid session: {session_status}"}
+                pw, _, context, page = await launch_persistent_browser(account, headless=True)
 
-                # Scroll feed and collect posts (collect more than we need to have better scoring)
-                posts = await scroll_feed_and_collect(
-                    page, target_posts=max(posts_per_scan * 3, 30), max_scrolls=15
-                )
+                try:
+                    # Verify LinkedIn session
+                    session_status = await verify_session(page)
+                    if session_status != LinkedInSessionStatus.VALID:
+                        return {"posts": [], "error": f"Invalid session: {session_status}"}
 
-                return {"posts": posts}
+                    # Scroll feed and collect posts (collect more than we need to have better scoring)
+                    posts = await scroll_feed_and_collect(
+                        page, target_posts=max(posts_per_scan * 3, 30), max_scrolls=15
+                    )
+
+                    return {"posts": posts}
+
+                finally:
+                    await context.close()
+                    await pw.stop()
 
             finally:
-                await context.close()
-                await pw.stop()
-
-        finally:
-            release_profile_lock(lock)
+                release_profile_lock(lock)
 
 
 def _schedule_next_scan(job_id: str, interval_hours: int):
