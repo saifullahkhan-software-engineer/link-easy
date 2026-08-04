@@ -169,7 +169,13 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
             return {"posts": [], "error": "LinkedIn account not found"}
 
     # Acquire locks
-    async with acquire_playwright_session():
+    # acquire_playwright_session is a synchronous context manager because the
+    # semaphore uses the synchronous Redis client.  This task runs the browser
+    # in an asyncio loop, but the Redis guard must still be entered with `with`.
+    with acquire_playwright_session() as acquired:
+        if not acquired:
+            return {"posts": [], "error": "Timed out waiting for a Playwright session slot"}
+
         lock = await acquire_profile_lock(account_email, timeout_seconds=60)
         try:
             pw, _, context, page = await launch_persistent_browser(account, headless=True)

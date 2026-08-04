@@ -309,6 +309,8 @@ SEND_BUTTON_SELECTORS = [
     "button[aria-label='Send without a note']",
     "button[aria-label*='Send without' i]",
     "button[aria-label*='Send' i]",
+    "[role='dialog'] button:has-text('Send')",
+    "[role='dialog'] [role='button']:has-text('Send')",
     ".artdeco-modal button:has-text('Send')",
 ]
 
@@ -943,8 +945,14 @@ async def send_connection_request(page: Page, profile_url: str,
                     else:
                         logger.warning("⚠️ Note text never landed in the textarea; sending without a note")
 
-        # Click Send ("Send now", "Send invitation", or "Send without a note")
+        # Click Send ("Send now", "Send invitation", or "Send without a note").
+        # The invitation modal is rendered asynchronously; on some profiles the
+        # dialog appears before its footer buttons, so probe again briefly
+        # rather than marking the lead failed while the modal is still mounting.
         send_btn = await _first_visible(page, SEND_BUTTON_SELECTORS, timeout_ms=5000)
+        if not send_btn:
+            await asyncio.sleep(1.5)
+            send_btn = await _first_visible(page, SEND_BUTTON_SELECTORS, timeout_ms=4000)
         if not send_btn:
             if should_take_screenshots():
                 try:
