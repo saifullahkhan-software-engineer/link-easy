@@ -138,12 +138,19 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
                 "matched_terms": matched_terms,
             })
 
+        # Only keep posts that actually matched the criteria.  A score of 0
+        # means the post matched nothing (or was empty) and is irrelevant, so
+        # we drop anything with score <= 1 (score must be greater than 1).
+        relevant_posts = [p for p in scored_posts if p.get("score", 0) > 1.0]
+        relevant_posts.sort(key=lambda x: x["score"], reverse=True)
+
         # Sort by score and take top N
-        scored_posts.sort(key=lambda x: x["score"], reverse=True)
-        top_posts = scored_posts[:posts_per_scan]
+        top_posts = relevant_posts[:posts_per_scan]
 
         logger.info(
-            f"🏆 Top {len(top_posts)} posts after scoring (from {len(raw_posts)} raw). "
+            f"🏆 Top {len(top_posts)} posts after scoring "
+            f"(from {len(raw_posts)} raw, {len(scored_posts)} scored, "
+            f"{len(relevant_posts)} with score > 1). "
             f"Highest score: {top_posts[0]['score'] if top_posts else 0}"
         )
 
