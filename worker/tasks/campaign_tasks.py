@@ -63,9 +63,11 @@ class SessionFailureException(Exception):
     pass
  
 # ── Sync DB session for Celery (psycopg2, NOT asyncpg) ───────────────────────
+# expire_on_commit=False: keep ORM instances usable after commit/close so a
+# detached instance never dies with a DetachedInstanceError on attribute access.
 _sync_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
 _engine   = create_engine(_sync_url, pool_pre_ping=True)
-SyncSession = sessionmaker(bind=_engine)
+SyncSession = sessionmaker(bind=_engine, expire_on_commit=False)
  
  
 def get_sync_db():
