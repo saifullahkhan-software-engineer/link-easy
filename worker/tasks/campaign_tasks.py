@@ -44,7 +44,7 @@ logger = get_logger(__name__)
 
 
 # ── Session Configuration ─────────────────────────────────────────────────────
-MAX_ACTIONS_PER_SESSION = 20  # Maximum leads to process per session run
+MAX_ACTIONS_PER_SESSION = None  # Rate limit removed — no per-session cap
 SESSION_DURATION_MIN = 15    # Minimum session duration in minutes
 SESSION_DURATION_MAX = 20   # Maximum session duration in minutes
 INTERSTITIAL_ACTION_RATE = 0.3  # 30% chance of interstitial action between leads
@@ -1120,8 +1120,9 @@ def run_account_session(self, account_email: str):
                 logger.info(f"✅ No due leads found for account {account_email}")
                 return {"status": "completed", "leads_processed": 0}
             
-            # Cap the number of leads per session
-            due_leads = due_leads[:MAX_ACTIONS_PER_SESSION]
+            # No per-session cap — process all due leads (rate limit removed)
+            if MAX_ACTIONS_PER_SESSION is not None:
+                due_leads = due_leads[:MAX_ACTIONS_PER_SESSION]
             logger.info(f"📊 Processing {len(due_leads)} due leads for account {account_email}")
             
             # Calculate target session duration and per-action dwell time

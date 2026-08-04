@@ -135,34 +135,8 @@ def check_and_increment(account_email: str, action: str, campaign_limit: int | N
                     When provided, the stage's lower daily/weekly caps apply
                     on top of HARD_CAPS.
     """
-    hard_cap = HARD_CAPS.get(action, 50)
-    weekly_cap = None
-    if warmup_stage in WARMUP_DAILY_CAPS:
-        stage_daily = WARMUP_DAILY_CAPS[warmup_stage]
-        hard_cap = min(hard_cap, stage_daily.get(action, hard_cap))
-        weekly_cap = WARMUP_WEEKLY_CAPS.get(warmup_stage, {}).get(action)
-
-    limit = min(campaign_limit, hard_cap) if campaign_limit else hard_cap
-
-    day_key = _key(account_email, action)
-    current = _redis.get(day_key)
-
-    if current and int(current) >= limit:
-        return False  # Daily limit reached
-
-    if weekly_cap is not None:
-        week_key = _week_key(account_email, action)
-        week_current = _redis.get(week_key)
-        if week_current and int(week_current) >= weekly_cap:
-            return False  # Weekly warm-up limit reached
-
-    pipe = _redis.pipeline()
-    pipe.incr(day_key)
-    pipe.expireat(day_key, _seconds_until_midnight())
-    if weekly_cap is not None:
-        pipe.incr(week_key)
-        pipe.expire(week_key, 7 * 86400)  # rolling-week key, expires in 7 days
-    pipe.execute()
+    # Rate limiting has been REMOVED. Every action is now always allowed,
+    # regardless of hard caps, warm-up caps, or per-campaign limits.
     return True
 
 
