@@ -173,6 +173,28 @@ export default function FeedScrollResultsPage() {
         </div>
       </div>
 
+      {/* Search criteria */}
+      <div className="mb-5 rounded-xl border border-accent-500/20 bg-accent-500/5 p-4">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-accent-300">Search criteria</h2>
+        <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+          {job.mode === 'post_search' ? (
+            <div className="sm:col-span-2 lg:col-span-4">
+              <p className="mb-1 text-xs text-zinc-500">Keywords</p>
+              <div className="flex flex-wrap gap-1.5">
+                {(job.keywords || []).length ? job.keywords.map((item) => <span key={item} className="rounded-md bg-surface-700 px-2 py-1 text-zinc-200">{item}</span>) : <span className="text-zinc-400">No keywords configured</span>}
+              </div>
+            </div>
+          ) : (
+            <>
+              <div><p className="text-xs text-zinc-500">Job titles</p><p className="mt-1 text-zinc-200">{(job.job_titles || []).join(', ') || 'Any title'}</p></div>
+              <div><p className="text-xs text-zinc-500">Skills</p><p className="mt-1 text-zinc-200">{(job.skill_set || []).join(', ') || 'Any skill'}</p></div>
+              <div><p className="text-xs text-zinc-500">Experience</p><p className="mt-1 text-zinc-200">{job.experience_min_years ?? 'Any'}–{job.experience_max_years ?? 'any'} years</p></div>
+              <div><p className="text-xs text-zinc-500">Keywords</p><p className="mt-1 text-zinc-200">{(job.keywords || []).join(', ') || 'None'}</p></div>
+            </>
+          )}
+        </div>
+      </div>
+
       {/* Results */}
       {results.length === 0 ? (
         <div className="rounded-xl border border-surface-700 bg-surface-800 p-12 text-center">
