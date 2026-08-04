@@ -203,25 +203,25 @@ async def get_feed_scroll_results(
     if not job:
         raise HTTPException(status_code=404, detail="Feed scroll job not found")
 
+    # Only return posts that actually matched the criteria.  Posts with a
+    # score of 0 (or below the relevance floor) are never surfaced — score
+    # must be greater than 1.
+    _base = select(FeedScrollResult).where(
+        FeedScrollResult.feed_scroll_job_id == job_id,
+        FeedScrollResult.score > 1.0,
+    )
+
     if scan_batch_id:
         # Get specific batch
         result = await db.execute(
-            select(FeedScrollResult)
-            .where(
-                FeedScrollResult.feed_scroll_job_id == job_id,
-                FeedScrollResult.scan_batch_id == scan_batch_id,
-            )
+            _base.where(FeedScrollResult.scan_batch_id == scan_batch_id)
             .order_by(FeedScrollResult.score.desc())
         )
     else:
         # Get latest batch (most recent scan)
-        latest_result = await db.execute(
-            select(FeedScrollResult)
-            .where(FeedScrollResult.feed_scroll_job_id == job_id)
-            .order_by(FeedScrollResult.scanned_at.desc())
-            .limit(10)
+        result = await db.execute(
+            _base.order_by(FeedScrollResult.scanned_at.desc()).limit(10)
         )
-        result = latest_result
 
     posts = result.scalars().all()
     return [FeedScrollResultResponse.model_validate(p) for p in posts]

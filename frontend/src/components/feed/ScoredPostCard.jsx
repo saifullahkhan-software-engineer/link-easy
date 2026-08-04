@@ -1,10 +1,30 @@
 import ScoreBadge from './ScoreBadge';
 
+/**
+ * Renders a single scored post as a Google-style search preview on the job
+ * details page:
+ *   • the post URL is shown prominently (green link + breadcrumb), exactly
+ *     like a Google result, and links straight to the LinkedIn post;
+ *   • below it sits a snippet preview of the post text;
+ *   • the score badge, author, timestamp and matched terms stay visible.
+ */
 export default function ScoredPostCard({ post, rank }) {
-  const truncateText = (text, maxLength = 300) => {
+  const truncateText = (text, maxLength = 280) => {
     if (!text) return '';
     if (text.length <= maxLength) return text;
-    return text.substring(0, maxLength) + '...';
+    return text.substring(0, maxLength) + '…';
+  };
+
+  const postUrl = post.post_url;
+
+  // Show the raw URL as a breadcrumb (e.g. www.linkedin.com › feed › update › …)
+  const displayUrl = () => {
+    if (!postUrl) return '';
+    const pretty = postUrl
+      .replace(/^https?:\/\//, '')
+      .replace(/\/+$/, '')
+      .replace(/\/(feed|update)\//gi, ' › ');
+    return pretty;
   };
 
   return (
@@ -26,8 +46,36 @@ export default function ScoredPostCard({ post, rank }) {
         <ScoreBadge score={post.score} />
       </div>
 
+      {/* Google-style preview: clickable link + breadcrumb */}
+      <div className="mb-3">
+        {postUrl ? (
+          <>
+            <a
+              href={postUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block truncate text-sm font-medium text-accent-400 transition hover:text-accent-300"
+            >
+              View post on LinkedIn ↗
+            </a>
+            <a
+              href={postUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-0.5 block truncate text-xs text-green-400/90 hover:text-green-300"
+              title={postUrl}
+            >
+              {displayUrl()}
+            </a>
+          </>
+        ) : (
+          <p className="text-xs text-zinc-500">No post link available</p>
+        )}
+      </div>
+
+      {/* Post snippet preview */}
       <div className="mb-3 rounded-lg bg-surface-900 p-3">
-        <p className="whitespace-pre-wrap text-sm text-zinc-300">
+        <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">
           {truncateText(post.post_text)}
         </p>
       </div>
@@ -51,14 +99,14 @@ export default function ScoredPostCard({ post, rank }) {
         </div>
       )}
 
-      {post.post_url && (
+      {postUrl && (
         <a
-          href={post.post_url}
+          href={postUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1.5 text-sm font-medium text-accent-400 transition hover:text-accent-300"
         >
-          View on LinkedIn
+          Open post
           <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
           </svg>
