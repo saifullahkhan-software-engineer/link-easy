@@ -272,8 +272,11 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
     post_selectors = [
         # Newer primary containers (most reliable in recent LinkedIn)
         "div[data-urn]",
-        "article",
+        "article[data-urn], article[data-id]",
+        "div[data-urn*='activity'], div[data-id*='activity']",
         "div.scaffold-finite-scroll__item",
+        "li.scaffold-finite-scroll__content > li",
+        "div[data-testid*='feed'], div[class*='feed-shared-update']",
         "div.occludable-update",
         # Legacy fallbacks
         "div.feed-shared-update-v2",
@@ -282,6 +285,7 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
         "div.update-components-update",
         ".feed-update",
         "div[role='article']",
+        "div[class*='occludable-update'], div[class*='update-components'], div[class*='feed-shared-update']",
     ]
 
     post_elements = []

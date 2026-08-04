@@ -79,6 +79,15 @@ export default function FeedScrollJobCard({ job, onPause, onResume, onDelete }) 
         </div>
       </div>
 
+      <div className="mt-3 flex flex-wrap gap-1.5 border-t border-surface-700 pt-3">
+        {job.mode === 'post_search' && job.keywords?.map((keyword) => (
+          <span key={keyword} className="rounded bg-accent-500/10 px-2 py-0.5 text-xs text-accent-300">{keyword}</span>
+        ))}
+        {job.mode === 'job_search' && (job.experience_min_years != null || job.experience_max_years != null) && (
+          <span className="rounded bg-surface-700 px-2 py-0.5 text-xs text-zinc-300">Experience: {job.experience_min_years ?? 0}–{job.experience_max_years ?? 'any'} years</span>
+        )}
+      </div>
+
       {job.mode === 'job_search' && (
         <div className="mt-3 flex flex-wrap gap-1.5 border-t border-surface-700 pt-3">
           {job.job_titles?.slice(0, 3).map((title) => (
