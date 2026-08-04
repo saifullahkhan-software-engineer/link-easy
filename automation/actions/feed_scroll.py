@@ -84,8 +84,17 @@ _STRICT_CONTAINER_SELECTORS = {
 
 # Anchor for the post permalink (used for URN + URL extraction).
 POST_LINK_SELECTOR = (
-    "a[href*='/feed/update/'], a[href*='urn:li:activity'], a[href*='activity-']"
+    # A feed permalink can be rendered as either /feed/update/... or the
+    # newer /posts/<author>/...-activity-... form.  Do not rely solely on the
+    # feed URL: LinkedIn frequently supplies the latter in the CSS-modules UI.
+    "a[href*='/feed/update/'], a[href*='/posts/'], a[href*='urn:li:activity'], "
+    "a[href*='urn:li:ugcPost'], a[href*='urn:li:share'], a[href*='activity-']"
 )
+
+# LinkedIn truncates long post copy behind several equivalent controls.  These
+# are deliberately text controls only; "More actions" and "More comments" are
+# excluded so an extraction never opens a menu or comments thread.
+_EXPAND_POST_TEXT_SELECTOR = "button, [role='button']"
 
 # URN kinds that identify a POST/activity.  Feed item wrappers and actor
 # containers both expose data-urn; only these kinds identify the post itself
@@ -136,10 +145,10 @@ def _urn_from_href(href: str | None) -> str | None:
     """
     if not href:
         return None
-    m = re.search(r"/feed/update/(urn:li:[a-zA-Z]+:\d+)", href)
-    if m:
+    m = re.search(r"/feed/update/(urn:li:[a-zA-Z_]+:\d+)", href)
+    if m and _is_post_urn(m.group(1)):
         return m.group(1)
-    m = re.search(r"urn:li:(?:activity|ugcPost|share):\d+", href)
+    m = re.search(r"urn:li:(?:activity|ugcPost|share|fsd_update|update|comment):\d+", href)
     if m:
         return m.group(0)
     m = re.search(r"/feed/update/(\d+)", href)
@@ -149,6 +158,23 @@ def _urn_from_href(href: str | None) -> str | None:
     if m:
         return f"urn:li:activity:{m.group(1)}"
     return None
+
+
+def _is_expand_post_text_control(text: str | None, aria_label: str | None = None) -> bool:
+    """Return whether a control expands the current post's truncated copy.
+
+    LinkedIn changes the visible copy between ``...more``, ``See more`` and
+    ``Show more``.  Matching labels precisely prevents accidental clicks on
+    the unrelated More-actions menu and comment expansion controls.
+    """
+    label = " ".join(f"{text or ''} {aria_label or ''}".lower().split())
+    # Normalise the ellipsis prefix used by the compact feed renderer.
+    label = label.lstrip(".… ")
+    if "comment" in label or "action" in label:
+        return False
+    return label in {"more", "see more", "show more"} or (
+        label.startswith("see more ") and "post" in label
+    ) or (label.startswith("show more ") and "post" in label)
 
 
 def _pseudo_urn(author_name: str | None, post_text: str | None) -> str:
@@ -448,6 +474,35 @@ async def _looks_like_post(element, strict: bool = False) -> bool:
         return not strict  # be permissive when we cannot inspect
 
 
+async def _expand_post_text(element) -> bool:
+    """Expand a truncated post in-place before reading its text.
+
+    The control must be searched *within the post container*.  A page-level
+    ``get_by_text('More')`` is unsafe because it commonly targets the profile
+    card's More-actions menu instead of the post body.
+    """
+    try:
+        controls = await element.query_selector_all(_EXPAND_POST_TEXT_SELECTOR)
+        for control in controls:
+            try:
+                text = await control.inner_text()
+                aria_label = await control.get_attribute("aria-label")
+                if not _is_expand_post_text_control(text, aria_label):
+                    continue
+                # Patchright may return detached controls while React replaces
+                # a feed item.  Scroll first and let the next scan retry it.
+                if hasattr(control, "scroll_into_view_if_needed"):
+                    await control.scroll_into_view_if_needed(timeout=2500)
+                await control.click(timeout=3000)
+                await asyncio.sleep(0.35)  # wait for the full copy to render
+                return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
     """
     Extract post data from currently visible feed items.
@@ -495,6 +550,13 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
 
     for idx, element in enumerate(post_elements):
         try:
+            # Long posts only expose a preview until their local See more /
+            # ...more button is clicked.  Expand before text and URL extraction
+            # so scoring sees the complete post, not the truncated preview.
+            expanded = await _expand_post_text(element)
+            if expanded and should_log_debug():
+                logger.debug("Expanded truncated text for feed post %s", idx)
+
             # Extract post text first (it is also used for the URN fallback).
             post_text = await _get_post_text(element)
             if not post_text or len(post_text.strip()) < 15:  # relaxed from 20
@@ -590,7 +652,15 @@ async def _get_post_url(element, post_urn: str | None) -> str | None:
             href = await link.get_attribute("href")
             if href:
                 href = href.split("?")[0].split("#")[0]
-                if "/feed/update/" in href or "urn:li:" in href:
+                if (
+                    "/feed/update/" in href
+                    or "/posts/" in href
+                    or "urn:li:" in href
+                    or "activity-" in href
+                ):
+                    # Preserve the real post permalink rather than fabricating
+                    # a feed URL.  /posts/... links are the only link supplied
+                    # for many current feed cards.
                     return href
     except Exception:
         pass

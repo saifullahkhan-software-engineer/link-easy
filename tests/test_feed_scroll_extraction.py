@@ -64,6 +64,7 @@ if "core.logging_config" not in sys.modules:
 from automation.actions.feed_scroll import (
     POST_CONTAINER_SELECTORS,
     _clean_post_text,
+    _is_expand_post_text_control,
     _is_post_urn,
     _pseudo_urn,
     _urn_from_href,
@@ -126,6 +127,26 @@ class UrnFromHrefTests(unittest.TestCase):
         for href in (None, "", "https://www.linkedin.com/in/john/",
                      "https://www.linkedin.com/posts/john/"):
             self.assertIsNone(_urn_from_href(href))
+
+
+class ExpandPostTextControlTests(unittest.TestCase):
+    def test_accepts_linkedin_post_expanders(self):
+        for text, aria in (
+            ("...more", None),
+            ("See more", None),
+            ("", "Show more post text"),
+            ("More", ""),
+        ):
+            self.assertTrue(_is_expand_post_text_control(text, aria), (text, aria))
+
+    def test_rejects_unrelated_more_controls(self):
+        for text, aria in (
+            ("More", "More actions"),
+            ("See more", "See more comments"),
+            ("More comments", None),
+            ("Like", None),
+        ):
+            self.assertFalse(_is_expand_post_text_control(text, aria), (text, aria))
 
 
 class PseudoUrnTests(unittest.TestCase):
