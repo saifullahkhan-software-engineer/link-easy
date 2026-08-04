@@ -7,7 +7,9 @@ for scoring. Uses existing human-like behavior functions.
 
 Includes robust modern selectors + explicit waits + heavy debug logging + screenshots.
 """
+import asyncio
 import random
+import time
 from patchright.async_api import Page
 from automation.human import human_scroll, random_idle_pause
 from automation.actions.utils import recover_blank_page
@@ -108,6 +110,10 @@ async def scroll_feed_and_collect(
 
         logger.info("Starting feed scroll to collect posts...")
 
+        # Track how many post-like elements exist in the DOM so we can tell
+        # whether LinkedIn actually appended new content after each scroll.
+        dom_post_count = await _count_dom_posts(page)
+
         for scroll_iteration in range(max_scrolls):
             if len(collected_posts) >= target_posts:
                 logger.info(f"Collected {len(collected_posts)} posts, stopping scroll")
@@ -134,8 +140,26 @@ async def scroll_feed_and_collect(
                 except Exception:
                     pass
 
-            # Scroll naturally
-            await human_scroll(page)
+            # Scroll naturally AND make sure LinkedIn actually loads more posts.
+            # Bare mouse.wheel() often doesn't move LinkedIn's own scroll
+            # container in headless mode, so the feed never grows and we end up
+            # re-reading the same one screenful of posts.  We therefore also
+            # scroll the real container with JS and wait for the DOM count to
+            # increase before counting the pass as useful.
+            old_dom_count = dom_post_count
+            dom_post_count = await _feed_scroll_and_wait_for_new_posts(page, old_dom_count)
+
+            if dom_post_count > old_dom_count:
+                logger.info(
+                    f"Scroll {scroll_iteration + 1}: LinkedIn loaded more posts "
+                    f"(DOM {old_dom_count} -> {dom_post_count})"
+                )
+            else:
+                logger.warning(
+                    f"Scroll {scroll_iteration + 1}: no new posts loaded by LinkedIn "
+                    f"(DOM still {dom_post_count}) - infinite scroll may not be triggering"
+                )
+
             await random_idle_pause(1.5, 3.0)
 
             logger.info(f"Scroll {scroll_iteration + 1}/{max_scrolls}: collected {len(collected_posts)} posts so far")
@@ -155,6 +179,85 @@ async def scroll_feed_and_collect(
     except Exception as e:
         logger.error(f"Error during feed scroll: {e}")
         return collected_posts
+
+
+async def _count_dom_posts(page: Page) -> int:
+    """Count post-like elements currently in the DOM (regardless of viewport)."""
+    try:
+        return await page.locator(
+            "div[data-urn], article, .scaffold-finite-scroll__item"
+        ).count()
+    except Exception:
+        return 0
+
+
+async def _feed_scroll_and_wait_for_new_posts(
+    page: Page,
+    current_dom_count: int,
+    max_wait: float = 10.0,
+) -> int:
+    """
+    Scroll down far enough to trigger LinkedIn's infinite-scroll lazy loader,
+    then wait until new posts are actually appended to the DOM.
+
+    Root cause this fixes: a bare ``page.mouse.wheel()`` frequently does NOT
+    move LinkedIn's feed in headless Chromium because the feed lives inside its
+    own scrollable container (e.g. ``.scaffold-layout__main`` /
+    ``.scaffold-finite-scroll__content``), so the window scrolls but the feed
+    never grows and the same one screenful of posts is collected over and over.
+
+    We drive the scroll both with the human-style wheel and with explicit JS
+    that scrolls every scrollable candidate container to its bottom, then poll
+    the DOM until the post count increases (new content loaded) or we time out.
+
+    Returns the new post-element count in the DOM.
+    """
+    # Human-style wheel nudge first (keeps behaviour realistic).
+    try:
+        await page.mouse.move(720, 480)
+    except Exception:
+        pass
+    await human_scroll(page)
+
+    # Guarantee the real feed scroll container actually moves.
+    try:
+        await page.evaluate(
+            """() => {
+                const scroll = (el) => {
+                    if (!el) return;
+                    if (el.scrollHeight > el.clientHeight + 5) {
+                        el.scrollTop = el.scrollHeight;
+                    }
+                };
+                // Window / document scrolling element
+                const doc = document.scrollingElement || document.documentElement;
+                scroll(doc);
+                window.scrollTo(0, document.body.scrollHeight);
+                // Candidate feed scroll containers
+                for (const sel of [
+                    '.scaffold-layout__main',
+                    '.scaffold-finite-scroll__content',
+                    '.scaffold-finite-scroll__item',
+                    'main',
+                    '[class*="finite-scroll"]',
+                    '[class*="feed"]'
+                ]) {
+                    document.querySelectorAll(sel).forEach(scroll);
+                }
+            }"""
+        )
+    except Exception as e:
+        logger.debug(f"JS feed scroll failed: {e}")
+
+    # Wait for the post count in the DOM to grow (LinkedIn appends new posts).
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        count = await _count_dom_posts(page)
+        if count > current_dom_count:
+            return count
+        await asyncio.sleep(0.8)
+
+    return current_dom_count
 
 
 async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:

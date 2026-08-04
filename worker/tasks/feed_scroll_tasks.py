@@ -5,6 +5,7 @@ FILE: worker/tasks/feed_scroll_tasks.py
 Periodically scans the LinkedIn feed, scores posts, and stores results.
 """
 import asyncio
+import random
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -244,9 +245,9 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
                     except Exception:
                         pass
 
-                    # Scroll feed and collect posts (collect more than we need to have better scoring)
+                    # Scroll feed and collect posts (15-20 posts per scan)
                     posts = await scroll_feed_and_collect(
-                        page, target_posts=max(posts_per_scan * 3, 30), max_scrolls=15
+                        page, target_posts=random.randint(15, 20), max_scrolls=15
                     )
 
                     # === NEW: Save final screenshot after collection (very useful for debugging) ===
