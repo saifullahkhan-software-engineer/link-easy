@@ -5,16 +5,10 @@ import ScoreBadge from './ScoreBadge';
  * details page:
  *   • the post URL is shown prominently (green link + breadcrumb), exactly
  *     like a Google result, and links straight to the LinkedIn post;
- *   • below it sits a snippet preview of the post text;
+ *   • below it sits the full post text;
  *   • the score badge, author, timestamp and matched terms stay visible.
  */
 export default function ScoredPostCard({ post, rank }) {
-  const truncateText = (text, maxLength = 280) => {
-    if (!text) return '';
-    if (text.length <= maxLength) return text;
-    return text.substring(0, maxLength) + '…';
-  };
-
   const postUrl = post.post_url;
 
   // Show the raw URL as a breadcrumb (e.g. www.linkedin.com › feed › update › …)
@@ -73,10 +67,10 @@ export default function ScoredPostCard({ post, rank }) {
         )}
       </div>
 
-      {/* Post snippet preview */}
+      {/* Post full text */}
       <div className="mb-3 rounded-lg bg-surface-900 p-3">
         <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">
-          {truncateText(post.post_text)}
+          {post.post_text}
         </p>
       </div>
 
