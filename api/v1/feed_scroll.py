@@ -22,6 +22,7 @@ from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus, FeedScrol
 from models.feed_scroll_result import FeedScrollResult
 from models.linkedin_account import LinkedInAccount
 from models.user import User
+from automation.actions.feed_scroll import _normalise_post_url, _post_identity_key
 from schemas.feed_scroll import (
     FeedScrollJobCreate,
     FeedScrollJobResponse,
@@ -30,6 +31,29 @@ from schemas.feed_scroll import (
 )
 
 router = APIRouter(prefix="/api/v1/feed-scroll", tags=["feed-scroll"])
+
+
+def _prepare_unique_results(rows, max_items: int | None = None) -> list[FeedScrollResult]:
+    """Normalize post links and remove repeated posts before returning them.
+
+    Older scans may have stored relative LinkedIn hrefs (``/posts/...``) or no
+    ``post_url`` at all.  Normalize those at response time so existing rows are
+    clickable without needing a data backfill.  Dedupe by activity id / URL /
+    text hash so repeated scheduled scans do not show the same post multiple
+    times on the results page.
+    """
+    unique: list[FeedScrollResult] = []
+    seen_keys: set[str] = set()
+    for row in rows:
+        row.post_url = _normalise_post_url(row.post_url, row.post_urn)
+        key = _post_identity_key(row.post_urn, row.post_url, row.author_name, row.post_text)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique.append(row)
+        if max_items is not None and len(unique) >= max_items:
+            break
+    return unique
 
 
 @router.post("/jobs", response_model=FeedScrollJobResponse, status_code=status.HTTP_201_CREATED)
@@ -212,18 +236,21 @@ async def get_feed_scroll_results(
     )
 
     if scan_batch_id:
-        # Get specific batch
+        # Get specific batch, with duplicate cards removed.
         result = await db.execute(
             _base.where(FeedScrollResult.scan_batch_id == scan_batch_id)
-            .order_by(FeedScrollResult.score.desc())
+            .order_by(FeedScrollResult.score.desc(), FeedScrollResult.scanned_at.desc())
         )
+        posts = _prepare_unique_results(result.scalars().all())
     else:
-        # Get latest batch (most recent scan)
+        # Get recent rows then dedupe in Python.  Query more than 10 because a
+        # scheduled scan can collect the same post again; after removing repeats
+        # we still want up to 10 unique, clickable results.
         result = await db.execute(
-            _base.order_by(FeedScrollResult.scanned_at.desc()).limit(10)
+            _base.order_by(FeedScrollResult.scanned_at.desc(), FeedScrollResult.score.desc()).limit(200)
         )
+        posts = _prepare_unique_results(result.scalars().all(), max_items=10)
 
-    posts = result.scalars().all()
     return [FeedScrollResultResponse.model_validate(p) for p in posts]
 
 

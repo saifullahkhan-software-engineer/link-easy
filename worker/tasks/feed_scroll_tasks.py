@@ -20,7 +20,7 @@ from worker.playwright_semaphore import acquire_playwright_session
 from worker.profile_lock import acquire_profile_lock, release_profile_lock
 from automation.browser import launch_persistent_browser
 from automation.session import verify_session, LinkedInSessionStatus
-from automation.actions.feed_scroll import scroll_feed_and_collect
+from automation.actions.feed_scroll import scroll_feed_and_collect, _post_identity_key
 from automation.scoring.feed_scorer import score_post
 from core.logging_config import should_take_screenshots
 from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus
@@ -144,18 +144,64 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
         relevant_posts = [p for p in scored_posts if p.get("score", 0) > 1.0]
         relevant_posts.sort(key=lambda x: x["score"], reverse=True)
 
-        # Sort by score and take top N
-        top_posts = relevant_posts[:posts_per_scan]
+        # Dedupe within this scan first.  The same LinkedIn card can be found
+        # through multiple DOM wrappers (or as /feed/update and /posts links),
+        # so score sorting alone can otherwise store repeated cards.
+        unique_relevant_posts = []
+        seen_keys = set()
+        for post_data in relevant_posts:
+            key = _post_identity_key(
+                post_data.get("post_urn"), post_data.get("post_url"),
+                post_data.get("author_name"), post_data.get("post_text")
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            unique_relevant_posts.append(post_data)
+
+        # Also skip posts already stored for this job in earlier batches, so the
+        # results page does not fill with the same post on every scheduled scan.
+        existing_rows = (
+            db.query(
+                FeedScrollResult.post_urn,
+                FeedScrollResult.post_url,
+                FeedScrollResult.author_name,
+                FeedScrollResult.post_text,
+            )
+            .filter(FeedScrollResult.feed_scroll_job_id == job.id)
+            .all()
+        )
+        existing_keys = {
+            _post_identity_key(row.post_urn, row.post_url, row.author_name, row.post_text)
+            for row in existing_rows
+        }
+
+        top_posts = []
+        skipped_existing = 0
+        for post_data in unique_relevant_posts:
+            key = _post_identity_key(
+                post_data.get("post_urn"), post_data.get("post_url"),
+                post_data.get("author_name"), post_data.get("post_text")
+            )
+            if key in existing_keys:
+                skipped_existing += 1
+                continue
+            top_posts.append(post_data)
+            if len(top_posts) >= posts_per_scan:
+                break
 
         logger.info(
-            f"🏆 Top {len(top_posts)} posts after scoring "
+            f"🏆 Top {len(top_posts)} new unique posts after scoring "
             f"(from {len(raw_posts)} raw, {len(scored_posts)} scored, "
-            f"{len(relevant_posts)} with score > 1). "
+            f"{len(relevant_posts)} with score > 1, "
+            f"{len(unique_relevant_posts)} unique, {skipped_existing} already stored). "
             f"Highest score: {top_posts[0]['score'] if top_posts else 0}"
         )
 
-        if len(top_posts) == 0 and raw_posts:
-            logger.warning("⚠️ Had raw posts but none survived top-N cut or scoring")
+        if len(top_posts) == 0 and unique_relevant_posts:
+            logger.warning("⚠️ Relevant posts were found, but all were duplicates from earlier scans")
+        elif len(top_posts) == 0 and raw_posts:
+            logger.warning("⚠️ Had raw posts but none survived scoring")
         elif len(top_posts) == 0:
             logger.error("❌ No posts were collected at all for this scan")
 

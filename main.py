@@ -17,6 +17,7 @@ from api.v1.leads import router as leads_router
 from api.v1.test_automation import router as test_automation_router
 from api.v1.feed_scroll import router as feed_scroll_router
 from core.config import settings
+from core.logging_config import get_logger
 from core.security import validate_encryption_key
 from database import init_db
 from models.roles import UserRole
@@ -25,6 +26,8 @@ from models.user import User
 from automation.session_manager import start_periodic_cleanup
 from run_migrations import run_migrations
 
+logger = get_logger(__name__)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run database initializations on startup, start background tasks."""
@@ -32,13 +35,16 @@ async def lifespan(app: FastAPI):
     # malformed — a config mistake must not silently corrupt/expose secrets.
     validate_encryption_key()
 
-    # Apply any pending schema migrations BEFORE touching the database.
-    # Base.metadata.create_all() only creates missing tables — it never adds
-    # new columns to existing ones, so without this a code pull that adds a
-    # column (e.g. campaign_jobs.action_message) silently breaks every job
-    # with "column does not exist" until someone remembers to run
-    # `python run_migrations.py` by hand.
+    # Ensure tables exist, then apply pending schema migrations.  This project
+    # does not have Alembic revisions for the original/base tables, so a brand
+    # new database still needs create_all() first.  create_all() never adds new
+    # columns to existing tables, though, so we immediately run the idempotent
+    # migrations afterward (e.g. feed_scroll_results.post_url and the feed-scroll
+    # tables for older deployments).  Alembic's runner uses asyncio.run(), so
+    # execute it in a worker thread from FastAPI's already-running event loop.
     await init_db()
+    logger.info("Running database migrations on startup...")
+    await asyncio.to_thread(run_migrations)
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)
     try:
         yield

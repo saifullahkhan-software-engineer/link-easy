@@ -31,6 +31,26 @@ function initials(name) {
   return (first + last).toUpperCase();
 }
 
+// Make old rows clickable too: older scans may have stored a relative LinkedIn
+// href or only a post URN before the post_url column/migration existed.
+function getLinkedInPostUrl(post) {
+  const rawUrl = (post?.post_url || '').trim();
+  const urn = (post?.post_urn || '').trim();
+
+  if (rawUrl) {
+    const clean = rawUrl.split('?')[0].split('#')[0];
+    if (clean.startsWith('//www.linkedin.com/')) return `https:${clean}`;
+    if (clean.startsWith('/')) return `https://www.linkedin.com${clean}`;
+    if (clean.startsWith('www.linkedin.com/')) return `https://${clean}`;
+    if (/^https?:\/\/www\.linkedin\.com\//i.test(clean)) return clean.replace(/^http:/i, 'https:');
+  }
+
+  if (urn.startsWith('urn:li:')) {
+    return `https://www.linkedin.com/feed/update/${urn}/`;
+  }
+  return '';
+}
+
 // Deterministic avatar colour per author name.
 function avatarColor(name) {
   const colors = [
@@ -56,7 +76,7 @@ function avatarColor(name) {
  * LinkedIn in a new tab (no hidden menu, no copy button).
  */
 export default function ScoredPostCard({ post, rank }) {
-  const postUrl = post.post_url;
+  const postUrl = getLinkedInPostUrl(post);
 
   const linkProps = postUrl
     ? { href: postUrl, target: '_blank', rel: 'noopener noreferrer', title: 'Open this post on LinkedIn' }

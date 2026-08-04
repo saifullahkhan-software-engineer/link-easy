@@ -34,6 +34,7 @@ import hashlib
 import random
 import re
 import time
+from urllib.parse import urlsplit, urlunsplit
 from patchright.async_api import Page
 from automation.human import human_scroll, random_idle_pause
 from automation.actions.utils import recover_blank_page
@@ -94,7 +95,7 @@ POST_LINK_SELECTOR = (
 # LinkedIn truncates long post copy behind several equivalent controls.  These
 # are deliberately text controls only; "More actions" and "More comments" are
 # excluded so an extraction never opens a menu or comments thread.
-_EXPAND_POST_TEXT_SELECTOR = "button, [role='button']"
+_EXPAND_POST_TEXT_SELECTOR = "button, [role='button'], a, span"
 
 # URN kinds that identify a POST/activity.  Feed item wrappers and actor
 # containers both expose data-urn; only these kinds identify the post itself
@@ -160,6 +161,74 @@ def _urn_from_href(href: str | None) -> str | None:
     return None
 
 
+def _normalise_post_url(href: str | None, post_urn: str | None = None) -> str | None:
+    """Return an absolute, clickable LinkedIn post URL.
+
+    LinkedIn often renders post permalinks as relative hrefs (``/posts/...`` or
+    ``/feed/update/...``).  Storing those directly makes the frontend navigate
+    inside our own app instead of opening LinkedIn, so normalize at extraction
+    time and also allow a URN fallback for older rows.
+    """
+    cleaned = (href or "").strip()
+    if cleaned:
+        cleaned = cleaned.split("?", 1)[0].split("#", 1)[0]
+        if cleaned.startswith("//www.linkedin.com/"):
+            cleaned = f"https:{cleaned}"
+        elif cleaned.startswith("/"):
+            cleaned = f"https://www.linkedin.com{cleaned}"
+        elif cleaned.startswith("www.linkedin.com/"):
+            cleaned = f"https://{cleaned}"
+
+        if cleaned.startswith(("https://www.linkedin.com/", "http://www.linkedin.com/")) and (
+            "/feed/update/" in cleaned or "/posts/" in cleaned or "activity-" in cleaned
+        ):
+            return cleaned.replace("http://www.linkedin.com/", "https://www.linkedin.com/", 1)
+
+        # Sometimes the href itself is only a URN-ish value.  Convert it below.
+        urn = _urn_from_href(cleaned)
+        if urn:
+            return f"https://www.linkedin.com/feed/update/{urn}/"
+
+    if post_urn and post_urn.startswith("urn:li:"):
+        return f"https://www.linkedin.com/feed/update/{post_urn}/"
+    return None
+
+
+def _post_identity_key(
+    post_urn: str | None,
+    post_url: str | None = None,
+    author_name: str | None = None,
+    post_text: str | None = None,
+) -> str:
+    """Stable key for deduping posts collected through different DOM paths.
+
+    The same feed card can be discovered as both a wrapper and a nested update,
+    and LinkedIn may expose ``urn:li:activity`` in one place but only a
+    ``/posts/...activity-...`` permalink in another.  Dedupe by the underlying
+    activity id first, then normalized URL, then a content hash fallback.
+    """
+    url = _normalise_post_url(post_url, post_urn)
+    urn = _urn_from_href(url or "") or (post_urn if _is_post_urn(post_urn) else None)
+    if urn:
+        m = re.search(r":(\d+)$", urn)
+        if m:
+            return f"activity:{m.group(1)}"
+        return f"urn:{urn}"
+
+    if url:
+        try:
+            parts = urlsplit(url)
+            path = re.sub(r"/+$", "", parts.path)
+            return "url:" + urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, "", ""))
+        except Exception:
+            return f"url:{url.lower()}"
+
+    text = " ".join((post_text or "").lower().split())[:1200]
+    author = " ".join((author_name or "").lower().split())
+    digest = hashlib.md5(f"{author}|{text}".encode("utf-8", "ignore")).hexdigest()[:16]
+    return f"text:{digest}"
+
+
 def _is_expand_post_text_control(text: str | None, aria_label: str | None = None) -> bool:
     """Return whether a control expands the current post's truncated copy.
 
@@ -169,12 +238,24 @@ def _is_expand_post_text_control(text: str | None, aria_label: str | None = None
     """
     label = " ".join(f"{text or ''} {aria_label or ''}".lower().split())
     # Normalise the ellipsis prefix used by the compact feed renderer.
-    label = label.lstrip(".… ")
-    if "comment" in label or "action" in label:
+    label = label.replace("…", "...").lstrip(". ")
+    if not label:
         return False
-    return label in {"more", "see more", "show more"} or (
-        label.startswith("see more ") and "post" in label
-    ) or (label.startswith("show more ") and "post" in label)
+    if any(blocked in label for blocked in ("comment", "reply", "action", "menu", "reaction")):
+        return False
+
+    # Exact labels and common aria labels.
+    if label in {"more", "see more", "show more"}:
+        return True
+    if (label.startswith("see more") or label.startswith("show more")) and any(
+        hint in label for hint in ("post", "text", "content")
+    ):
+        return True
+
+    # Some current LinkedIn variants use aria text like "click to see more".
+    # Keep this bounded so a long post body ending with "...more" is not treated
+    # as the control itself when we scan spans inside the post.
+    return len(label) <= 80 and ("see more" in label or "show more" in label)
 
 
 def _pseudo_urn(author_name: str | None, post_text: str | None) -> str:
@@ -204,7 +285,13 @@ def _clean_post_text(raw: str | None) -> str:
         if _UI_NOISE_LINE.match(line):
             continue
         lines.append(line)
-    return " ".join(lines)[:2500]
+    cleaned = " ".join(lines)
+    # If LinkedIn did not expand the copy (or expansion failed), the compact
+    # renderer can leave an inline trailing "...more" / "…more" token.  It is a
+    # control label, not post content; stripping it also avoids scoring the word
+    # "more" and showing a fake, non-clickable "more" in our UI.
+    cleaned = re.sub(r"\s*(?:\.{3}|…)\s*more\s*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned[:2500]
 
 
 # ── Main flow ────────────────────────────────────────────────────────────────
@@ -313,8 +400,14 @@ async def scroll_feed_and_collect(
             new_posts = await _extract_visible_posts(page, seen_urns)
             added_this_pass = 0
             for post in new_posts:
-                if post["post_urn"] not in seen_urns:
-                    seen_urns.add(post["post_urn"])
+                identity = _post_identity_key(
+                    post.get("post_urn"), post.get("post_url"),
+                    post.get("author_name"), post.get("post_text")
+                )
+                if identity not in seen_urns and post.get("post_urn") not in seen_urns:
+                    seen_urns.add(identity)
+                    if post.get("post_urn"):
+                        seen_urns.add(post["post_urn"])
                     collected_posts.append(post)
                     added_this_pass += 1
                     logger.info(f"✅ Collected post #{len(collected_posts)}: {post.get('author_name', 'Unknown')[:40]}... (len={len(post.get('post_text',''))})")
@@ -479,22 +572,47 @@ async def _expand_post_text(element) -> bool:
 
     The control must be searched *within the post container*.  A page-level
     ``get_by_text('More')`` is unsafe because it commonly targets the profile
-    card's More-actions menu instead of the post body.
+    card's More-actions menu instead of the post body.  LinkedIn currently
+    renders the expander sometimes as a button and sometimes as a clickable
+    span inside the post body, so we inspect both and click the nearest
+    clickable ancestor when needed.
     """
     try:
         controls = await element.query_selector_all(_EXPAND_POST_TEXT_SELECTOR)
-        for control in controls:
+        for control in controls[:300]:
             try:
                 text = await control.inner_text()
                 aria_label = await control.get_attribute("aria-label")
-                if not _is_expand_post_text_control(text, aria_label):
+                try:
+                    parent_context = await control.evaluate(
+                        """el => {
+                            const target = el.closest('button,[role="button"],a') || el;
+                            return [
+                                target.getAttribute('aria-label') || '',
+                                target.getAttribute('data-control-name') || ''
+                            ].join(' ');
+                        }"""
+                    )
+                except Exception:
+                    parent_context = ""
+                if not _is_expand_post_text_control(text, f"{aria_label or ''} {parent_context}"):
                     continue
                 # Patchright may return detached controls while React replaces
                 # a feed item.  Scroll first and let the next scan retry it.
                 if hasattr(control, "scroll_into_view_if_needed"):
                     await control.scroll_into_view_if_needed(timeout=2500)
-                await control.click(timeout=3000)
-                await asyncio.sleep(0.35)  # wait for the full copy to render
+                try:
+                    await control.click(timeout=3000)
+                except Exception:
+                    # Spans containing "...more" may not be directly clickable;
+                    # trigger the closest clickable ancestor in the browser.
+                    await control.evaluate(
+                        """el => {
+                            const target = el.closest('button,[role="button"],a') || el;
+                            target.click();
+                        }"""
+                    )
+                await asyncio.sleep(0.5)  # wait for the full copy to render
                 return True
             except Exception:
                 continue
@@ -510,6 +628,7 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
     Returns list of dicts with: post_urn, post_url, author_name, post_text
     """
     posts = []
+    local_seen_keys = set()
 
     post_elements = []
     for selector in POST_CONTAINER_SELECTORS:
@@ -569,11 +688,15 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
 
             # Extract URN (unique identifier) — real URN or stable fallback
             post_urn = await _get_post_urn(element, author_name, post_text)
-            if not post_urn or post_urn in seen_urns:
+            if not post_urn:
                 continue
 
             # Build post URL (prefer the real permalink href)
             post_url = await _get_post_url(element, post_urn)
+            identity = _post_identity_key(post_urn, post_url, author_name, post_text)
+            if post_urn in seen_urns or identity in seen_urns or identity in local_seen_keys:
+                continue
+            local_seen_keys.add(identity)
 
             posts.append({
                 "post_urn": post_urn,
@@ -598,9 +721,11 @@ async def _get_post_urn(element, author_name: str | None = None, post_text: str 
     Order of attempts:
       1. Activity-ish ``data-urn`` / ``data-id`` / ``data-activity-urn`` on the
          element itself.
-      2. Same attributes on any descendant (skipping author/entity URNs such as
+      2. The post permalink href (``/feed/update/urn:li:activity:...``),
+         preferred before descendant URNs because nested social/comment nodes can
+         expose their own activity URNs.
+      3. Same attributes on any descendant (skipping author/entity URNs such as
          ``urn:li:person:...`` which would otherwise be mistaken for the post).
-      3. The post permalink href (``/feed/update/urn:li:activity:...``).
       4. A stable pseudo-URN derived from author + text.
     """
     try:
@@ -613,18 +738,9 @@ async def _get_post_urn(element, author_name: str | None = None, post_text: str 
             except Exception:
                 continue
 
-        # 2. Descendant attributes — iterate ALL, skip author/entity URNs
-        for attr in ("data-urn", "data-id", "data-activity-urn"):
-            try:
-                descendants = await element.query_selector_all(f"[{attr}]")
-                for child in descendants:
-                    val = await child.get_attribute(attr)
-                    if _is_post_urn(val):
-                        return val
-            except Exception:
-                continue
-
-        # 3. Permalink href (works on the new CSS-modules feed)
+        # 2. Permalink href (works on the new CSS-modules feed).  Prefer this
+        # before descendant data-urns: nested social/comment elements can expose
+        # their own URNs, while the permalink points to the actual feed card.
         try:
             link = await element.query_selector(POST_LINK_SELECTOR)
             if link:
@@ -634,6 +750,17 @@ async def _get_post_urn(element, author_name: str | None = None, post_text: str 
                     return urn
         except Exception:
             pass
+
+        # 3. Descendant attributes — iterate ALL, skip author/entity URNs
+        for attr in ("data-urn", "data-id", "data-activity-urn"):
+            try:
+                descendants = await element.query_selector_all(f"[{attr}]")
+                for child in descendants:
+                    val = await child.get_attribute(attr)
+                    if _is_post_urn(val):
+                        return val
+            except Exception:
+                continue
 
         # 4. Stable pseudo-URN (still useful for dedup in same run)
         return _pseudo_urn(author_name, post_text)
@@ -645,29 +772,21 @@ async def _get_post_urn(element, author_name: str | None = None, post_text: str 
 
 
 async def _get_post_url(element, post_urn: str | None) -> str | None:
-    """Build the post URL, preferring the real permalink href when available."""
+    """Build an absolute post URL, preferring the real permalink href."""
     try:
         link = await element.query_selector(POST_LINK_SELECTOR)
         if link:
             href = await link.get_attribute("href")
-            if href:
-                href = href.split("?")[0].split("#")[0]
-                if (
-                    "/feed/update/" in href
-                    or "/posts/" in href
-                    or "urn:li:" in href
-                    or "activity-" in href
-                ):
-                    # Preserve the real post permalink rather than fabricating
-                    # a feed URL.  /posts/... links are the only link supplied
-                    # for many current feed cards.
-                    return href
+            normalised = _normalise_post_url(href, post_urn)
+            if normalised:
+                # Preserve the real post permalink rather than fabricating a
+                # feed URL. /posts/... links are the only link supplied for many
+                # current feed cards, but they must be absolute for our UI.
+                return normalised
     except Exception:
         pass
 
-    if post_urn and post_urn.startswith("urn:li:"):
-        return f"https://www.linkedin.com/feed/update/{post_urn}/"
-    return None
+    return _normalise_post_url(None, post_urn)
 
 
 async def _get_post_text(element) -> str:

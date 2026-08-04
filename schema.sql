@@ -98,6 +98,31 @@ CREATE TYPE public.linkedin_account_status AS ENUM (
 
 ALTER TYPE public.linkedin_account_status OWNER TO postgres;
 
+--
+-- Name: feed_scroll_mode; Type: TYPE; Schema: public; Owner: postgres
+--
+
+CREATE TYPE public.feed_scroll_mode AS ENUM (
+    'job_search',
+    'post_search'
+);
+
+
+ALTER TYPE public.feed_scroll_mode OWNER TO postgres;
+
+--
+-- Name: feed_scroll_job_status; Type: TYPE; Schema: public; Owner: postgres
+--
+
+CREATE TYPE public.feed_scroll_job_status AS ENUM (
+    'draft',
+    'active',
+    'paused'
+);
+
+
+ALTER TYPE public.feed_scroll_job_status OWNER TO postgres;
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -174,6 +199,54 @@ CREATE TABLE public.campaigns (
 
 
 ALTER TABLE public.campaigns OWNER TO postgres;
+
+--
+-- Name: feed_scroll_jobs; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.feed_scroll_jobs (
+    id character varying NOT NULL,
+    account_email character varying NOT NULL,
+    owner_email character varying NOT NULL,
+    name character varying NOT NULL,
+    mode public.feed_scroll_mode DEFAULT 'job_search'::public.feed_scroll_mode NOT NULL,
+    status public.feed_scroll_job_status DEFAULT 'draft'::public.feed_scroll_job_status NOT NULL,
+    experience_min_years integer,
+    experience_max_years integer,
+    job_titles json,
+    skill_set json,
+    keywords json,
+    feed_interval_hours integer DEFAULT 1 NOT NULL,
+    posts_per_scan integer DEFAULT 10 NOT NULL,
+    last_scanned_at timestamp with time zone,
+    next_scan_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.feed_scroll_jobs OWNER TO postgres;
+
+--
+-- Name: feed_scroll_results; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.feed_scroll_results (
+    id character varying NOT NULL,
+    feed_scroll_job_id character varying NOT NULL,
+    post_urn character varying,
+    post_url character varying,
+    author_name character varying,
+    post_text text,
+    score double precision DEFAULT 0 NOT NULL,
+    matched_terms json,
+    scan_batch_id character varying NOT NULL,
+    scanned_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.feed_scroll_results OWNER TO postgres;
 
 --
 -- Name: leads; Type: TABLE; Schema: public; Owner: postgres
@@ -299,6 +372,22 @@ ALTER TABLE ONLY public.campaigns
 
 
 --
+-- Name: feed_scroll_jobs feed_scroll_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feed_scroll_jobs
+    ADD CONSTRAINT feed_scroll_jobs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: feed_scroll_results feed_scroll_results_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feed_scroll_results
+    ADD CONSTRAINT feed_scroll_results_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: leads leads_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -349,6 +438,41 @@ CREATE INDEX ix_campaign_jobs_lead_id ON public.campaign_jobs USING btree (lead_
 --
 
 CREATE INDEX ix_campaign_steps_campaign_id ON public.campaign_steps USING btree (campaign_id);
+
+
+--
+-- Name: ix_feed_scroll_jobs_account_email; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ix_feed_scroll_jobs_account_email ON public.feed_scroll_jobs USING btree (account_email);
+
+
+--
+-- Name: ix_feed_scroll_jobs_owner_email; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ix_feed_scroll_jobs_owner_email ON public.feed_scroll_jobs USING btree (owner_email);
+
+
+--
+-- Name: ix_feed_scroll_results_feed_scroll_job_id; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ix_feed_scroll_results_feed_scroll_job_id ON public.feed_scroll_results USING btree (feed_scroll_job_id);
+
+
+--
+-- Name: ix_feed_scroll_results_post_urn; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ix_feed_scroll_results_post_urn ON public.feed_scroll_results USING btree (post_urn);
+
+
+--
+-- Name: ix_feed_scroll_results_scan_batch_id; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ix_feed_scroll_results_scan_batch_id ON public.feed_scroll_results USING btree (scan_batch_id);
 
 
 --
@@ -416,6 +540,30 @@ ALTER TABLE ONLY public.campaign_steps
 
 ALTER TABLE ONLY public.campaigns
     ADD CONSTRAINT campaigns_account_email_fkey FOREIGN KEY (account_email) REFERENCES public.linkedin_accounts(linkedin_email);
+
+
+--
+-- Name: feed_scroll_jobs feed_scroll_jobs_account_email_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feed_scroll_jobs
+    ADD CONSTRAINT feed_scroll_jobs_account_email_fkey FOREIGN KEY (account_email) REFERENCES public.linkedin_accounts(linkedin_email);
+
+
+--
+-- Name: feed_scroll_jobs feed_scroll_jobs_owner_email_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feed_scroll_jobs
+    ADD CONSTRAINT feed_scroll_jobs_owner_email_fkey FOREIGN KEY (owner_email) REFERENCES public.users(email) ON DELETE CASCADE;
+
+
+--
+-- Name: feed_scroll_results feed_scroll_results_feed_scroll_job_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feed_scroll_results
+    ADD CONSTRAINT feed_scroll_results_feed_scroll_job_id_fkey FOREIGN KEY (feed_scroll_job_id) REFERENCES public.feed_scroll_jobs(id) ON DELETE CASCADE;
 
 
 --
