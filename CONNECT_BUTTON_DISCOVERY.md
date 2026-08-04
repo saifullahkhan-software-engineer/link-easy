@@ -53,6 +53,22 @@ restricted profile? non-English UI?).
    the "enter their email address to connect" restricted-invite dialog
    (`connect_restricted=True` in the result, precise error text).
 
+6. **Anchor-rendered Connect (`<a>`, no `role="button"`).**
+   On follow-first / creator-mode profiles LinkedIn renders the Connect
+   action as an `<a>` anchor carrying
+   `aria-label="Invite <name> to connect"` and
+   `componentkey="...ConnectButton...connect"` — *not* a `<button>`.
+   The top-card candidate selector and the diagnostic inventory now also
+   match those anchors
+   (`a[componentkey*='ConnectButton'], a[aria-label*='connect' i],
+   a[aria-label*='invite' i]`).  Without this the worker followed the
+   member and then reported the misleading
+   "Connect did not appear even after following the member", even though
+   LinkedIn had rendered a Connect link in the action row (verified in the
+   saved `connect_no_button_debug.html` snapshot).  The scan stays scoped
+   to the profile top card, so the right-rail "People you may know"
+   `Invite <other> to connect` anchors are never treated as candidates.
+
 The result contract used by the worker is unchanged: `sent`, `with_note`,
 `error`, plus the optional flags `already_connected`, `page_load_failed`,
 `session_stale` (and the new additive `connect_restricted`).

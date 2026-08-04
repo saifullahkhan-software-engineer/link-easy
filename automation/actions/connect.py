@@ -61,8 +61,16 @@ FOLLOW_CONFIRM_TIMEOUT_SECONDS = 5.0
 FOLLOW_SCAN_TIMEOUT_SECONDS = 8.0
 
 # Elements that can host the profile's actions inside the top card.
+# LinkedIn renders the Connect action on follow-first / creator-mode profiles
+# as an <a> anchor (no role="button") carrying aria-label="Invite <name> to
+# connect" and componentkey="...ConnectButton...connect" — so anchors must be
+# candidates too, or that Connect is invisible to the scanner.  The scan is
+# scoped to the profile top card, so the right-rail "People you may know"
+# Invite-<other> anchors are never candidates.
 _ACTION_CANDIDATE_SELECTOR = (
-    "button, [role='button'], .artdeco-dropdown__trigger"
+    "button, [role='button'], .artdeco-dropdown__trigger, "
+    "a[componentkey*='ConnectButton'], "
+    "a[aria-label*='connect' i], a[aria-label*='invite' i]"
 )
 
 # Containers LinkedIn uses for the opened overflow menu.  The new React UI
@@ -175,7 +183,9 @@ _TOP_CARD_INVENTORY_JS = """
     };
     const out = [];
     for (const el of document.querySelectorAll(
-        "main button, main [role='button'], main .artdeco-dropdown__trigger"
+        "main button, main [role='button'], main .artdeco-dropdown__trigger, "
+        "main a[componentkey*='ConnectButton'], "
+        "main a[aria-label*='connect' i], main a[aria-label*='invite' i]"
     )) {
         if (!visible(el)) continue;
         const parts = [
