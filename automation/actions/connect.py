@@ -28,7 +28,11 @@ rendered on the profile.  This version instead:
   3. Opens the More-actions overflow and picks the *smallest* matching
      menu node, recognising the "Withdraw invitation" item as the
      already-pending state.
-  4. When nothing matches, logs the rendered action inventory, page title
+  4. Handles follow-first profiles — members LinkedIn serves with only a
+     Follow action (creator-mode / large-audience / restricted members) —
+     by following the member and re-scanning the top card and the More
+     menu, since Connect usually renders once the follow lands.
+  5. When nothing matches, logs the rendered action inventory, page title
      and UI language, saves a screenshot/HTML snapshot in development,
      and embeds the inventory in the error so the worker log explains
      *what LinkedIn showed* instead of the page being a black box.
@@ -50,6 +54,11 @@ MAX_NOTE_LENGTH = 300
 CONNECT_SCAN_TIMEOUT_SECONDS = 14.0
 MORE_SCAN_TIMEOUT_SECONDS = 6.0
 MENU_SCAN_TIMEOUT_SECONDS = 6.0
+
+# Follow-first fallback timing: the action row re-renders quickly after the
+# follow click, but the rescan stays generous for slow SPA updates.
+FOLLOW_CONFIRM_TIMEOUT_SECONDS = 5.0
+FOLLOW_SCAN_TIMEOUT_SECONDS = 8.0
 
 # Elements that can host the profile's actions inside the top card.
 _ACTION_CANDIDATE_SELECTOR = (
@@ -208,6 +217,69 @@ _MENU_INVENTORY_JS = """
         }
     }
     return out.slice(0, 12);
+}
+"""
+
+# Follow-first profiles (creator-mode / large-audience / restricted members)
+# render only a Follow action — Connect appears (top card or More menu) only
+# after the visitor follows the member.  Locate that Follow action inside the
+# profile top card.  "Following" (already-following state) and "Follow back"
+# are explicitly excluded: only an actionable Follow click helps here.
+_FOLLOW_BUTTON_JS = """
+() => {
+    const norm = value => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const visible = el => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden'
+            && rect.width > 0 && rect.height > 0;
+    };
+    const main = document.querySelector('main');
+    if (!main) return null;
+    const h1 = main.querySelector('h1');
+    const card = (h1 && h1.closest('section')) || main;
+    for (const el of card.querySelectorAll(
+        "button, [role='button'], .artdeco-dropdown__trigger"
+    )) {
+        if (!visible(el)) continue;
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+        const aria = norm(el.getAttribute('aria-label'));
+        const text = norm(el.innerText || el.textContent);
+        if (text.startsWith('following') || aria.startsWith('following')) continue;
+        if (text.startsWith('follow back') || aria.startsWith('follow back')) continue;
+        if (text === 'follow' || aria === 'follow' || aria.startsWith('follow ')) {
+            return el;
+        }
+    }
+    return null;
+}
+"""
+
+# Confirmation that the follow landed: the top-card action switches to a
+# "Following" toggle (often labelled with an Unfollow intent).
+_FOLLOWING_STATE_JS = """
+() => {
+    const norm = value => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const visible = el => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden'
+            && rect.width > 0 && rect.height > 0;
+    };
+    const main = document.querySelector('main');
+    if (!main) return false;
+    const h1 = main.querySelector('h1');
+    const card = (h1 && h1.closest('section')) || main;
+    for (const el of card.querySelectorAll("button, [role='button']")) {
+        if (!visible(el)) continue;
+        const aria = norm(el.getAttribute('aria-label'));
+        const text = norm(el.innerText || el.textContent);
+        if (text.startsWith('following') || aria.startsWith('following')
+            || text.includes('unfollow') || aria.includes('unfollow')) return true;
+    }
+    return false;
 }
 """
 
@@ -602,6 +674,68 @@ async def _invite_confirmed(page: Page, timeout_seconds: float = 8.0) -> bool:
     return False
 
 
+async def _find_follow_button(page: Page):
+    """Return the top-card Follow action when the profile is follow-first."""
+    try:
+        handle = await page.evaluate_handle(_FOLLOW_BUTTON_JS)
+    except Exception:
+        return None
+    return handle.as_element() if handle else None
+
+
+async def _confirm_following(page: Page, timeout_seconds: float) -> bool:
+    """LinkedIn confirms the follow by switching the action to Following."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        try:
+            state = await page.evaluate(_FOLLOWING_STATE_JS)
+        except Exception:
+            state = False
+        if state:
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.4)
+
+
+async def _follow_then_find_connect(page: Page):
+    """Follow-first fallback: follow the member, then rescan for Connect.
+
+    Some profiles (creator-mode / large-audience / restricted members) are
+    served with Follow as the only action; after following, Connect usually
+    renders in the top card or inside the refreshed More actions menu.
+
+    Returns ``(connect_el, follow_attempted, inventory)`` — ``inventory`` is
+    the post-follow action scan so failure diagnostics describe what LinkedIn
+    showed *after* the follow.
+    """
+    follow_btn = await _find_follow_button(page)
+    if follow_btn is None:
+        return None, False, []
+    logger.info("👤 Follow-first profile: no Connect offered; following the member first")
+    await human_click(page, follow_btn)
+    await random_idle_pause(1.5, 3.0)
+    if not await _confirm_following(page, FOLLOW_CONFIRM_TIMEOUT_SECONDS):
+        logger.warning(
+            "⚠️ LinkedIn never confirmed the follow; rescanning for Connect anyway"
+        )
+    connect_el, more_el, inventory = await _poll_top_card_actions(
+        page, FOLLOW_SCAN_TIMEOUT_SECONDS
+    )
+    if connect_el is not None:
+        logger.info("✅ Connect appeared in the top card after following the member")
+        return connect_el, True, inventory
+    if more_el is not None:
+        await human_click(page, more_el)
+        await random_idle_pause(0.8, 1.8)
+        connect_el = await _poll_menu_connect(page, MENU_SCAN_TIMEOUT_SECONDS)
+        if connect_el is not None:
+            logger.info("✅ Connect appeared in the More menu after following")
+            return connect_el, True, inventory
+        await _close_open_menu(page)
+    return None, True, inventory
+
+
 async def _open_connect_dialog(page: Page) -> tuple[bool, str | None, bool]:
     """Click Connect (top card, else More menu).  Returns ``(opened, error, already_connected)``."""
     connect_btn, more_btn, inventory = await _poll_top_card_actions(
@@ -623,6 +757,7 @@ async def _open_connect_dialog(page: Page) -> tuple[bool, str | None, bool]:
         await random_idle_pause(0.8, 1.8)
         connect_btn = await _poll_menu_connect(page, MENU_SCAN_TIMEOUT_SECONDS)
 
+    follow_attempted = False
     if not connect_btn:
         menu_labels = await _menu_inventory_labels(page) if menu_open else []
         if menu_open:
@@ -634,8 +769,25 @@ async def _open_connect_dialog(page: Page) -> tuple[bool, str | None, bool]:
                 "Connect button not available — the lead is already connected, "
                 "or an invitation is already pending."
             ), True
+
+        # Follow-first fallback: this member currently only offers Follow;
+        # following them usually makes Connect available.
+        connect_btn, follow_attempted, follow_inventory = (
+            await _follow_then_find_connect(page)
+        )
+        if follow_attempted and follow_inventory:
+            inventory = follow_inventory
+
+    if not connect_btn:
         card_labels = await _top_card_inventory_labels(page, inventory)
-        if menu_labels:
+        if follow_attempted:
+            error = await _describe_missing_connect(
+                page,
+                "follow-only or restricted profile: Connect did not appear "
+                "even after following the member (top card and More menu)",
+                card_labels,
+            )
+        elif menu_labels:
             error = await _describe_missing_connect(
                 page,
                 "More menu contains only: [" + "; ".join(menu_labels[:8]) + "]",

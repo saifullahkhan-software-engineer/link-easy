@@ -25,6 +25,9 @@ def _install_human_stub() -> None:
 
     async def _click(_page, target):
         CLICK_LOG.append(target)
+        callback = getattr(target, "on_click", None)
+        if callable(callback):
+            callback()
 
     async def _unused(*_args, **_kwargs):
         return None
@@ -56,6 +59,8 @@ if "core.logging_config" not in sys.modules:
 
 from automation.actions import connect as connect_mod
 from automation.actions.connect import (
+    _FOLLOWING_STATE_JS,
+    _FOLLOW_BUTTON_JS,
     _MENU_CONNECT_JS,
     _TOP_CARD_JS,
     _classify_top_card_action,
@@ -67,6 +72,8 @@ from automation.actions.connect import (
 connect_mod.CONNECT_SCAN_TIMEOUT_SECONDS = 0.15
 connect_mod.MORE_SCAN_TIMEOUT_SECONDS = 0.1
 connect_mod.MENU_SCAN_TIMEOUT_SECONDS = 0.2
+connect_mod.FOLLOW_CONFIRM_TIMEOUT_SECONDS = 0.05
+connect_mod.FOLLOW_SCAN_TIMEOUT_SECONDS = 0.15
 
 
 def info(**overrides):
@@ -87,9 +94,10 @@ def info(**overrides):
 
 
 class FakeElement:
-    def __init__(self, record, name=""):
+    def __init__(self, record, name="", on_click=None):
         self.record = record
         self.name = name
+        self.on_click = on_click
 
     async def evaluate(self, expression, *_args):
         return self.record
@@ -124,25 +132,40 @@ class FakePage:
 
     ``scope`` models the top card; ``menu_element`` is returned (once) for
     the overflow-menu scan; ``menu_labels`` feeds the menu inventory.
+
+    Follow-first modelling: ``follow_button`` answers the Follow-action scan;
+    once it is clicked (``on_click`` sets ``follow_clicked``), top-card scans
+    switch to ``post_follow_scope`` and the following-state probe returns
+    True — mirroring LinkedIn re-rendering the action row after a follow.
     """
 
     def __init__(self, scope, *, menu_element=None, menu_labels=None,
-                 card_labels=None):
+                 card_labels=None, follow_button=None, post_follow_scope=None):
         self.scope = scope
         self.menu_element = menu_element
         self.menu_labels = menu_labels or []
         self.card_labels = card_labels
+        self.follow_button = follow_button
+        self.post_follow_scope = post_follow_scope
+        self.follow_clicked = False
         self.menu_lookup_attempts = 0
 
     async def evaluate_handle(self, expression):
         if expression == _TOP_CARD_JS:
-            return FakeHandle(self.scope)
+            scope = self.scope
+            if self.follow_clicked and self.post_follow_scope is not None:
+                scope = self.post_follow_scope
+            return FakeHandle(scope)
         if expression == _MENU_CONNECT_JS:
             self.menu_lookup_attempts += 1
             return FakeHandle(self.menu_element)
+        if expression == _FOLLOW_BUTTON_JS:
+            return FakeHandle(self.follow_button)
         raise AssertionError(f"Unexpected evaluate_handle: {expression[:40]}")
 
     async def evaluate(self, expression, *_args):
+        if expression == _FOLLOWING_STATE_JS:
+            return self.follow_clicked
         if "menu" in expression or "role='menu'" in expression:
             return list(self.menu_labels)
         if "document.documentElement.lang" in expression:
@@ -288,6 +311,89 @@ class StructuralDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(opened)
         self.assertTrue(already_connected)
         self.assertIn("already", error)
+
+
+class FollowFirstFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """Follow-first profiles: Follow is clicked, then Connect is rescanned."""
+
+    def _make_page(self, pre_scope, post_scope, *, menu_element=None,
+                   menu_labels=None, card_labels=None):
+        follow_el = FakeElement(info(text="Follow", aria="Follow Joe"), "follow")
+        if isinstance(pre_scope, list):
+            pre_scope = FakeScope(pre_scope + [follow_el])
+        page = FakePage(
+            pre_scope,
+            menu_element=menu_element,
+            menu_labels=menu_labels,
+            card_labels=card_labels,
+            follow_button=follow_el,
+            post_follow_scope=post_scope,
+        )
+        follow_el.on_click = lambda: setattr(page, "follow_clicked", True)
+        return page, follow_el
+
+    async def test_connect_appears_in_top_card_after_following(self):
+        connect_el = FakeElement(info(text="Connect", aria="Invite Joe to connect"), "connect")
+        post_scope = FakeScope([
+            FakeElement(info(text="Following", aria="Unfollow Joe")),
+            connect_el,
+        ])
+        page, follow_el = self._make_page([], post_scope)
+
+        CLICK_LOG.clear()
+        opened, error, already_connected = await _open_connect_dialog(page)
+        self.assertTrue(opened)
+        self.assertIsNone(error)
+        self.assertFalse(already_connected)
+        # Follow was clicked first, then the newly rendered Connect.
+        self.assertEqual([follow_el, connect_el], CLICK_LOG[:2])
+
+    async def test_connect_appears_in_more_menu_after_following(self):
+        more_el = FakeElement(info(text="More", aria="More actions"), "more-post")
+        menu_connect_el = FakeElement(info(text="Connect", aria="Invite Joe to connect"), "menu-connect")
+        post_scope = FakeScope([
+            FakeElement(info(text="Following", aria="Unfollow Joe")),
+            more_el,
+        ])
+        page, follow_el = self._make_page([], post_scope, menu_element=menu_connect_el)
+
+        CLICK_LOG.clear()
+        opened, error, already_connected = await _open_connect_dialog(page)
+        self.assertTrue(opened)
+        self.assertIsNone(error)
+        self.assertFalse(already_connected)
+        self.assertEqual([follow_el, more_el, menu_connect_el], CLICK_LOG[:3])
+
+    async def test_follow_only_profile_reports_precise_error_when_connect_stays_hidden(self):
+        post_scope = FakeScope([
+            FakeElement(info(text="Following", aria="Unfollow Joe")),
+        ])
+        page, follow_el = self._make_page(
+            [], post_scope,
+            card_labels=["Following Joe | Following", "More"],
+        )
+
+        CLICK_LOG.clear()
+        opened, error, already_connected = await _open_connect_dialog(page)
+        self.assertFalse(opened)
+        self.assertFalse(already_connected)
+        self.assertIn(follow_el, CLICK_LOG)
+        self.assertIn("even after following", error)
+        self.assertIn("Connect button not found", error)
+
+    async def test_no_follow_button_keeps_original_failure_behaviour(self):
+        scope = FakeScope([
+            FakeElement(info(text="Message", aria="Message Joe")),
+        ])
+        page = FakePage(scope, card_labels=["Message Joe | Message"])
+
+        CLICK_LOG.clear()
+        opened, error, already_connected = await _open_connect_dialog(page)
+        self.assertFalse(opened)
+        self.assertFalse(already_connected)
+        self.assertEqual([], CLICK_LOG)
+        self.assertIn("Connect button not found", error)
+        self.assertNotIn("even after following", error)
 
 
 if __name__ == "__main__":
