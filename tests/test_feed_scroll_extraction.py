@@ -66,6 +66,8 @@ from automation.actions.feed_scroll import (
     _clean_post_text,
     _is_expand_post_text_control,
     _is_post_urn,
+    _normalise_post_url,
+    _post_identity_key,
     _pseudo_urn,
     _urn_from_href,
 )
@@ -127,6 +129,30 @@ class UrnFromHrefTests(unittest.TestCase):
         for href in (None, "", "https://www.linkedin.com/in/john/",
                      "https://www.linkedin.com/posts/john/"):
             self.assertIsNone(_urn_from_href(href))
+
+
+class PostUrlAndIdentityTests(unittest.TestCase):
+    def test_normalises_relative_post_urls(self):
+        self.assertEqual(
+            _normalise_post_url("/posts/jane_example-activity-7123456789012345678-x?trk=feed"),
+            "https://www.linkedin.com/posts/jane_example-activity-7123456789012345678-x",
+        )
+        self.assertEqual(
+            _normalise_post_url("/feed/update/urn:li:activity:7123456789012345678/"),
+            "https://www.linkedin.com/feed/update/urn:li:activity:7123456789012345678/",
+        )
+
+    def test_url_falls_back_to_urn(self):
+        self.assertEqual(
+            _normalise_post_url(None, "urn:li:activity:7123456789012345678"),
+            "https://www.linkedin.com/feed/update/urn:li:activity:7123456789012345678/",
+        )
+
+    def test_identity_dedupes_feed_and_posts_permalink_variants(self):
+        self.assertEqual(
+            _post_identity_key("urn:li:activity:7123456789012345678"),
+            _post_identity_key(None, "/posts/jane_example-activity-7123456789012345678-x"),
+        )
 
 
 class ExpandPostTextControlTests(unittest.TestCase):
@@ -192,6 +218,12 @@ class CleanPostTextTests(unittest.TestCase):
         self.assertIn("8. Don't give up", cleaned)
         self.assertIn("Keep going", cleaned)
         self.assertNotIn("2.3K reactions", cleaned)
+
+    def test_strips_inline_trailing_more_control(self):
+        self.assertEqual(
+            _clean_post_text("This is a long truncated post …more"),
+            "This is a long truncated post",
+        )
 
     def test_empty_and_none(self):
         self.assertEqual(_clean_post_text(None), "")
