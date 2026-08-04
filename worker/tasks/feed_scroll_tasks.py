@@ -21,7 +21,16 @@ from automation.browser import launch_persistent_browser
 from automation.session import verify_session, LinkedInSessionStatus
 from automation.actions.feed_scroll import scroll_feed_and_collect
 from automation.scoring.feed_scorer import score_post
+from core.logging_config import should_take_screenshots
 from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus
+
+# Force diagnostic screenshots during feed scroll scans (very helpful for debugging)
+FORCE_FEED_SCREENSHOTS = True
+
+
+def _should_screenshot() -> bool:
+    """Force screenshots for feed scroll debugging."""
+    return FORCE_FEED_SCREENSHOTS or should_take_screenshots()
 from models.feed_scroll_result import FeedScrollResult
 
 logger = get_logger(__name__)
@@ -69,7 +78,7 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
     5. Store top N results in DB
     6. Schedule next scan based on interval
     """
-    logger.info(f"Starting feed scroll for job {feed_scroll_job_id}")
+    logger.info(f"🚀 Starting feed scroll for job {feed_scroll_job_id}")
 
     with get_sync_db() as db:
         # Fetch the job
@@ -107,6 +116,9 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
         scan_time = datetime.now(timezone.utc)
 
         # Score and store posts
+        raw_posts = results.get("posts", [])
+        logger.info(f"📊 Scoring {len(raw_posts)} collected posts for job {feed_scroll_job_id}...")
+
         scored_posts = []
         config = {
             "mode": job.mode.value,
@@ -117,7 +129,7 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             "keywords": job.keywords or [],
         }
 
-        for post_data in results.get("posts", []):
+        for post_data in raw_posts:
             score, matched_terms = score_post(post_data.get("post_text", ""), config)
             scored_posts.append({
                 **post_data,
@@ -128,6 +140,16 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
         # Sort by score and take top N
         scored_posts.sort(key=lambda x: x["score"], reverse=True)
         top_posts = scored_posts[:posts_per_scan]
+
+        logger.info(
+            f"🏆 Top {len(top_posts)} posts after scoring (from {len(raw_posts)} raw). "
+            f"Highest score: {top_posts[0]['score'] if top_posts else 0}"
+        )
+
+        if len(top_posts) == 0 and raw_posts:
+            logger.warning("⚠️ Had raw posts but none survived top-N cut or scoring")
+        elif len(top_posts) == 0:
+            logger.error("❌ No posts were collected at all for this scan")
 
         # Store results
         for post_data in top_posts:
@@ -151,8 +173,8 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
         job.next_scan_at = next_scan
 
         logger.info(
-            f"Feed scan complete for job {feed_scroll_job_id}: "
-            f"{len(top_posts)} posts stored, top score {top_posts[0]['score'] if top_posts else 0}"
+            f"✅ Feed scan complete for job {feed_scroll_job_id}: "
+            f"{len(top_posts)} posts stored | top score {top_posts[0]['score'] if top_posts else 0} | batch={scan_batch_id}"
         )
 
         # Schedule next scan
@@ -200,14 +222,45 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
 
                 try:
                     # Verify LinkedIn session
+                    logger.info(f"🔐 Verifying LinkedIn session for {account_email}...")
                     session_status = await verify_session(page)
                     if session_status != LinkedInSessionStatus.VALID:
+                        logger.error(f"❌ Invalid session for feed scan: {session_status}")
+                        if _should_screenshot():
+                            try:
+                                await page.screenshot(path="feed_session_invalid.png", full_page=True)
+                                logger.info("📸 Saved feed_session_invalid.png")
+                            except Exception:
+                                pass
                         return {"posts": [], "error": f"Invalid session: {session_status}"}
+
+                    logger.info("✅ Session verified. Starting feed collection...")
+
+                    # Extra diagnostics
+                    try:
+                        current_url = page.url
+                        page_title = await page.title()
+                        logger.info(f"📍 Current page: {current_url} | Title: {page_title[:80]}")
+                    except Exception:
+                        pass
 
                     # Scroll feed and collect posts (collect more than we need to have better scoring)
                     posts = await scroll_feed_and_collect(
                         page, target_posts=max(posts_per_scan * 3, 30), max_scrolls=15
                     )
+
+                    # === NEW: Save final screenshot after collection (very useful for debugging) ===
+                    if _should_screenshot():
+                        try:
+                            await page.screenshot(path="feed_after_scroll_complete.png", full_page=True)
+                            logger.info("📸 Saved feed_after_scroll_complete.png")
+                        except Exception:
+                            pass
+
+                    if len(posts) == 0:
+                        logger.warning("⚠️ scroll_feed_and_collect returned ZERO posts!")
+                    else:
+                        logger.info(f"✅ Collected {len(posts)} raw posts from feed before scoring")
 
                     return {"posts": posts}
 
