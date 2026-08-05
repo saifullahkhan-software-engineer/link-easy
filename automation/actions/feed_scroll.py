@@ -34,7 +34,7 @@ import hashlib
 import random
 import re
 import time
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 from patchright.async_api import Page
 from automation.human import human_scroll, random_idle_pause
 from automation.actions.utils import recover_blank_page
@@ -178,6 +178,11 @@ def _urn_from_href(href: str | None) -> str | None:
     """
     if not href:
         return None
+    # Some feed renderers percent-encode the URN in href (``urn%3Ali...``).
+    # Decode before parsing so those cards are not discarded as having no post
+    # identity/link.  Decoding is safe here: this value is only inspected, not
+    # sent back to LinkedIn.
+    href = unquote(href)
     m = re.search(r"/feed/update/(urn:li:[a-zA-Z_]+:\d+)", href)
     if m and _is_post_urn(m.group(1)):
         return m.group(1)
@@ -211,13 +216,30 @@ def _normalise_post_url(href: str | None, post_urn: str | None = None) -> str | 
         elif cleaned.startswith("www.linkedin.com/"):
             cleaned = f"https://{cleaned}"
 
-        if cleaned.startswith(("https://www.linkedin.com/", "http://www.linkedin.com/")) and (
-            "/feed/update/" in cleaned or "/posts/" in cleaned or "activity-" in cleaned
-        ):
-            return cleaned.replace("http://www.linkedin.com/", "https://www.linkedin.com/", 1)
+        # LinkedIn serves both linkedin.com and www.linkedin.com.  Do not
+        # reject the former, and use the decoded form to recognise percent-
+        # encoded activity URNs in modern feed links.
+        decoded = unquote(cleaned)
+        try:
+            parts = urlsplit(decoded)
+            is_linkedin = parts.scheme in {"http", "https"} and parts.netloc.lower() in {
+                "linkedin.com", "www.linkedin.com"
+            }
+            is_post_path = "/feed/update/" in parts.path or "/posts/" in parts.path or "activity-" in parts.path
+        except ValueError:
+            is_linkedin = is_post_path = False
+        if is_linkedin and is_post_path:
+            # An encoded feed/update URL is valid but not consistently opened
+            # by every browser.  Canonicalise it from its real URN where we can.
+            urn = _urn_from_href(decoded)
+            if urn and "%" in cleaned:
+                return f"https://www.linkedin.com/feed/update/{urn}/"
+            return decoded.replace("http://linkedin.com/", "https://www.linkedin.com/", 1).replace(
+                "http://www.linkedin.com/", "https://www.linkedin.com/", 1
+            ).replace("https://linkedin.com/", "https://www.linkedin.com/", 1)
 
         # Sometimes the href itself is only a URN-ish value.  Convert it below.
-        urn = _urn_from_href(cleaned)
+        urn = _urn_from_href(decoded)
         if urn:
             return f"https://www.linkedin.com/feed/update/{urn}/"
 
