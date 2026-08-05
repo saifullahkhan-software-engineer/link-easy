@@ -122,6 +122,12 @@ class UrnFromHrefTests(unittest.TestCase):
             _urn_from_href(href), "urn:li:ugcPost:7123456789012345678"
         )
 
+    def test_percent_encoded_feed_permalink(self):
+        href = "/feed/update/urn%3Ali%3Aactivity%3A7123456789012345678"
+        self.assertEqual(
+            _urn_from_href(href), "urn:li:activity:7123456789012345678"
+        )
+
     def test_numeric_permalink(self):
         href = "https://www.linkedin.com/feed/update/7123456789012345678/"
         self.assertEqual(
@@ -145,6 +151,14 @@ class PostUrlAndIdentityTests(unittest.TestCase):
         self.assertEqual(
             _normalise_post_url("/posts/jane_example-activity-7123456789012345678-x?trk=feed"),
             "https://www.linkedin.com/posts/jane_example-activity-7123456789012345678-x",
+        )
+
+    def test_normalises_encoded_and_non_www_feed_permalink(self):
+        self.assertEqual(
+            _normalise_post_url(
+                "https://linkedin.com/feed/update/urn%3Ali%3Aactivity%3A7123456789012345678"
+            ),
+            "https://www.linkedin.com/feed/update/urn:li:activity:7123456789012345678/",
         )
         self.assertEqual(
             _normalise_post_url("/feed/update/urn:li:activity:7123456789012345678/"),
