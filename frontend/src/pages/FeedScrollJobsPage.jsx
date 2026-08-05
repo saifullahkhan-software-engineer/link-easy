@@ -5,11 +5,14 @@ import { feedScrollApi } from '../api/endpoints';
 import { getUserEmail } from '../api/client';
 import { getErrorMessage } from '../api/client';
 import FeedScrollJobCard from '../components/feed/FeedScrollJobCard';
+import Modal from '../components/Modal';
 import { Spinner } from '../components/Spinner';
 
 export default function FeedScrollJobsPage() {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [jobToDelete, setJobToDelete] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const navigate = useNavigate();
   const ownerEmail = getUserEmail();
 
@@ -46,6 +49,21 @@ export default function FeedScrollJobsPage() {
       loadJobs();
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to resume job'));
+    }
+  };
+
+  const handleDelete = async (job) => {
+    if (!job?.id) return;
+    setDeleteLoading(true);
+    try {
+      const { data } = await feedScrollApi.deleteJob(job.id, ownerEmail);
+      toast.success(data?.message || 'Feed scroll job deleted successfully');
+      setJobs((jobs) => jobs.filter((j) => j.id !== job.id));
+      setJobToDelete(null);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to delete job'));
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -103,10 +121,64 @@ export default function FeedScrollJobsPage() {
               job={job}
               onPause={handlePause}
               onResume={handleResume}
+              onDelete={setJobToDelete}
             />
           ))}
         </div>
       )}
+
+      {/* Delete confirmation modal */}
+      <Modal
+        open={!!jobToDelete}
+        onClose={() => !deleteLoading && setJobToDelete(null)}
+        title="Delete Feed Scroll Job"
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+            <svg className="h-5 w-5 shrink-0 text-red-400 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+            </svg>
+            <div>
+              <p className="text-sm font-semibold text-red-300">This action is irreversible</p>
+              <p className="mt-1 text-xs text-zinc-400 leading-relaxed">
+                Deleting job <span className="font-semibold text-zinc-200">&quot;{jobToDelete?.name}&quot;</span> will permanently remove:
+              </p>
+              <ul className="mt-2 space-y-1 text-xs text-zinc-400">
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1 w-1 rounded-full bg-red-400" />
+                  All scanned post results for this job
+                </li>
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1 w-1 rounded-full bg-red-400" />
+                  All scan history and match data
+                </li>
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1 w-1 rounded-full bg-red-400" />
+                  Any pending scan tasks from the queue
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-3">
+            <button
+              onClick={() => setJobToDelete(null)}
+              disabled={deleteLoading}
+              className="rounded-lg border border-surface-700 bg-surface-800 px-4 py-2 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => handleDelete(jobToDelete)}
+              disabled={deleteLoading}
+              className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-50"
+            >
+              {deleteLoading && <Spinner />}
+              <span>{deleteLoading ? 'Deleting...' : 'Delete Job'}</span>
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
