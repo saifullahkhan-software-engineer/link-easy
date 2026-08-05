@@ -31,7 +31,9 @@ export default function FeedScrollResultsPage() {
         feedScrollApi.getResults(jobId, ownerEmail),
       ]);
       setJob(jobRes.data);
-      setResults(resultsRes.data);
+      // Sort results by score (descending)
+      const sortedResults = (resultsRes.data || []).sort((a, b) => (b.score || 0) - (a.score || 0));
+      setResults(sortedResults);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to load job data'));
     } finally {
