@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { feedScrollApi } from '../api/endpoints';
@@ -18,6 +18,7 @@ export default function FeedScrollResultsPage() {
   const [scanLoading, setScanLoading] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [sortBy, setSortBy] = useState('score'); // 'score' | 'latest'
 
   useEffect(() => {
     loadData();
@@ -31,15 +32,27 @@ export default function FeedScrollResultsPage() {
         feedScrollApi.getResults(jobId, ownerEmail),
       ]);
       setJob(jobRes.data);
-      // Sort results by score (descending)
-      const sortedResults = (resultsRes.data || []).sort((a, b) => (b.score || 0) - (a.score || 0));
-      setResults(sortedResults);
+      // Keep the raw results; sorting is handled by the `displayResults` memo
+      // so the user can switch between "latest" and "top score" without refetching.
+      setResults(resultsRes.data || []);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to load job data'));
     } finally {
       setLoading(false);
     }
   };
+
+  // Derive the sorted list the user sees. "score" sorts by relevance
+  // (descending); "latest" sorts by when the post was scanned (newest first).
+  const displayResults = useMemo(() => {
+    const list = [...results];
+    if (sortBy === 'latest') {
+      list.sort((a, b) => new Date(b.scanned_at || 0) - new Date(a.scanned_at || 0));
+    } else {
+      list.sort((a, b) => (b.score || 0) - (a.score || 0));
+    }
+    return list;
+  }, [results, sortBy]);
 
   const handleTriggerScan = async () => {
     try {
@@ -240,7 +253,47 @@ export default function FeedScrollResultsPage() {
         </div>
       ) : (
         <div className="space-y-4">
-          {results.map((post, index) => (
+          {/* Sort controls */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              {results.length} {results.length === 1 ? 'Post' : 'Posts'}
+            </h2>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-zinc-500">Sort by</span>
+              <div className="inline-flex rounded-lg border border-surface-700 bg-surface-800 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setSortBy('latest')}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                    sortBy === 'latest'
+                      ? 'bg-accent-500 text-white'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v15m0 0-3-3m3 3 3-3M6 3h12" />
+                  </svg>
+                  Latest
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSortBy('score')}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                    sortBy === 'score'
+                      ? 'bg-accent-500 text-white'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 17l6-6 4 4 8-8m0 0h-4m4 0v4" />
+                  </svg>
+                  Top score
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {displayResults.map((post, index) => (
             <ScoredPostCard key={post.id} post={post} rank={index + 1} />
           ))}
         </div>
