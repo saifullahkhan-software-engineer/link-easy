@@ -63,11 +63,15 @@ if "core.logging_config" not in sys.modules:
 
 from automation.actions.feed_scroll import (
     POST_CONTAINER_SELECTORS,
+    _author_from_anchors,
     _clean_post_text,
     _extract_connection_degree,
     _extract_post_time,
+    _find_post_permalink,
     _is_expand_post_text_control,
     _is_post_urn,
+    _looks_like_person_name,
+    _name_from_aria,
     _normalise_post_url,
     _normalise_profile_url,
     _post_identity_key,
@@ -319,6 +323,106 @@ class ActorMetadataTests(unittest.TestCase):
             "Real post text",
         )
         self.assertEqual(_strip_actor_header(None), "")
+
+
+class AnchorBasedExtractionTests(unittest.TestCase):
+    """Regression tests for the selector-independent author/permalink logic.
+
+    These reproduce the real LinkedIn CSS-modules DOM captured in the repo
+    (``connect_no_button_debug.html``): a repost card whose anchors, in order,
+    are the reposter, the original author, and the post permalink — plus
+    engagement aggregates that are also ``/in/`` links.  The old class-based
+    selectors picked the wrong person (or none) here.
+    """
+
+    def _repost_card_anchors(self):
+        # Mirror of the captured card: "Syed Dawood Shah reposted this",
+        # original post by Saifullah Khan, with an engagement aggregate link.
+        return [
+            {"text": "", "href": "https://www.linkedin.com/in/syed-dawood-shah-49a14a223/",
+             "aria": "View Syed Dawood Shah’s profile"},
+            {"text": "Syed Dawood Shah", "href": "/in/syed-dawood-shah-49a14a223/",
+             "aria": ""},
+            {"text": "", "href": "/in/saifullah-khan-64145b21a/",
+             "aria": "View Saifullah Khan’s profile"},
+            {"text": "Saifullah Khan", "href": "/in/saifullah-khan-64145b21a/",
+             "aria": "Saifullah Khan, Open to work Premium Profile You"},
+            {"text": "Muhammad Hammad Bashir and 38 others",
+             "href": "/in/muhammad-hammad-bashir/?miniProfileUrn=urn%3Ali%3Afsd_profile...",
+             "aria": "Muhammad Hammad Bashir and 38 others reacted to this"},
+            {"text": "5d", "href": "/feed/update/urn:li:activity:7454475221819936768/",
+             "aria": ""},
+        ]
+
+    def test_looks_like_person_name(self):
+        for ok in ("Saifullah Khan", "Jean-Luc Picard", "Cher", "Mary Jane Watson"):
+            self.assertTrue(_looks_like_person_name(ok), ok)
+        for bad in ("", "9 comments", "2 reposts", "Muhammad Bashir and 38 others",
+                    "Backend-Focused Software Engineer | Python",
+                    "5d", "1st", "Like", "Promoted", "View 3 comments"):
+            self.assertFalse(_looks_like_person_name(bad), bad)
+
+    def test_name_from_aria(self):
+        self.assertEqual(_name_from_aria("View Saifullah Khan’s profile"),
+                         "Saifullah Khan")
+        self.assertEqual(
+            _name_from_aria("Saifullah Khan, Open to work Premium Profile You"),
+            "Saifullah Khan",
+        )
+        self.assertIsNone(_name_from_aria("9 comments"))
+        self.assertIsNone(_name_from_aria(None))
+
+    def test_author_picks_original_author_not_reposter(self):
+        # The post is by Saifullah Khan even though the reposter's link appears
+        # first — the original author is the LAST plausible-name profile anchor.
+        name, url = _author_from_anchors(self._repost_card_anchors())
+        self.assertEqual(name, "Saifullah Khan")
+        self.assertEqual(url, "https://www.linkedin.com/in/saifullah-khan-64145b21a/")
+
+    def test_author_ignores_engagement_aggregate(self):
+        name, url = _author_from_anchors(self._repost_card_anchors())
+        self.assertNotEqual(name, "Muhammad Hammad Bashir and 38 others")
+        self.assertNotIn("muhammad", (url or ""))
+
+    def test_author_falls_back_to_aria_when_text_empty(self):
+        # Avatar-only actor anchor: no visible text, name comes from aria-label.
+        anchors = [
+            {"text": "", "href": "/in/jane-doe-abc/",
+             "aria": "View Jane Doe’s profile"},
+        ]
+        name, url = _author_from_anchors(anchors)
+        self.assertEqual(name, "Jane Doe")
+        self.assertEqual(url, "https://www.linkedin.com/in/jane-doe-abc/")
+
+    def test_author_none_when_no_profile_anchor(self):
+        self.assertEqual(_author_from_anchors([]), (None, None))
+        self.assertEqual(
+            _author_from_anchors([{"text": "Like", "href": "#", "aria": ""}]),
+            (None, None),
+        )
+
+    def test_find_post_permalink_from_anchors(self):
+        urn, url = _find_post_permalink(self._repost_card_anchors())
+        self.assertEqual(urn, "urn:li:activity:7454475221819936768")
+        self.assertEqual(
+            url,
+            "https://www.linkedin.com/feed/update/urn:li:activity:7454475221819936768/",
+        )
+
+    def test_find_post_permalink_handles_posts_shape(self):
+        anchors = [
+            {"text": "Jane Doe", "href": "/in/jane-doe/", "aria": ""},
+            {"text": "2h", "href": "/posts/jane-doe-activity-7123456789012345678-x", "aria": ""},
+        ]
+        urn, url = _find_post_permalink(anchors)
+        self.assertEqual(urn, "urn:li:activity:7123456789012345678")
+        self.assertTrue(url.startswith("https://www.linkedin.com/posts/"))
+
+    def test_find_post_permalink_none_when_absent(self):
+        self.assertEqual(
+            _find_post_permalink([{"text": "Like", "href": "#", "aria": ""}]),
+            (None, None),
+        )
 
 
 class SelectorSanityTests(unittest.TestCase):

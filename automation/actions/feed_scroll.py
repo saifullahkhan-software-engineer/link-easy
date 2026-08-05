@@ -412,6 +412,102 @@ def _normalise_profile_url(href: str | None) -> str | None:
     return None
 
 
+def _looks_like_person_name(text: str | None) -> bool:
+    """True when ``text`` is plausibly a single person's display name.
+
+    LinkedIn's actor anchor exposes the author name as its visible text and/or
+    in an aria-label, but the same card also carries ``/in/`` links for
+    engagement aggregates ("Muhammad … and 38 others"), the reposter and the
+    viewer.  This filter keeps only tokens that read like a name so the post's
+    actual author is chosen rather than a bystander.
+    """
+    t = (text or "").strip()
+    if not (2 <= len(t) <= 60):
+        return False
+    if any(ch.isdigit() for ch in t):
+        return False
+    if any(ch in t for ch in ("|", "•", "·", "…", "·")):
+        return False
+    letters = sum(ch.isalpha() for ch in t)
+    if letters < max(2, len(t) // 2):
+        return False
+    low = t.lower()
+    if any(w in low for w in (
+        " and ", " others", "comment", "reaction", "repost", " like", " view",
+        "follower", "connection", "promot", "sponsor", "member", "react",
+    )):
+        return False
+    if (
+        _UI_NOISE_LINE.match(t)
+        or _HEADER_LABEL_LINE.match(t)
+        or _CONNECTION_DEGREE_RE.match(t)
+        or _RELATIVE_TIME_RE.match(t)
+    ):
+        return False
+    return True
+
+
+def _name_from_aria(aria: str | None) -> str | None:
+    """Pull a person's name out of an actor anchor aria-label.
+
+    LinkedIn renders actor aria-labels such as ``View Jane Doe's profile`` or
+    ``Jane Doe, Open to work · Software Engineer``.  Return the leading name
+    token when it reads like a name, else ``None``.
+    """
+    a = (aria or "").strip()
+    if not a:
+        return None
+    a = re.sub(r"^view\s+", "", a, flags=re.IGNORECASE)
+    a = a.split(",", 1)[0]
+    a = re.sub(r"['’]s\s+profile.*$", "", a, flags=re.IGNORECASE).strip()
+    return a if _looks_like_person_name(a) else None
+
+
+def _author_from_anchors(anchors: list[dict]) -> tuple[str | None, str | None]:
+    """Choose the post author's ``(name, profile_url)`` from a card's anchors.
+
+    On LinkedIn's CSS-modules feed the author is an ``<a href="/in/...">`` whose
+    visible text (or aria-label) is the display name.  Reposts and engagement
+    aggregates expose their own ``/in/`` links too, so candidates are filtered
+    to anchors whose name reads like a person, and the LAST such candidate is
+    preferred: on a repost the original author follows the "reposted this"
+    notice, while on a normal card there is only one author.
+    """
+    candidates: list[tuple[str, str]] = []
+    for a in anchors or []:
+        url = _normalise_profile_url(a.get("href"))
+        if not url:
+            continue
+        # The actor name anchor often appends degree/time/badge metadata after
+        # a separator glyph ("Saifullah Khan • You", "Jane Doe · 1st · 5d").
+        # The name is always the leading segment.
+        raw = (a.get("text") or "").strip()
+        name = re.split(r"[•·|]", raw, 1)[0].strip()
+        if not _looks_like_person_name(name):
+            name = _name_from_aria(a.get("aria"))
+        if name:
+            candidates.append((name, url))
+    if candidates:
+        return candidates[-1]
+    return (None, None)
+
+
+def _find_post_permalink(anchors: list[dict]) -> tuple[str | None, str | None]:
+    """Return ``(urn, url)`` for the first anchor that links to a real post.
+
+    Robustness companion to the CSS ``POST_LINK_SELECTOR``: iterating every
+    anchor catches a permalink even when its wrapper no longer matches the
+    selector list, so a post keeps a clickable URL instead of being dropped.
+    """
+    for a in anchors or []:
+        href = a.get("href") or ""
+        urn = _urn_from_href(href)
+        url = _normalise_post_url(href, urn)
+        if urn and url:
+            return urn, url
+    return (None, None)
+
+
 def _strip_actor_header(raw: str | None, author_name: str | None = None) -> str:
     """Remove the actor header block from whole-card fallback text.
 
@@ -438,6 +534,34 @@ def _strip_actor_header(raw: str | None, author_name: str | None = None) -> str:
         kept = [line for line in lines if line.strip().lower() != lowered]
         return "\n".join(kept)
     return raw
+
+
+async def _collect_card_anchors(element) -> list[dict]:
+    """Collect every ``<a>`` in a card with its text, href and aria-label.
+
+    LinkedIn hashes all CSS class names on its CSS-modules feed, so class-based
+    selectors are unreliable.  Anchors, hrefs, visible text and aria-labels are
+    stable, so author / profile-URL / permalink extraction is built on top of
+    this generic collection instead.
+    """
+    js = r"""(el) => {
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        const out = [];
+        el.querySelectorAll('a').forEach((a) => {
+            out.push({
+                text: norm(a.innerText),
+                href: a.getAttribute('href') || '',
+                aria: norm(a.getAttribute('aria-label') || '')
+            });
+        });
+        return out;
+    };"""
+    try:
+        return await element.evaluate(js)
+    except Exception as e:
+        if should_log_debug():
+            logger.debug("_collect_card_anchors failed: %s", e)
+        return []
 
 
 # ── Main flow ────────────────────────────────────────────────────────────────
@@ -829,11 +953,17 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
             if expanded and should_log_debug():
                 logger.debug("Expanded truncated text for feed post %s", idx)
 
+            # Collect every anchor once (class-name independent) and reuse it
+            # for the author name, author profile URL and the post permalink.
+            # All three are unreliable via CSS selectors on LinkedIn's
+            # CSS-modules feed, where every class name is hashed.
+            anchors = await _collect_card_anchors(element)
+
             # Extract author details first (name is also used to clean the
             # post body text of actor-header lines).
-            author_name = await _get_author_name(element)
+            author_name = await _get_author_name(element, anchors)
             author_first_name, author_last_name = _split_author_name(author_name)
-            author_profile_url = await _get_author_profile_url(element)
+            author_profile_url = await _get_author_profile_url(element, anchors)
             connection_degree = await _get_connection_degree(element)
             post_time = await _get_post_time(element)
 
@@ -846,12 +976,12 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
                 continue
 
             # Extract URN (unique identifier) — real URN or stable fallback
-            post_urn = await _get_post_urn(element, author_name, post_text)
+            post_urn = await _get_post_urn(element, author_name, post_text, anchors)
             if not post_urn:
                 continue
 
             # Build post URL (prefer the real permalink href)
-            post_url = await _get_post_url(element, post_urn)
+            post_url = await _get_post_url(element, post_urn, anchors)
             if not post_url:
                 # Every post shown in the UI must be clickable — skip cards for
                 # which no LinkedIn post link could be resolved.
@@ -885,7 +1015,12 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
     return posts
 
 
-async def _get_post_urn(element, author_name: str | None = None, post_text: str | None = None) -> str | None:
+async def _get_post_urn(
+    element,
+    author_name: str | None = None,
+    post_text: str | None = None,
+    anchors: list[dict] | None = None,
+) -> str | None:
     """Extract the URN from a post element. More aggressive now.
 
     Order of attempts:
@@ -896,7 +1031,9 @@ async def _get_post_urn(element, author_name: str | None = None, post_text: str 
          expose their own activity URNs.
       3. Same attributes on any descendant (skipping author/entity URNs such as
          ``urn:li:person:...`` which would otherwise be mistaken for the post).
-      4. A stable pseudo-URN derived from author + text.
+      4. A class-independent anchor scan (catches permalinks whose wrapper no
+         longer matches POST_LINK_SELECTOR on the CSS-modules feed).
+      5. A stable pseudo-URN derived from author + text.
     """
     try:
         # 1. Own attributes
@@ -932,7 +1069,15 @@ async def _get_post_urn(element, author_name: str | None = None, post_text: str 
             except Exception:
                 continue
 
-        # 4. Stable pseudo-URN (still useful for dedup in same run)
+        # 4. Class-independent anchor scan — finds the permalink even when its
+        # wrapper markup no longer matches POST_LINK_SELECTOR.
+        if anchors is None:
+            anchors = await _collect_card_anchors(element)
+        urn, _ = _find_post_permalink(anchors)
+        if urn:
+            return urn
+
+        # 5. Stable pseudo-URN (still useful for dedup in same run)
         return _pseudo_urn(author_name, post_text)
 
     except Exception as e:
@@ -941,7 +1086,7 @@ async def _get_post_urn(element, author_name: str | None = None, post_text: str 
         return None
 
 
-async def _get_post_url(element, post_urn: str | None) -> str | None:
+async def _get_post_url(element, post_urn: str | None, anchors: list[dict] | None = None) -> str | None:
     """Build an absolute post URL, preferring the real permalink href."""
     try:
         link = await element.query_selector(POST_LINK_SELECTOR)
@@ -955,6 +1100,14 @@ async def _get_post_url(element, post_urn: str | None) -> str | None:
                 return normalised
     except Exception:
         pass
+
+    # Robust fallback: scan every anchor for a real permalink so the post keeps
+    # a clickable URL instead of being dropped.
+    if anchors is None:
+        anchors = await _collect_card_anchors(element)
+    _, url = _find_post_permalink(anchors)
+    if url:
+        return url
 
     return _normalise_post_url(None, post_urn)
 
@@ -1033,8 +1186,22 @@ async def _get_post_text(element, author_name: str | None = None) -> str:
         return ""
 
 
-async def _get_author_name(element) -> str | None:
-    """Extract the author's name from a post element. More robust."""
+async def _get_author_name(element, anchors: list[dict] | None = None) -> str | None:
+    """Extract the author's name from a post element.
+
+    Primary path reads the actor anchor from the card's collected anchors
+    (class-name independent — the CSS-modules feed hashes every class name, so
+    the old ``a[href*='/in/'] span[aria-hidden='true']`` selector matched
+    engagement text like "9 comments" instead of the name).  Falls back to the
+    legacy class-based selectors for surfaces that still serve them.
+    """
+    if anchors is None:
+        anchors = await _collect_card_anchors(element)
+    name, _ = _author_from_anchors(anchors)
+    if name:
+        return name[:80]
+
+    # Legacy class-based selectors (profile / recent-activity surfaces).
     try:
         author_selectors = [
             # Modern
@@ -1079,8 +1246,20 @@ async def _get_author_name(element) -> str | None:
         return None
 
 
-async def _get_author_profile_url(element) -> str | None:
-    """Extract the author's LinkedIn profile URL from the actor header."""
+async def _get_author_profile_url(element, anchors: list[dict] | None = None) -> str | None:
+    """Extract the author's LinkedIn profile URL from the actor header.
+
+    Uses the same anchor selection as ``_get_author_name`` so the profile URL
+    matches the post's actual author (not the reposter or an engagement
+    aggregate, which are also ``/in/`` links on the card).
+    """
+    if anchors is None:
+        anchors = await _collect_card_anchors(element)
+    _, url = _author_from_anchors(anchors)
+    if url:
+        return url
+
+    # Legacy fallback.
     try:
         link = await element.query_selector(
             "a[href*='/in/'], a[href*='linkedin.com/in/'], "
