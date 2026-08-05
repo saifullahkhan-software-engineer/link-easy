@@ -2,29 +2,18 @@ import ScoreBadge from './ScoreBadge';
 
 /* ------------------------- small helpers ------------------------- */
 
-// Relative time label like LinkedIn ("just now", "2h", "3d").
-function timeAgo(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const diffMs = Date.now() - d.getTime();
-  const mins = Math.floor(diffMs / 60000);
-  if (mins < 1) return 'now';
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}d`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo`;
-  return `${Math.floor(days / 365)}y`;
+// Author display name: prefer the structured first/last name fields that new
+// scans store; fall back to the single full-name column for older rows.
+function authorDisplayName(post) {
+  const first = (post?.author_first_name || '').trim();
+  const last = (post?.author_last_name || '').trim();
+  if (first || last) return [first, last].filter(Boolean).join(' ');
+  return (post?.author_name || '').trim() || 'LinkedIn Member';
 }
 
 // Initials from the author's name for the avatar.
-function initials(name) {
-  if (!name) return '?';
+function initials(post) {
+  const name = authorDisplayName(post);
   const parts = name.trim().split(/\s+/);
   const first = parts[0]?.[0] || '';
   const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
@@ -42,13 +31,51 @@ function getLinkedInPostUrl(post) {
     if (clean.startsWith('//www.linkedin.com/')) return `https:${clean}`;
     if (clean.startsWith('/')) return `https://www.linkedin.com${clean}`;
     if (clean.startsWith('www.linkedin.com/')) return `https://${clean}`;
-    if (/^https?:\/\/www\.linkedin\.com\//i.test(clean)) return clean.replace(/^http:/i, 'https:');
+    if (/^https?:\/\/(www\.)?linkedin\.com\/(feed\/update|posts)\//i.test(clean)) {
+      return clean.replace(/^http:/i, 'https:');
+    }
   }
 
   if (urn.startsWith('urn:li:')) {
     return `https://www.linkedin.com/feed/update/${urn}/`;
   }
   return '';
+}
+
+// Author's LinkedIn profile URL (absolute).
+function getLinkedInProfileUrl(post) {
+  const raw = (post?.author_profile_url || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('//www.linkedin.com/')) return `https:${raw}`;
+  if (raw.startsWith('/')) return `https://www.linkedin.com${raw}`;
+  if (raw.startsWith('www.linkedin.com/')) return `https://${raw}`;
+  if (/^https?:\/\/(www\.)?linkedin\.com\/in\//i.test(raw)) return raw.replace(/^http:/i, 'https:');
+  return '';
+}
+
+// Human-readable profile URL ("linkedin.com/in/jane-doe") shown on the card.
+function profileUrlDisplay(post) {
+  const url = getLinkedInProfileUrl(post);
+  if (!url) return '';
+  return url.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '');
+}
+
+// "1st" → "1st connection" for the metadata line above the post text.
+function connectionLabel(degree) {
+  if (!degree) return '';
+  const d = String(degree).trim().toLowerCase();
+  if (['1st', '2nd', '3rd'].includes(d)) return `${d} connection`;
+  return degree;
+}
+
+// Metadata shown directly above the post text: where the post came from, the
+// author's connection degree and the post time.
+function postMetaLine(post) {
+  const parts = ['From your feed'];
+  const degree = connectionLabel(post?.connection_degree);
+  if (degree) parts.push(degree);
+  if (post?.post_time) parts.push(post.post_time);
+  return parts.join(' · ');
 }
 
 // Deterministic avatar colour per author name.
@@ -70,17 +97,33 @@ function avatarColor(name) {
 /* -------------------------- the card ---------------------------- */
 
 /**
- * Renders a single scored post the way it actually looks on LinkedIn — a white
- * card with the author header and the full post text formatted with correct
- * spacing. The whole card is a direct link that opens the real post on
- * LinkedIn in a new tab (no hidden menu, no copy button).
+ * Renders a single scored post picked for the job.  The card shows the
+ * author's first + last name and profile URL, the link to the real post on
+ * LinkedIn, and — directly above the post text — the source metadata
+ * ("From your feed · 1st connection · 5d").  The post body itself contains
+ * only the actual post text (metadata is stripped at extraction time).
  */
 export default function ScoredPostCard({ post, rank }) {
   const postUrl = getLinkedInPostUrl(post);
+  const profileUrl = getLinkedInProfileUrl(post);
+  const name = authorDisplayName(post);
+  const metaLine = postMetaLine(post);
+  const profileDisplay = profileUrlDisplay(post);
 
-  const linkProps = postUrl
-    ? { href: postUrl, target: '_blank', rel: 'noopener noreferrer', title: 'Open this post on LinkedIn' }
-    : {};
+  const openPost = () => {
+    if (postUrl) window.open(postUrl, '_blank', 'noopener,noreferrer');
+  };
+  const stop = (e) => e.stopPropagation();
+
+  const avatar = (extra = '') => (
+    <span
+      className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white ${avatarColor(
+        name
+      )} ${extra}`}
+    >
+      {initials(post)}
+    </span>
+  );
 
   return (
     <div className="overflow-hidden rounded-xl border border-surface-700 bg-surface-850 shadow-lg shadow-black/20">
@@ -97,35 +140,74 @@ export default function ScoredPostCard({ post, rank }) {
         {post.score != null && <ScoreBadge score={post.score} />}
       </div>
 
-      {/* LinkedIn-style white post card — the whole thing is one direct link */}
-      <a
-        {...linkProps}
+      {/* LinkedIn-style white post card — click anywhere to open the post */}
+      <div
+        onClick={postUrl ? openPost : undefined}
+        role={postUrl ? 'link' : undefined}
+        tabIndex={postUrl ? 0 : undefined}
+        onKeyDown={(e) => {
+          if (postUrl && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            openPost();
+          }
+        }}
         className={`group block bg-white text-left transition ${
           postUrl ? 'cursor-pointer hover:bg-zinc-50' : 'cursor-default'
         }`}
       >
-        {/* Header: avatar, name, time */}
-        <div className="flex items-start justify-between gap-3 px-4 pt-4 pb-3">
+        {/* Header: avatar + name (both link to the profile) */}
+        <div className="flex items-start justify-between gap-3 px-4 pt-4 pb-2">
           <div className="flex min-w-0 items-center gap-3">
-            <span
-              className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white ${avatarColor(
-                post.author_name
-              )}`}
-            >
-              {initials(post.author_name)}
-            </span>
+            {profileUrl ? (
+              <a
+                href={profileUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={profileUrl}
+                onClick={stop}
+                className="shrink-0 rounded-full transition hover:opacity-80"
+              >
+                {avatar()}
+              </a>
+            ) : (
+              avatar()
+            )}
             <div className="min-w-0">
-              <p className="truncate text-[15px] font-semibold text-zinc-900">
-                {post.author_name || 'LinkedIn Member'}
-              </p>
-              <p className="text-xs text-zinc-500">
-                {timeAgo(post.scanned_at) ? `${timeAgo(post.scanned_at)} · ` : ''}
-                {postUrl ? 'Post' : 'Feed post'}
-              </p>
+              {profileUrl ? (
+                <a
+                  href={profileUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={profileUrl}
+                  onClick={stop}
+                  className="block truncate text-[15px] font-semibold text-zinc-900 transition hover:text-[#0a66c2] hover:underline"
+                >
+                  {name}
+                </a>
+              ) : (
+                <p className="truncate text-[15px] font-semibold text-zinc-900">{name}</p>
+              )}
+
+              {/* Source metadata on top of the post text: feed source, connection, time */}
+              {metaLine && <p className="truncate text-xs text-zinc-500">{metaLine}</p>}
+
+              {/* Author profile URL */}
+              {profileDisplay && (
+                <a
+                  href={profileUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={profileUrl}
+                  onClick={stop}
+                  className="mt-0.5 block truncate text-xs font-medium text-[#0a66c2] transition hover:underline"
+                >
+                  {profileDisplay}
+                </a>
+              )}
             </div>
           </div>
           {postUrl && (
-            <span className="mt-1 inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-[#0a66c2] opacity-0 transition group-hover:opacity-100">
+            <span className="mt-1 inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-[#0a66c2]">
               Open in LinkedIn
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
@@ -134,7 +216,7 @@ export default function ScoredPostCard({ post, rank }) {
           )}
         </div>
 
-        {/* Post body — real spacing & formatting */}
+        {/* Post body — real spacing & formatting, actual post text only */}
         <div className="px-4 pb-2">
           <p className="whitespace-pre-wrap break-words text-[15px] leading-[1.45] text-zinc-900">
             {post.post_text || 'This post has no text content.'}
@@ -169,16 +251,25 @@ export default function ScoredPostCard({ post, rank }) {
               Send
             </span>
           </div>
+
+          {/* Link to the post — always present (every post has a link) */}
           {postUrl && (
-            <span className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-[#0a66c2]">
+            <a
+              href={postUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Open post on LinkedIn: ${postUrl}`}
+              onClick={stop}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-semibold text-[#0a66c2] transition hover:bg-[#0a66c2]/10"
+            >
               Open post
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
               </svg>
-            </span>
+            </a>
           )}
         </div>
-      </a>
+      </div>
 
       {/* Matched terms — kept below the white card */}
       {post.matched_terms && post.matched_terms.length > 0 && (

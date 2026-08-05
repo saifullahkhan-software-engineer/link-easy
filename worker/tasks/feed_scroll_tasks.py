@@ -20,9 +20,13 @@ from worker.playwright_semaphore import acquire_playwright_session
 from worker.profile_lock import acquire_profile_lock, release_profile_lock
 from automation.browser import launch_persistent_browser
 from automation.session import verify_session, LinkedInSessionStatus
-from automation.actions.feed_scroll import scroll_feed_and_collect, _post_identity_key
+from automation.actions.feed_scroll import (
+    scroll_feed_and_collect,
+    _normalise_post_url,
+    _post_identity_key,
+)
 from automation.scoring.feed_scorer import score_post
-from core.logging_config import should_take_screenshots
+from core.logging_config import should_log_debug, should_take_screenshots
 from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus
 
 # Force diagnostic screenshots during feed scroll scans (very helpful for debugging)
@@ -178,9 +182,25 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
 
         top_posts = []
         skipped_existing = 0
+        skipped_no_link = 0
         for post_data in unique_relevant_posts:
+            # Every stored post must be clickable: normalise any relative/URN
+            # link into an absolute URL, and drop posts with no resolvable link.
+            post_url = _normalise_post_url(
+                post_data.get("post_url"), post_data.get("post_urn")
+            )
+            if not post_url:
+                skipped_no_link += 1
+                if should_log_debug():
+                    logger.debug(
+                        "Skipping post without a resolvable LinkedIn URL: %s",
+                        post_data.get("post_urn"),
+                    )
+                continue
+            post_data["post_url"] = post_url
+
             key = _post_identity_key(
-                post_data.get("post_urn"), post_data.get("post_url"),
+                post_data.get("post_urn"), post_url,
                 post_data.get("author_name"), post_data.get("post_text")
             )
             if key in existing_keys:
@@ -194,7 +214,8 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             f"🏆 Top {len(top_posts)} new unique posts after scoring "
             f"(from {len(raw_posts)} raw, {len(scored_posts)} scored, "
             f"{len(relevant_posts)} with score > 1, "
-            f"{len(unique_relevant_posts)} unique, {skipped_existing} already stored). "
+            f"{len(unique_relevant_posts)} unique, {skipped_no_link} without a "
+            f"post link, {skipped_existing} already stored). "
             f"Highest score: {top_posts[0]['score'] if top_posts else 0}"
         )
 
@@ -213,6 +234,11 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
                 post_urn=post_data.get("post_urn"),
                 post_url=post_data.get("post_url"),
                 author_name=post_data.get("author_name"),
+                author_first_name=post_data.get("author_first_name"),
+                author_last_name=post_data.get("author_last_name"),
+                author_profile_url=post_data.get("author_profile_url"),
+                connection_degree=post_data.get("connection_degree"),
+                post_time=post_data.get("post_time"),
                 post_text=post_data.get("post_text"),
                 score=post_data["score"],
                 matched_terms=post_data["matched_terms"],
