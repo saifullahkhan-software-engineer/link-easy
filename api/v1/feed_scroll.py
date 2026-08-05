@@ -22,7 +22,7 @@ from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus, FeedScrol
 from models.feed_scroll_result import FeedScrollResult
 from models.linkedin_account import LinkedInAccount
 from models.user import User
-from automation.actions.feed_scroll import _normalise_post_url, _post_identity_key
+from automation.actions.feed_scroll import _normalise_post_url, _normalise_profile_url, _post_identity_key
 from schemas.feed_scroll import (
     FeedScrollJobCreate,
     FeedScrollJobResponse,
@@ -34,18 +34,23 @@ router = APIRouter(prefix="/api/v1/feed-scroll", tags=["feed-scroll"])
 
 
 def _prepare_unique_results(rows, max_items: int | None = None) -> list[FeedScrollResult]:
-    """Normalize post links and remove repeated posts before returning them.
+    """Normalize links and remove repeated posts before returning them.
 
     Older scans may have stored relative LinkedIn hrefs (``/posts/...``) or no
     ``post_url`` at all.  Normalize those at response time so existing rows are
-    clickable without needing a data backfill.  Dedupe by activity id / URL /
-    text hash so repeated scheduled scans do not show the same post multiple
-    times on the results page.
+    clickable without needing a data backfill.  Any post that still has no
+    resolvable LinkedIn URL is dropped — every post surfaced to the UI must be
+    linkable.  Dedupe by activity id / URL / text hash so repeated scheduled
+    scans do not show the same post multiple times on the results page.
     """
     unique: list[FeedScrollResult] = []
     seen_keys: set[str] = set()
     for row in rows:
         row.post_url = _normalise_post_url(row.post_url, row.post_urn)
+        if not row.post_url:
+            # Every post must have a link — hide rows we cannot link to.
+            continue
+        row.author_profile_url = _normalise_profile_url(row.author_profile_url)
         key = _post_identity_key(row.post_urn, row.post_url, row.author_name, row.post_text)
         if key in seen_keys:
             continue

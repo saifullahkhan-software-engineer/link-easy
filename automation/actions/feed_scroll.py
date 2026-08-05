@@ -108,11 +108,43 @@ _POST_URN_TYPES = {"activity", "ugcPost", "share", "fsd_update", "update", "comm
 # counters, collapsers) that must not end up in the scored post text.
 _UI_NOISE_LINE = re.compile(
     r"^(like|comment|repost|send|share|react|reactions?|celebrate|support|love|"
-    r"insightful|funny|more|see more|see less|\.\.\.|…)$"
+    r"insightful|funny|more|see more|see less|follow|following|unfollow|"
+    r"follow\s*·\s*more|more\s*·\s*follow|\.\.\.|…)$"
     r"|^[0-9.,kmb+]+[ ]*(likes?|comments?|reposts?|reactions?|followers?|"
     r"connections?|views?)?$",
     re.IGNORECASE,
 )
+
+# Header labels LinkedIn renders in the actor region (not post content).
+_HEADER_LABEL_LINE = re.compile(
+    r"^(promoted|sponsored|pinned|suggested for you|"
+    r"follows you(\s+and\s+[\d,]+(\s+others)?)?)$",
+    re.IGNORECASE,
+)
+
+# A line that is only the separator glyph between actor fields ("·").
+_HEADER_SEPARATOR_LINE = re.compile(r"^[·•|]+$")
+
+# LinkedIn's connection degree shown under the author name ("1st", "2nd degree
+# connection", "First degree", ...).
+_CONNECTION_DEGREE_RE = re.compile(
+    r"^((?:1st|2nd|3rd)|(?:first|second|third))\s*(?:degree\s*)?(?:connection\s*)?$",
+    re.IGNORECASE,
+)
+
+# LinkedIn's relative post time shown in the actor meta ("now", "5d", "2h",
+# "1w", "2mo", ...).
+_RELATIVE_TIME_RE = re.compile(
+    r"^(?:just now|now|\d{1,3}\s*(?:sec|secs|s|min|mins|m|hr|hrs|h|day|days|d|"
+    r"wk|wks|week|weeks|w|mo|mon|month|months|yr|yrs|year|years|y))\s*(?:ago)?$",
+    re.IGNORECASE,
+)
+
+# Normalised connection-degree labels (keyed by whatever LinkedIn renders).
+_DEGREE_LABELS = {
+    "1st": "1st", "2nd": "2nd", "3rd": "3rd",
+    "first": "1st", "second": "2nd", "third": "3rd",
+}
 
 
 def _should_screenshot() -> bool:
@@ -270,19 +302,33 @@ def _pseudo_urn(author_name: str | None, post_text: str | None) -> str:
     return f"post_{digest}"
 
 
-def _clean_post_text(raw: str | None) -> str:
+def _clean_post_text(raw: str | None, remove_lines: tuple[str, ...] = ()) -> str:
     """Strip LinkedIn's UI chrome from a post's text and collapse whitespace.
 
     Removes lines that are only reaction buttons / counters / collapsers
-    (e.g. "Like", "Comment", "Repost", "Send", "1,234", "2.3K reactions") so
-    the scored text is the actual post content.
+    (e.g. "Like", "Comment", "Repost", "Send", "1,234", "2.3K reactions"),
+    header labels ("Promoted", "Follow"), separator glyphs, and any extra
+    caller-supplied lines (such as the author's full name) so the scored text
+    is the actual post content.
     """
     lines = []
     for line in (raw or "").splitlines():
         line = line.strip()
         if not line:
             continue
-        if _UI_NOISE_LINE.match(line):
+        if (
+            _UI_NOISE_LINE.match(line)
+            or _HEADER_LABEL_LINE.match(line)
+            or _HEADER_SEPARATOR_LINE.match(line)
+            # Standalone connection-degree ("1st") and relative-time ("5d")
+            # tokens come from the actor header — a post body never consists
+            # of a bare degree/time line.
+            or _CONNECTION_DEGREE_RE.match(line)
+            or _RELATIVE_TIME_RE.match(line)
+        ):
+            continue
+        lowered = line.lower()
+        if any(rm and lowered == rm.lower() for rm in remove_lines):
             continue
         lines.append(line)
     cleaned = " ".join(lines)
@@ -292,6 +338,106 @@ def _clean_post_text(raw: str | None) -> str:
     # "more" and showing a fake, non-clickable "more" in our UI.
     cleaned = re.sub(r"\s*(?:\.{3}|…)\s*more\s*$", "", cleaned, flags=re.IGNORECASE)
     return cleaned[:2500]
+
+
+def _split_author_name(name: str | None) -> tuple[str | None, str | None]:
+    """Split a full author name into first and last name parts.
+
+    LinkedIn exposes the author's full display name in one span, so we derive
+    the parts by splitting on whitespace (first token = first name, the rest =
+    last name).  Returns ``(first, last)`` with ``None`` for the missing part.
+    """
+    if not name:
+        return None, None
+    parts = [p for p in name.strip().split() if p]
+    if not parts:
+        return None, None
+    first = parts[0]
+    last = " ".join(parts[1:]) or None
+    return first[:80], (last[:80] if last else None)
+
+
+def _extract_connection_degree(text: str | None) -> str | None:
+    """Pull the author's connection degree from the top lines of a feed card.
+
+    LinkedIn renders it in the actor meta as "1st", "2nd", "3rd" (sometimes
+    "1st degree connection" or "First degree").  Returns a normalised short
+    label such as "1st" or ``None`` when absent.
+    """
+    if not text:
+        return None
+    for line in text.splitlines()[:10]:
+        m = _CONNECTION_DEGREE_RE.match(line.strip())
+        if m:
+            token = m.group(1).lower()
+            return _DEGREE_LABELS.get(token, token)
+    return None
+
+
+def _extract_post_time(text: str | None) -> str | None:
+    """Pull LinkedIn's relative post time from the top lines of a feed card.
+
+    Returns the raw label LinkedIn shows (e.g. "now", "5d", "2h", "1w").
+    """
+    if not text:
+        return None
+    for line in text.splitlines()[:10]:
+        candidate = line.strip()
+        if _RELATIVE_TIME_RE.match(candidate):
+            return candidate
+    return None
+
+
+def _normalise_profile_url(href: str | None) -> str | None:
+    """Return an absolute LinkedIn profile URL from any href shape we store.
+
+    Accepts relative (``/in/...``), protocol-relative (``//www.linkedin.com/
+    in/...``), plain-domain (``www.linkedin.com/in/...``) and absolute forms,
+    and strips tracking query strings (``miniProfileUrn``, ``trk``, ...).
+    Returns ``None`` for anything that is not a LinkedIn profile link.
+    """
+    cleaned = (href or "").strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.split("?", 1)[0].split("#", 1)[0].strip()
+    if cleaned.startswith("//www.linkedin.com/"):
+        cleaned = f"https:{cleaned}"
+    elif cleaned.startswith("/"):
+        cleaned = f"https://www.linkedin.com{cleaned}"
+    elif cleaned.startswith("www.linkedin.com/"):
+        cleaned = f"https://{cleaned}"
+
+    if re.match(r"^https?://(www\.)?linkedin\.com/in/[^/?#]+/?$", cleaned):
+        return cleaned.replace("http://", "https://", 1)
+    return None
+
+
+def _strip_actor_header(raw: str | None, author_name: str | None = None) -> str:
+    """Remove the actor header block from whole-card fallback text.
+
+    On the CSS-modules feed there is no stable class for the post body, so the
+    fallback path reads the whole card and would otherwise include the author
+    name, headline, connection degree and relative post time.  The header
+    always sits above the body and always ends with the degree/time line, so we
+    cut the text at the first such line and let :func:`_clean_post_text` remove
+    any leftovers (the time line when the degree line appeared first, the
+    Follow button, separators, reaction chrome ...).
+
+    When no degree/time token can be found, at least drop an exact
+    author-name line when the name is known.
+    """
+    if not raw:
+        return ""
+    lines = raw.splitlines()
+    for idx, line in enumerate(lines[:12]):
+        stripped = line.strip()
+        if _CONNECTION_DEGREE_RE.match(stripped) or _RELATIVE_TIME_RE.match(stripped):
+            return "\n".join(lines[idx + 1:])
+    if author_name:
+        lowered = author_name.lower()
+        kept = [line for line in lines if line.strip().lower() != lowered]
+        return "\n".join(kept)
+    return raw
 
 
 # ── Main flow ────────────────────────────────────────────────────────────────
@@ -310,7 +456,11 @@ async def scroll_feed_and_collect(
         max_scrolls: Maximum number of scroll iterations
 
     Returns:
-        List of dicts with keys: post_urn, post_url, author_name, post_text
+        List of dicts with keys: post_urn, post_url, author_name,
+        author_first_name, author_last_name, author_profile_url,
+        connection_degree, post_time, post_text.  Every returned post has a
+        non-empty ``post_url`` (posts without a resolvable LinkedIn link are
+        skipped).
     """
     collected_posts = []
     seen_urns = set()
@@ -625,7 +775,10 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
     """
     Extract post data from currently visible feed items.
 
-    Returns list of dicts with: post_urn, post_url, author_name, post_text
+    Returns list of dicts with: post_urn, post_url, author_name,
+    author_first_name, author_last_name, author_profile_url, connection_degree,
+    post_time, post_text.  Cards without a resolvable post link are skipped so
+    every collected post is clickable in the UI.
     """
     posts = []
     local_seen_keys = set()
@@ -676,15 +829,21 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
             if expanded and should_log_debug():
                 logger.debug("Expanded truncated text for feed post %s", idx)
 
-            # Extract post text first (it is also used for the URN fallback).
-            post_text = await _get_post_text(element)
+            # Extract author details first (name is also used to clean the
+            # post body text of actor-header lines).
+            author_name = await _get_author_name(element)
+            author_first_name, author_last_name = _split_author_name(author_name)
+            author_profile_url = await _get_author_profile_url(element)
+            connection_degree = await _get_connection_degree(element)
+            post_time = await _get_post_time(element)
+
+            # Extract post text — only the actual post body, with the actor
+            # header (name/headline/degree/time) and reaction chrome removed.
+            post_text = await _get_post_text(element, author_name=author_name)
             if not post_text or len(post_text.strip()) < 15:  # relaxed from 20
                 if should_log_debug():
                     logger.debug(f"Post {idx}: text too short or empty ({len(post_text or '')} chars), skipping")
                 continue
-
-            # Extract author name
-            author_name = await _get_author_name(element)
 
             # Extract URN (unique identifier) — real URN or stable fallback
             post_urn = await _get_post_urn(element, author_name, post_text)
@@ -693,6 +852,12 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
 
             # Build post URL (prefer the real permalink href)
             post_url = await _get_post_url(element, post_urn)
+            if not post_url:
+                # Every post shown in the UI must be clickable — skip cards for
+                # which no LinkedIn post link could be resolved.
+                if should_log_debug():
+                    logger.debug(f"Post {idx}: no post URL found (urn={post_urn}), skipping")
+                continue
             identity = _post_identity_key(post_urn, post_url, author_name, post_text)
             if post_urn in seen_urns or identity in seen_urns or identity in local_seen_keys:
                 continue
@@ -702,6 +867,11 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
                 "post_urn": post_urn,
                 "post_url": post_url,
                 "author_name": author_name,
+                "author_first_name": author_first_name,
+                "author_last_name": author_last_name,
+                "author_profile_url": author_profile_url,
+                "connection_degree": connection_degree,
+                "post_time": post_time,
                 "post_text": post_text,
             })
 
@@ -789,8 +959,14 @@ async def _get_post_url(element, post_urn: str | None) -> str | None:
     return _normalise_post_url(None, post_urn)
 
 
-async def _get_post_text(element) -> str:
-    """Extract the main text content from a post element. Much more aggressive."""
+async def _get_post_text(element, author_name: str | None = None) -> str:
+    """Extract the main text content from a post element. Much more aggressive.
+
+    Returns ONLY the actual post body — the actor header (name, headline,
+    connection degree, relative time) and reaction chrome are stripped so the
+    scored/displayed text never mixes in feed metadata.
+    """
+    remove_lines = (author_name,) if author_name else ()
     try:
         # Updated 2025/2026 text selectors (order matters).  NOTE: LinkedIn's
         # CSS-modules feed no longer has stable classes for the body, so these
@@ -812,16 +988,18 @@ async def _get_post_text(element) -> str:
                 if text_el:
                     text = await text_el.inner_text()
                     if text and len(text.strip()) > 12:
-                        cleaned = " ".join(text.strip().split())
+                        cleaned = _clean_post_text(text, remove_lines=remove_lines)
                         return cleaned[:2500]
             except Exception:
                 continue
 
-        # Fallback 1: whole-element text, cleaned of UI chrome.  On the new
-        # CSS-modules feed this is the only way to get the post body.
+        # Fallback 1: whole-element text, cleaned of UI chrome AND the actor
+        # header (name/headline/degree/time).  On the new CSS-modules feed
+        # this is the only way to get the post body.
         try:
             all_text = await element.inner_text()
-            cleaned = _clean_post_text(all_text)
+            body_text = _strip_actor_header(all_text, author_name)
+            cleaned = _clean_post_text(body_text, remove_lines=remove_lines)
             if len(cleaned) > 15:
                 return cleaned
         except Exception:
@@ -838,7 +1016,7 @@ async def _get_post_text(element) -> str:
                         best = t
                 except Exception:
                     continue
-            cleaned = _clean_post_text(best)
+            cleaned = _clean_post_text(best, remove_lines=remove_lines)
             if len(cleaned) > 15:
                 return cleaned
         except Exception:
@@ -846,7 +1024,8 @@ async def _get_post_text(element) -> str:
 
         # Fallback 3: raw element text
         full_text = await element.inner_text()
-        return _clean_post_text(full_text)
+        body_text = _strip_actor_header(full_text, author_name)
+        return _clean_post_text(body_text, remove_lines=remove_lines)
 
     except Exception as e:
         if should_log_debug():
@@ -877,7 +1056,7 @@ async def _get_author_name(element) -> str | None:
                 if author_el:
                     name = await author_el.inner_text()
                     name = (name or "").strip()
-                    if name and len(name) > 1 and not name.lower().startswith(("like", "comment", "repost")):
+                    if name and len(name) > 1 and not name.lower().startswith(("like", "comment", "repost", "follow")):
                         return name[:80]
             except Exception:
                 continue
@@ -898,3 +1077,44 @@ async def _get_author_name(element) -> str | None:
         if should_log_debug():
             logger.debug(f"_get_author_name failed: {e}")
         return None
+
+
+async def _get_author_profile_url(element) -> str | None:
+    """Extract the author's LinkedIn profile URL from the actor header."""
+    try:
+        link = await element.query_selector(
+            "a[href*='/in/'], a[href*='linkedin.com/in/'], "
+            "a[data-control-name='actor_container'], a[href*='miniProfileUrn']"
+        )
+        if link:
+            href = await link.get_attribute("href")
+            return _normalise_profile_url(href)
+    except Exception:
+        pass
+    return None
+
+
+async def _get_connection_degree(element) -> str | None:
+    """Connection degree of the author relative to the scanning account."""
+    try:
+        text = await element.inner_text()
+    except Exception:
+        return None
+    return _extract_connection_degree(text)
+
+
+async def _get_post_time(element) -> str | None:
+    """LinkedIn's relative post time shown in the actor meta ("now", "5d")."""
+    try:
+        time_el = await element.query_selector("time")
+        if time_el:
+            raw = (await time_el.inner_text()).strip()
+            if _RELATIVE_TIME_RE.match(raw):
+                return raw
+    except Exception:
+        pass
+    try:
+        text = await element.inner_text()
+    except Exception:
+        return None
+    return _extract_post_time(text)

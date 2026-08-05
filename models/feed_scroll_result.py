@@ -18,9 +18,14 @@ class FeedScrollResult(Base):
                                 nullable=False, index=True)
 
     post_urn = Column(String, nullable=True, index=True)  # LinkedIn post URN for dedup
-    post_url = Column(String, nullable=True)
-    author_name = Column(String, nullable=True)
-    post_text = Column(Text, nullable=True)
+    post_url = Column(String, nullable=True)  # Always populated for new rows (every post must be linkable)
+    author_name = Column(String, nullable=True)  # Full display name (fallback for old rows)
+    author_first_name = Column(String, nullable=True)
+    author_last_name = Column(String, nullable=True)
+    author_profile_url = Column(String, nullable=True)  # Absolute LinkedIn /in/ URL
+    connection_degree = Column(String, nullable=True)   # "1st" | "2nd" | "3rd"
+    post_time = Column(String, nullable=True)           # LinkedIn relative time label ("5d", "2h")
+    post_text = Column(Text, nullable=True)  # Only the actual post body text
 
     score = Column(Float, nullable=False, default=0.0)
     matched_terms = Column(JSON, nullable=True)  # ["Software Engineer", "database design"]

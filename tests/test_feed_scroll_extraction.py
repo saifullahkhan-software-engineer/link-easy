@@ -64,11 +64,16 @@ if "core.logging_config" not in sys.modules:
 from automation.actions.feed_scroll import (
     POST_CONTAINER_SELECTORS,
     _clean_post_text,
+    _extract_connection_degree,
+    _extract_post_time,
     _is_expand_post_text_control,
     _is_post_urn,
     _normalise_post_url,
+    _normalise_profile_url,
     _post_identity_key,
     _pseudo_urn,
+    _split_author_name,
+    _strip_actor_header,
     _urn_from_href,
 )
 
@@ -192,8 +197,12 @@ class PseudoUrnTests(unittest.TestCase):
 
 
 class CleanPostTextTests(unittest.TestCase):
-    def test_strips_ui_chrome(self):
+    def test_strips_ui_chrome_and_actor_header(self):
+        # Whole-card fallback text (as inner_text renders it): actor header
+        # (name, headline, degree, time) first, then the post body, then the
+        # reaction chrome.  Only the actual post body must survive.
         raw = (
+            "Jane Doe\n"
             "Jane Doe\n"
             "Software Engineer\n"
             "2nd\n"
@@ -206,12 +215,20 @@ class CleanPostTextTests(unittest.TestCase):
             "Repost\n"
             "Send\n"
         )
-        cleaned = _clean_post_text(raw)
+        body = _strip_actor_header(raw, author_name="Jane Doe")
+        cleaned = _clean_post_text(body, remove_lines=("Jane Doe",))
         self.assertIn("shipped a big feature", cleaned)
-        for noise in ("Like", "Comment", "Repost", "Send", "1,234",
+        for noise in ("Jane Doe", "Software Engineer", "2nd", "5d",
+                      "Like", "Comment", "Repost", "Send", "1,234",
                       "234 comments"):
             self.assertNotIn(noise, cleaned, noise)
         self.assertNotIn("  ", cleaned)
+
+    def test_strips_degree_and_time_lines_without_header_strip(self):
+        cleaned = _clean_post_text("1st\n5d\nActual content here\nFollow")
+        self.assertIn("Actual content here", cleaned)
+        for noise in ("1st", "5d", "Follow"):
+            self.assertNotIn(noise, cleaned, noise)
 
     def test_keeps_list_item_lines(self):
         cleaned = _clean_post_text("8. Don't give up\nKeep going\n2.3K reactions")
@@ -225,9 +242,83 @@ class CleanPostTextTests(unittest.TestCase):
             "This is a long truncated post",
         )
 
+    def test_remove_custom_lines(self):
+        cleaned = _clean_post_text("Jane Doe\nBody text\nJane Doe\n", remove_lines=("Jane Doe",))
+        self.assertEqual(cleaned, "Body text")
+
     def test_empty_and_none(self):
         self.assertEqual(_clean_post_text(None), "")
         self.assertEqual(_clean_post_text("   \n  "), "")
+
+
+class AuthorNameAndProfileTests(unittest.TestCase):
+    def test_split_author_name(self):
+        self.assertEqual(_split_author_name("Jane Doe"), ("Jane", "Doe"))
+        self.assertEqual(_split_author_name("Jean-Luc Picard"), ("Jean-Luc", "Picard"))
+        self.assertEqual(_split_author_name("Cher"), ("Cher", None))
+        self.assertEqual(_split_author_name("  Alice  Bob  "), ("Alice", "Bob"))
+        self.assertEqual(_split_author_name(None), (None, None))
+        self.assertEqual(_split_author_name("   "), (None, None))
+
+    def test_normalise_profile_url(self):
+        self.assertEqual(
+            _normalise_profile_url("/in/janedoe/"),
+            "https://www.linkedin.com/in/janedoe/",
+        )
+        self.assertEqual(
+            _normalise_profile_url("//www.linkedin.com/in/janedoe/"),
+            "https://www.linkedin.com/in/janedoe/",
+        )
+        self.assertEqual(
+            _normalise_profile_url(
+                "https://www.linkedin.com/in/janedoe-123abc?miniProfileUrn=xyz&trk=feed"
+            ),
+            "https://www.linkedin.com/in/janedoe-123abc",
+        )
+        self.assertEqual(
+            _normalise_profile_url("http://www.linkedin.com/in/jane/"),
+            "https://www.linkedin.com/in/jane/",
+        )
+        for bad in (None, "", "/feed/update/urn:li:activity:123/", "https://example.com/x"):
+            self.assertIsNone(_normalise_profile_url(bad), bad)
+
+
+class ActorMetadataTests(unittest.TestCase):
+    def test_extract_connection_degree(self):
+        for raw, expected in (
+            ("Jane Doe\nSoftware Engineer\n1st\n5d\nBody", "1st"),
+            ("Jane Doe\n2nd degree connection\n2d\nBody", "2nd"),
+            ("Jane Doe\nFirst degree\n3d\nBody", "1st"),
+            ("Just the body text\nwith no degree", None),
+        ):
+            self.assertEqual(_extract_connection_degree(raw), expected, raw)
+
+    def test_extract_post_time(self):
+        for raw, expected in (
+            ("Jane Doe\nHeadline\n1st\n5d\nBody", "5d"),
+            ("Jane Doe\njust now\nBody", "just now"),
+            ("Jane Doe\n2h\nBody", "2h"),
+            ("Jane Doe\n1mo\nBody", "1mo"),
+            ("Body text without a time token", None),
+        ):
+            self.assertEqual(_extract_post_time(raw), expected, raw)
+
+    def test_strip_actor_header(self):
+        # Header ends with the degree token first; the leftover time line is
+        # removed by _clean_post_text in the full pipeline.
+        body = _strip_actor_header("Jane Doe\nHeadline\n2nd\n3d\nReal post text", "Jane Doe")
+        self.assertEqual(_clean_post_text(body), "Real post text")
+        # Header ends with the time token: the whole header is cut at once.
+        self.assertEqual(
+            _strip_actor_header("Jane Doe\n5d\nReal post text", "Jane Doe"),
+            "Real post text",
+        )
+        # No degree/time token: author-name lines are dropped, body kept.
+        self.assertEqual(
+            _strip_actor_header("Jane Doe\nReal post text", "Jane Doe"),
+            "Real post text",
+        )
+        self.assertEqual(_strip_actor_header(None), "")
 
 
 class SelectorSanityTests(unittest.TestCase):

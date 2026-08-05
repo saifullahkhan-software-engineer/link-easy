@@ -99,12 +99,22 @@ class FeedScrollJobResponse(BaseModel):
 
 
 class FeedScrollResultResponse(BaseModel):
-    """Single scored post returned to the client."""
+    """Single scored post returned to the client.
+
+    Every surfaced post is guaranteed to carry a clickable ``post_url``; the
+    author details (first/last name and profile URL) come from the feed card
+    and are used by the results page listing.
+    """
     id: str
     feed_scroll_job_id: str
     post_urn: Optional[str]
     post_url: Optional[str]
     author_name: Optional[str]
+    author_first_name: Optional[str]
+    author_last_name: Optional[str]
+    author_profile_url: Optional[str]
+    connection_degree: Optional[str]
+    post_time: Optional[str]
     post_text: Optional[str]
     score: float
     matched_terms: Optional[list[str]]
