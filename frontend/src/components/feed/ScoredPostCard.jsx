@@ -203,6 +203,7 @@ export default function ScoredPostCard({ post, rank }) {
                 >
                   {profileDisplay}
                 </a>
+              {postUrl && <a href={postUrl} target="_blank" rel="noopener noreferrer" className="ml-auto text-xs text-[#0a66c2]">Link</a>}
               )}
             </div>
           </div>
