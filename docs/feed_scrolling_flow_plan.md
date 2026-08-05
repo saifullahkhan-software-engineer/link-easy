@@ -8,13 +8,13 @@
 
 ## 1. Overview
 
-A new automation flow that periodically visits the LinkedIn feed, scrolls through posts, scores them based on user-defined criteria, and presents the top 15 scored posts on a dedicated screen for the user to review.
+A new automation flow that periodically visits the LinkedIn feed, scrolls through posts, scores them based on user-defined criteria, and presents the top 20 scored posts on a dedicated screen for the user to review.
 
 ### Two Modes
 
 | Mode | Description |
 |------|-------------|
-| **Job Search** | User provides structured criteria (experience interval, job titles, skill set). Posts matching job-relevant keywords are scored higher. |
+| **Job Search** | User provides structured criteria (experience interval, job titles, skill set, and optional keywords). Keywords add a dedicated relevance signal alongside the structured criteria. |
 | **Post Search** | User provides freeform keywords/topics. The feed is scanned for posts matching those topics. |
 
 ### High-Level Flow
@@ -29,6 +29,7 @@ A new automation flow that periodically visits the LinkedIn feed, scrolls throug
 │  │   Experience Interval: [2] to [3] years                       │  │
 │  │   Job Titles: [Software Engineer, Python Developer, ...]      │  │
 │  │   Skill Set: [Database Design, Development, ...]              │  │
+│  │   Keywords: [remote, SaaS, hiring urgently, ...] (optional)   │  │
 │  │                                                               │  │
 │  │ ── If Post Search ──                                         │  │
 │  │   Keywords/Topics: [freeform text]                            │  │
@@ -51,14 +52,15 @@ A new automation flow that periodically visits the LinkedIn feed, scrolls throug
 │  2. Navigate to linkedin.com/feed/                                  │
 │  3. Scroll naturally (human_scroll) collecting post text             │
 │  4. For each post → run regex scoring engine                        │
-│  5. Store top 15 posts in DB with scores                            │
+│  5. Store top 20 posts in DB with scores                            │
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  SCORED POSTS SCREEN (Frontend)                                     │
-│  Scrollable list of 15 posts ranked by score                        │
-│  Each post shows: preview text, score, matched keywords, timestamp  │
+│  Scrollable list of up to 20 posts ranked by score                  │
+│  Each post shows: preview text, score, matched keywords, timestamp, │
+│  author profile URL, and post URL                                   │
 │  (Future: AI scoring replaces regex)                                │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -86,11 +88,11 @@ feed_scroll_jobs
 ├── job_titles            (JSON, nullable)             — ["Software Engineer", "Python Developer"]
 ├── skill_set             (JSON, nullable)             — ["database design", "development"]
 │
-│   ── Post Search criteria (JSON) ──
-├── keywords              (JSON, nullable)             — ["AI", "machine learning", "data science"]
+│   ── Shared / Post Search keyword criteria (JSON) ──
+├── keywords              (JSON, nullable)             — optional job-search terms or primary post-search topics
 │
 ├── feed_interval_hours   (Integer, default=1)         — How often to visit the feed (1, 2, 4, etc.)
-├── posts_per_scan        (Integer, default=15, max=15) — How many top posts to keep per scan
+├── posts_per_scan        (Integer, default=20, max=20) — How many top posts to keep per scan
 │
 ├── last_scanned_at       (DateTime, nullable)
 ├── next_scan_at          (DateTime, nullable)
@@ -107,7 +109,8 @@ feed_scroll_results
 ├── id                    (String PK — UUID)
 ├── feed_scroll_job_id    (String FK → feed_scroll_jobs.id)
 ├── post_urn              (String)                     — LinkedIn post URN / ID (dedup key)
-├── post_url              (String, nullable)           — Full LinkedIn URL to the post
+├── post_url              (String)                     — Verified full LinkedIn URL to the post
+├── author_profile_url    (String)                     — Verified LinkedIn profile URL for the author
 ├── author_name           (String, nullable)           — Who posted it
 ├── post_text             (Text)                       — Extracted post text
 ├── score                 (Float)                      — Regex match score (0.0 – 100.0)
@@ -144,7 +147,7 @@ def score_post(post_text: str, config: dict) -> (float, list[str]):
     │  Skills            │ 30 pts   │ Case-insensitive regex     │
     │  Experience Level  │ 20 pts   │ Regex for year ranges      │
     │                    │          │ ("2+ years", "3-5 years")  │
-    │  Keywords (post)   │ 15 pts   │ Case-insensitive regex     │
+    │  Keywords          │ 15 pts   │ Case-insensitive regex     │
     └─────────────────────────────────────────────────────────────┘
     
     Each category score = (matches / total_terms_in_category) × category_weight
@@ -342,6 +345,9 @@ schemas/feed_scroll.py
 │  Skill Set:                                             │
 │  [Database Design ×] [Development ×] [+ Add]           │
 │                                                         │
+│  Keywords / Extra Terms (optional):                     │
+│  [remote ×] [SaaS ×] [+ Add]                           │
+│                                                         │
 │  ── Scheduling ──                                      │
 │                                                         │
 │  Feed Visit Interval:                                   │
@@ -494,7 +500,7 @@ frontend/src/
 | Scheduling | Self-rescheduling tasks | Each job has its own interval; mirrors existing campaign_tasks pattern |
 | Post deduplication | `post_urn` field | LinkedIn's URN is unique per post; prevents duplicate storage across scans |
 | Score range | 0–100 | Familiar, easy to understand, room for AI to use same scale |
-| Posts per scan | Top 10 (configurable) | Matches user requirement; stored per batch for history |
+| Posts per scan | Top 20 (maximum) | Keeps the highest-scoring verified posts per batch for history |
 | Browser reuse | Existing `launch_persistent_browser` | Reuses the battle-tested stealth browser with account-pinned fingerprints |
 | Anti-detection | Uses existing `human_scroll` | Feed scrolling looks like normal browsing; no new detection surface |
 

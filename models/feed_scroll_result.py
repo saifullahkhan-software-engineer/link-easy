@@ -18,11 +18,13 @@ class FeedScrollResult(Base):
                                 nullable=False, index=True)
 
     post_urn = Column(String, nullable=True, index=True)  # LinkedIn post URN for dedup
-    post_url = Column(String, nullable=True)  # Always populated for new rows (every post must be linkable)
+    # Both URL columns remain nullable at the DB layer for legacy rows, but the
+    # collector/worker only store new results when both resolve successfully.
+    post_url = Column(String, nullable=True)  # Absolute LinkedIn post URL
     author_name = Column(String, nullable=True)  # Full display name (fallback for old rows)
     author_first_name = Column(String, nullable=True)
     author_last_name = Column(String, nullable=True)
-    author_profile_url = Column(String, nullable=True)  # Absolute LinkedIn /in/ URL
+    author_profile_url = Column(String, nullable=True)  # Absolute LinkedIn author/entity profile URL
     connection_degree = Column(String, nullable=True)   # "1st" | "2nd" | "3rd"
     post_time = Column(String, nullable=True)           # LinkedIn relative time label ("5d", "2h")
     post_text = Column(Text, nullable=True)  # Only the actual post body text

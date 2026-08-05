@@ -11,18 +11,17 @@ GET    /api/v1/feed-scroll/jobs/{id}/results — get scored posts for a job
 POST   /api/v1/feed-scroll/jobs/{id}/scan    — trigger immediate manual scan
 """
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from api.dependencies import get_current_user, get_db
-from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus, FeedScrollMode
+from api.dependencies import get_db
+from models.feed_scroll_job import MAX_POSTS_PER_SCAN, FeedScrollJob, FeedScrollJobStatus
 from models.feed_scroll_result import FeedScrollResult
 from models.linkedin_account import LinkedInAccount
-from models.user import User
-from automation.actions.feed_scroll import _normalise_post_url, _normalise_profile_url, _post_identity_key
+from automation.actions.feed_scroll import _post_identity_key, _resolve_result_urls
 from schemas.feed_scroll import (
     FeedScrollJobCreate,
     FeedScrollJobResponse,
@@ -32,25 +31,32 @@ from schemas.feed_scroll import (
 
 router = APIRouter(prefix="/api/v1/feed-scroll", tags=["feed-scroll"])
 
+# The endpoint mirrors the worker's per-scan cap.  Fetch extra candidates from
+# storage because legacy rows without both URLs are filtered at response time.
+RESULTS_PAGE_LIMIT = MAX_POSTS_PER_SCAN
+RESULTS_PAGE_CANDIDATE_LIMIT = RESULTS_PAGE_LIMIT * 25
+
 
 def _prepare_unique_results(rows, max_items: int | None = None) -> list[FeedScrollResult]:
     """Normalize links and remove repeated posts before returning them.
 
-    Older scans may have stored relative LinkedIn hrefs (``/posts/...``) or no
-    ``post_url`` at all.  Normalize those at response time so existing rows are
-    clickable without needing a data backfill.  Any post that still has no
-    resolvable LinkedIn URL is dropped — every post surfaced to the UI must be
-    linkable.  Dedupe by activity id / URL / text hash so repeated scheduled
-    scans do not show the same post multiple times on the results page.
+    Older scans may have stored relative LinkedIn hrefs (``/posts/...``), no
+    ``post_url``, or no author profile URL.  Normalize rows at response time so
+    valid legacy links stay useful, but only surface a result when *both* its
+    post URL and author profile URL resolve to LinkedIn.  Dedupe by activity id
+    / URL / text hash so repeated scheduled scans do not show the same post
+    multiple times on the results page.
     """
     unique: list[FeedScrollResult] = []
     seen_keys: set[str] = set()
     for row in rows:
-        row.post_url = _normalise_post_url(row.post_url, row.post_urn)
-        if not row.post_url:
-            # Every post must have a link — hide rows we cannot link to.
+        resolved_urls = _resolve_result_urls(
+            row.post_url, row.post_urn, row.author_profile_url
+        )
+        if not resolved_urls:
+            # Both links are a product invariant for a surfaced result.
             continue
-        row.author_profile_url = _normalise_profile_url(row.author_profile_url)
+        row.post_url, row.author_profile_url = resolved_urls
         key = _post_identity_key(row.post_urn, row.post_url, row.author_name, row.post_text)
         if key in seen_keys:
             continue
@@ -218,8 +224,8 @@ async def get_feed_scroll_results(
     """
     Get scored posts for a feed scroll job.
 
-    If scan_batch_id is provided, returns results from that specific scan.
-    Otherwise returns the latest scan's top 10 posts.
+    If scan_batch_id is provided, returns that scan's top 20 scored posts.
+    Otherwise returns the 20 highest-scoring unique posts for the job.
     """
     # Verify job ownership
     job_result = await db.execute(
@@ -241,20 +247,25 @@ async def get_feed_scroll_results(
     )
 
     if scan_batch_id:
-        # Get specific batch, with duplicate cards removed.
+        # Get a specific batch, ranked by score, with duplicate cards removed.
         result = await db.execute(
             _base.where(FeedScrollResult.scan_batch_id == scan_batch_id)
             .order_by(FeedScrollResult.score.desc(), FeedScrollResult.scanned_at.desc())
         )
-        posts = _prepare_unique_results(result.scalars().all())
-    else:
-        # Get recent rows then dedupe in Python.  Query more than 10 because a
-        # scheduled scan can collect the same post again; after removing repeats
-        # we still want up to 10 unique, clickable results.
-        result = await db.execute(
-            _base.order_by(FeedScrollResult.scanned_at.desc(), FeedScrollResult.score.desc()).limit(200)
+        posts = _prepare_unique_results(
+            result.scalars().all(), max_items=RESULTS_PAGE_LIMIT
         )
-        posts = _prepare_unique_results(result.scalars().all(), max_items=10)
+    else:
+        # Rank by score before applying the result cap.  Query extra rows first
+        # because deduplication and the two-URL invariant can discard legacy
+        # data; the page should still receive up to twenty valid results.
+        result = await db.execute(
+            _base.order_by(FeedScrollResult.score.desc(), FeedScrollResult.scanned_at.desc())
+            .limit(RESULTS_PAGE_CANDIDATE_LIMIT)
+        )
+        posts = _prepare_unique_results(
+            result.scalars().all(), max_items=RESULTS_PAGE_LIMIT
+        )
 
     return [FeedScrollResultResponse.model_validate(p) for p in posts]
 

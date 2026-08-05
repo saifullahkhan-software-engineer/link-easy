@@ -154,6 +154,31 @@ class ExperienceRangeTests(unittest.TestCase):
         self.assertEqual(score, 20.0)
 
 
+class JobSearchKeywordTests(unittest.TestCase):
+    def test_keyword_is_scored_in_job_search_mode(self):
+        """Optional job-search keywords add their own 15-point relevance signal."""
+        score, matched = score_post(
+            "This is a remote role with flexible hours",
+            job_config(
+                job_titles=[],
+                skill_set=[],
+                experience_min_years=None,
+                experience_max_years=None,
+                keywords=["remote"],
+            ),
+        )
+        self.assertEqual(score, 15.0)
+        self.assertEqual(matched, ["remote"])
+
+    def test_keyword_completes_a_full_job_search_score(self):
+        score, matched = score_post(
+            "Hiring a Python Developer with AWS and 3 years experience for a remote role",
+            job_config(keywords=["remote"]),
+        )
+        self.assertEqual(score, 100.0)
+        self.assertIn("remote", matched)
+
+
 class IntegratedScoreTests(unittest.TestCase):
     def test_python_engineer_aws_exp_combine(self):
         score, matched = score_post(

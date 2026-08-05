@@ -75,6 +75,7 @@ from automation.actions.feed_scroll import (
     _normalise_post_url,
     _normalise_profile_url,
     _post_identity_key,
+    _resolve_result_urls,
     _pseudo_urn,
     _split_author_name,
     _strip_actor_header,
@@ -169,6 +170,35 @@ class PostUrlAndIdentityTests(unittest.TestCase):
         self.assertEqual(
             _normalise_post_url(None, "urn:li:activity:7123456789012345678"),
             "https://www.linkedin.com/feed/update/urn:li:activity:7123456789012345678/",
+        )
+
+    def test_resolves_post_and_profile_urls_together(self):
+        self.assertEqual(
+            _resolve_result_urls(
+                "/posts/jane-doe-activity-7123456789012345678-x?trk=feed",
+                None,
+                "/in/jane-doe/?miniProfileUrn=urn%3Ali%3Afs_miniProfile%3A123",
+            ),
+            (
+                "https://www.linkedin.com/posts/jane-doe-activity-7123456789012345678-x",
+                "https://www.linkedin.com/in/jane-doe/",
+            ),
+        )
+
+    def test_rejects_result_when_either_required_url_is_missing(self):
+        self.assertIsNone(
+            _resolve_result_urls(
+                "/feed/update/urn:li:activity:7123456789012345678/",
+                None,
+                None,
+            )
+        )
+        self.assertIsNone(
+            _resolve_result_urls(
+                None,
+                None,
+                "https://www.linkedin.com/in/jane-doe/",
+            )
         )
 
     def test_identity_dedupes_feed_and_posts_permalink_variants(self):
@@ -296,6 +326,10 @@ class AuthorNameAndProfileTests(unittest.TestCase):
         self.assertEqual(
             _normalise_profile_url("http://www.linkedin.com/in/jane/"),
             "https://www.linkedin.com/in/jane/",
+        )
+        self.assertEqual(
+            _normalise_profile_url("/company/acme-inc/?trk=feed"),
+            "https://www.linkedin.com/company/acme-inc/",
         )
         for bad in (None, "", "/feed/update/urn:li:activity:123/", "https://example.com/x"):
             self.assertIsNone(_normalise_profile_url(bad), bad)

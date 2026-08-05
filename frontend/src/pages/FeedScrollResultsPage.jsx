@@ -255,9 +255,14 @@ export default function FeedScrollResultsPage() {
         <div className="space-y-4">
           {/* Sort controls */}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
-              {results.length} {results.length === 1 ? 'Post' : 'Posts'}
-            </h2>
+            <div>
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                {results.length} {results.length === 1 ? 'Post' : 'Posts'}
+              </h2>
+              <p className="mt-0.5 text-xs text-zinc-500">
+                Up to 20 highest-scoring posts with verified profile and post links.
+              </p>
+            </div>
             <div className="flex items-center gap-2">
               <span className="text-xs text-zinc-500">Sort by</span>
               <div className="inline-flex rounded-lg border border-surface-700 bg-surface-800 p-0.5">
