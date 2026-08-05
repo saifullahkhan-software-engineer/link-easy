@@ -32,6 +32,12 @@ from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus
 # Force diagnostic screenshots during feed scroll scans (very helpful for debugging)
 FORCE_FEED_SCREENSHOTS = True
 
+# Every scan looks for 20-30 posts in the feed...
+COLLECT_MIN_POSTS = 20
+COLLECT_MAX_POSTS = 30
+# ...but only the top 15 scored posts are ever kept per job.
+MAX_POSTS_KEPT = 15
+
 
 def _should_screenshot() -> bool:
     """Force screenshots for feed scroll debugging."""
@@ -97,14 +103,16 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             return
 
         account_email = job.account_email
-        posts_per_scan = job.posts_per_scan
+        # A job may request fewer, but never more than MAX_POSTS_KEPT — every
+        # scan keeps only the top 15 scored posts.
+        keep_limit = min(job.posts_per_scan or MAX_POSTS_KEPT, MAX_POSTS_KEPT)
 
     # Run the async browser automation
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         results = loop.run_until_complete(
-            _run_feed_scroll_async(account_email, posts_per_scan, job)
+            _run_feed_scroll_async(account_email, keep_limit, job)
         )
         loop.close()
     except Exception as e:
@@ -207,7 +215,7 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
                 skipped_existing += 1
                 continue
             top_posts.append(post_data)
-            if len(top_posts) >= posts_per_scan:
+            if len(top_posts) >= keep_limit:
                 break
 
         logger.info(
@@ -262,7 +270,7 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             _schedule_next_scan(job.id, job.feed_interval_hours)
 
 
-async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -> dict:
+async def _run_feed_scroll_async(account_email: str, keep_limit: int, job) -> dict:
     """Async wrapper for browser automation."""
     from models.linkedin_account import LinkedInAccount
 
@@ -324,9 +332,12 @@ async def _run_feed_scroll_async(account_email: str, posts_per_scan: int, job) -
                     except Exception:
                         pass
 
-                    # Scroll feed and collect posts (15-20 posts per scan)
+                    # Scroll feed and collect 20-30 posts per scan; the scorer
+                    # keeps only the top 15 afterwards.
                     posts = await scroll_feed_and_collect(
-                        page, target_posts=random.randint(15, 20), max_scrolls=15
+                        page,
+                        target_posts=random.randint(COLLECT_MIN_POSTS, COLLECT_MAX_POSTS),
+                        max_scrolls=20,
                     )
 
                     # === NEW: Save final screenshot after collection (very useful for debugging) ===

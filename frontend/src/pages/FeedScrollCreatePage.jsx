@@ -110,7 +110,7 @@ export default function FeedScrollCreatePage() {
       owner_email: ownerEmail,
       mode,
       feed_interval_hours: intervalHours,
-      posts_per_scan: 10,
+      posts_per_scan: 15,
     };
 
     if (mode === 'job_search') {
