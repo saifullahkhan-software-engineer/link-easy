@@ -12,6 +12,27 @@ from core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Words that carry no matching value on their own.  When a multi-word term
+# ("Python Developer") is searched, these are never used for the half-word
+# (partial) match — a post containing just "the" or "of" is obviously not a
+# match.
+_STOP_WORDS = {
+    "a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "for",
+    "with", "by", "from", "as", "is", "are", "be", "it", "its", "into",
+    "about", "per", "via",
+}
+
+
+def _term_words(term: str) -> list[str]:
+    """Split a search term into its individual words.
+
+    "python developer" -> ["python", "developer"]
+    "full-stack"       -> ["full", "stack"]  (so it can match "full stack")
+    "node.js"          -> ["node", "js"]
+    "c++"              -> ["c"]              (dropped later: too short)
+    """
+    return re.findall(r"[a-zA-Z0-9]+", term)
+
 
 class ScorerInterface(Protocol):
     """Interface for post scorers — swap regex for AI without touching the flow."""
@@ -39,11 +60,17 @@ class RegexScorer:
     ┌─────────────────────────────────────────────────────────────┐
     │  Category          │ Weight   │ Match Method               │
     ├────────────────────┼──────────┼────────────────────────────┤
-    │  Job Titles        │ 35 pts   │ Case-insensitive regex     │
-    │  Skills            │ 30 pts   │ Case-insensitive regex     │
+    │  Job Titles        │ 35 pts   │ Full phrase + half-word    │
+    │  Skills            │ 30 pts   │ Full phrase + half-word    │
     │  Experience Level  │ 20 pts   │ Regex for year ranges      │
-    │  Keywords          │ 15 pts   │ Case-insensitive regex     │
+    │  Keywords          │ 15 pts   │ Full phrase + half-word    │
     └─────────────────────────────────────────────────────────────┘
+
+    Half-word matching: a multi-word term ("Python Developer") also counts
+    when only one of its words appears in the post — "Python Engineer" or
+    "Backend Developer" both match, because the post contains "python" or
+    "developer".  Stop words are excluded so noise words never trigger a
+    match on their own.
     """
 
     def score(self, post_text: str, config: dict) -> tuple[float, list[str]]:
@@ -104,7 +131,16 @@ class RegexScorer:
     def _score_category(
         self, text: str, terms: list[str] | None, weight: float
     ) -> tuple[float, list[str]]:
-        """Score a single category. Returns (points_earned, matched_terms)."""
+        """Score a single category. Returns (points_earned, matched_terms).
+
+        A term is matched when:
+
+        1. The full phrase appears in the post (case-insensitive, flexible
+           whitespace between words), OR
+        2. Half-word match: at least one meaningful word of the phrase appears
+           in the post on its own.  "Python Developer" therefore also matches
+           a post about a "Python Engineer" or a "Backend Developer".
+        """
         if not terms:
             return 0.0, []
 
@@ -112,15 +148,27 @@ class RegexScorer:
         for term in terms:
             if not term or not term.strip():
                 continue
-            # Build a regex that allows flexible whitespace between words
-            escaped = re.escape(term.strip())
-            # Allow flexible whitespace between words
-            pattern = escaped.replace(r"\ ", r"\s+")
-            regex = re.compile(rf"(?i)\b{pattern}\b")
-            if regex.search(text):
+            term = term.strip()
+            # Full-phrase match — flexible whitespace between words
+            escaped = re.escape(term)
+            pattern = escaped.replace(r"\ ", r"\s+").replace(r"\s+\s+", r"\s+")
+            if re.search(rf"(?i)\b{pattern}\b", text):
                 matches.append(term)
+                continue
 
-        if not terms:
+            # Half-word match — any meaningful word of the term on its own.
+            # e.g. term "python developer" matches a post containing
+            # "python engineer" (word "python") or "backend developer"
+            # (word "developer").
+            for word in _term_words(term):
+                lowered = word.lower()
+                if len(word) < 2 or lowered in _STOP_WORDS:
+                    continue
+                if re.search(rf"(?i)\b{re.escape(word)}\b", text):
+                    matches.append(word)
+                    break  # one word is enough for this term
+
+        if not matches:
             return 0.0, []
 
         ratio = len(matches) / len(terms)
@@ -139,11 +187,19 @@ class RegexScorer:
 
         matches = []
 
-        # Patterns for experience mentions
+        # Patterns for experience mentions.  Supports "3 years", "3 yrs",
+        # "3+ years", "3 YOE" and ranges like "2-5 years" / "2 to 5 years".
+        # "N years ago" / "N years old" are deliberately excluded — those are
+        # post age / age mentions, not experience.
         exp_patterns = [
-            r"(?i)(\d+)\s*[\-–to]+\s*(\d+)\s*years?",
-            r"(?i)(\d+)\+?\s*years?\s*(?:of)?\s*(?:experience|exp)",
-            r"(?i)(?:experience|exp)\s*(?:of)?\s*(\d+)\+?\s*years?",
+            # Range: "2-5 years", "2 to 5 yrs", "2 – 5 years"
+            r"(?i)(\d+)\s*(?:[\-–—]+|to)\s*(\d+)\s*(?:years?|yrs?)(?!s?\s*(?:ago|old)\b)",
+            # "3 years of experience", "3 yrs exp", "3 YOE", "3+ years exp"
+            r"(?i)(\d+)\s*(?:\+|plus)?\s*(?:years?|yrs?|yoe)\s*(?:of)?\s*(?:experience|exp|yoe)\b",
+            # "experience of 3 years", "exp 3+ years"
+            r"(?i)(?:experience|exp|yoe)\s*(?:of)?\s*(\d+)\s*(?:\+|plus)?\s*(?:years?|yrs?)",
+            # Bare mention: "3 years", "5+ yrs", "3 yoe" (no experience word required)
+            r"(?i)(\d+)\s*(?:\+|plus)?\s*(?:years?|yrs?|yoe)(?!s?\s*(?:ago|old)\b)",
             r"(?i)(?:junior|jr)\b",
             r"(?i)(?:mid[\-\s]?level|mid)\b",
             r"(?i)(?:senior|sr)\b",

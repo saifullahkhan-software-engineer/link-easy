@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-A new automation flow that periodically visits the LinkedIn feed, scrolls through posts, scores them based on user-defined criteria, and presents the top 10 scored posts on a dedicated screen for the user to review.
+A new automation flow that periodically visits the LinkedIn feed, scrolls through posts, scores them based on user-defined criteria, and presents the top 15 scored posts on a dedicated screen for the user to review.
 
 ### Two Modes
 
@@ -51,13 +51,13 @@ A new automation flow that periodically visits the LinkedIn feed, scrolls throug
 │  2. Navigate to linkedin.com/feed/                                  │
 │  3. Scroll naturally (human_scroll) collecting post text             │
 │  4. For each post → run regex scoring engine                        │
-│  5. Store top 10 posts in DB with scores                            │
+│  5. Store top 15 posts in DB with scores                            │
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  SCORED POSTS SCREEN (Frontend)                                     │
-│  Scrollable list of 10 posts ranked by score                        │
+│  Scrollable list of 15 posts ranked by score                        │
 │  Each post shows: preview text, score, matched keywords, timestamp  │
 │  (Future: AI scoring replaces regex)                                │
 └─────────────────────────────────────────────────────────────────────┘
@@ -90,7 +90,7 @@ feed_scroll_jobs
 ├── keywords              (JSON, nullable)             — ["AI", "machine learning", "data science"]
 │
 ├── feed_interval_hours   (Integer, default=1)         — How often to visit the feed (1, 2, 4, etc.)
-├── posts_per_scan        (Integer, default=10)        — How many top posts to keep per scan
+├── posts_per_scan        (Integer, default=15, max=15) — How many top posts to keep per scan
 │
 ├── last_scanned_at       (DateTime, nullable)
 ├── next_scan_at          (DateTime, nullable)
@@ -381,7 +381,7 @@ schemas/feed_scroll.py
 │  │ ...                                              │   │
 │  └─────────────────────────────────────────────────┘   │
 │                                                         │
-│  ... (up to 10 posts, scrollable) ...                  │
+│  ... (up to 15 posts, scrollable) ...                  │
 │                                                         │
 │  ── Scan History ──                                    │
 │  [2026-08-03 14:25] [2026-08-03 13:25] [2026-08-03 12:25] │

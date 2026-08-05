@@ -49,7 +49,8 @@ class FeedScrollJobCreate(BaseModel):
 
     # Scheduling
     feed_interval_hours: int = Field(1, ge=1, le=24)
-    posts_per_scan: int = Field(10, ge=1, le=50)
+    # How many top scored posts to keep per scan (capped at 15 in the worker)
+    posts_per_scan: int = Field(15, ge=1, le=15)
 
     @field_validator("job_titles", "skill_set", "keywords", mode="before")
     @classmethod
@@ -67,7 +68,7 @@ class FeedScrollJobUpdate(BaseModel):
     skill_set: Optional[list[str]] = None
     keywords: Optional[list[str]] = None
     feed_interval_hours: Optional[int] = Field(None, ge=1, le=24)
-    posts_per_scan: Optional[int] = Field(None, ge=1, le=50)
+    posts_per_scan: Optional[int] = Field(None, ge=1, le=15)
 
     @field_validator("job_titles", "skill_set", "keywords", mode="before")
     @classmethod

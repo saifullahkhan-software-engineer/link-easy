@@ -49,7 +49,8 @@ class FeedScrollJob(Base):
 
     # ── Scheduling ──
     feed_interval_hours = Column(Integer, nullable=False, default=1)
-    posts_per_scan = Column(Integer, nullable=False, default=10)
+    # How many top scored posts to keep per scan (worker caps this at 15)
+    posts_per_scan = Column(Integer, nullable=False, default=15)
 
     # ── Timestamps ──
     last_scanned_at = Column(DateTime(timezone=True), nullable=True)
