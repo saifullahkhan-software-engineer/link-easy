@@ -9,18 +9,30 @@ PATCH  /api/v1/campaigns/{id}         — update campaign
 DELETE /api/v1/campaigns/{id}         — delete campaign
 POST   /api/v1/campaigns/{id}/start   — start campaign (enqueue Celery tasks)
 POST   /api/v1/campaigns/{id}/pause   — pause campaign
+
+Lead intake (same `leads` table as CSV upload / manual entry):
+POST   /api/v1/campaigns/{id}/leads/quick-add           — add one profile
+POST   /api/v1/campaigns/{id}/leads/import-feed-leads   — import saved Feed Leads
 """
 import uuid
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
  
 from api.dependencies import get_current_user, get_db
 from models.campaign import Campaign, CampaignStatus
-from models.lead import Lead, LeadStatus
+from models.lead import Lead, LeadSource, LeadStatus
 from models.user import User
 from models.campaign_job import CampaignJob
 from schemas.campaign import CampaignCreate, CampaignResponse, CampaignUpdate, CampaignStepCreate, CampaignStepUpdate, CampaignStepResponse
+from schemas.feed_lead import (
+    FeedLeadImportRequest,
+    FeedLeadImportResponse,
+    FeedLeadImportSkipped,
+)
+from schemas.lead import LeadQuickAdd, LeadResponse, validate_lead_fields
 from models.campaign import CampaignStep
 router = APIRouter(prefix="/api/v1/campaigns", tags=["campaigns"])
  
@@ -650,3 +662,219 @@ async def get_campaign_job(
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "created_at": job.created_at.isoformat() if job.created_at else None,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Lead intake endpoints (quick-add + Feed Leads import)
+#
+# Both write the same `leads` table used by CSV upload and the manual form —
+# there is no parallel lead pathway.  They differ only in where the profile
+# came from, which is recorded on the lead's `source` fields.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _get_owned_campaign(campaign_id: str, owner_email: str, db: AsyncSession) -> Campaign:
+    """Fetch a campaign and verify it belongs to the owner's LinkedIn account."""
+    from models.linkedin_account import LinkedInAccount
+
+    result = await db.execute(
+        select(Campaign).join(
+            LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+    )
+    campaign = result.scalars().first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found or does not belong to you")
+    return campaign
+
+
+@router.post(
+    "/{campaign_id}/leads/quick-add",
+    response_model=LeadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a single profile to this campaign's leads",
+)
+async def quick_add_lead(
+    campaign_id: str,
+    payload: LeadQuickAdd,
+    db: AsyncSession = Depends(get_db),
+) -> LeadResponse:
+    """
+    Adds one profile as a campaign lead in a single call.
+
+    Same validation as CSV import (first_name, last_name and a valid
+    ``/in/`` LinkedIn URL are required; headline optional).  If the profile is
+    already a lead of this campaign the call fails with **409** — never a
+    silent no-op — so the caller can switch its button to the "Added" state.
+    """
+    from api.v1.leads import build_lead, find_duplicate_lead
+
+    campaign = await _get_owned_campaign(campaign_id, payload.owner_email, db)
+
+    try:
+        cleaned = validate_lead_fields(payload.first_name, payload.last_name, payload.linkedin_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    duplicate = await find_duplicate_lead(db, campaign.id, cleaned["linkedin_url"])
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": f"Already in {campaign.name} leads",
+                "code": "already_in_campaign",
+                "lead_id": duplicate.id,
+                "campaign_id": campaign.id,
+                "campaign_name": campaign.name,
+            },
+        )
+
+    lead = build_lead(
+        campaign_id=campaign.id,
+        first_name=cleaned["first_name"],
+        last_name=cleaned["last_name"],
+        linkedin_url=cleaned["linkedin_url"],
+        headline=(payload.headline or "").strip() or None,
+        source=payload.source,
+        source_post_url=payload.source_post_url,
+        matched_score=payload.matched_score,
+        matched_criteria=payload.matched_criteria,
+        scan_id=payload.scan_id,
+    )
+    db.add(lead)
+    await db.commit()
+    await db.refresh(lead)
+    return LeadResponse.model_validate(lead)
+
+
+@router.post(
+    "/{campaign_id}/leads/import-feed-leads",
+    response_model=FeedLeadImportResponse,
+    summary="Import selected Feed Leads into this campaign",
+)
+async def import_feed_leads(
+    campaign_id: str,
+    payload: FeedLeadImportRequest,
+    db: AsyncSession = Depends(get_db),
+) -> FeedLeadImportResponse:
+    """
+    Turns saved Feed Leads (profiles staged from Feed Scroll scan results) into
+    real campaign leads.
+
+    Behaviour per selected entry:
+
+    * **added** — inserted into the shared ``leads`` table with
+      ``status=pending`` and the feed scan metadata (source, post URL, score,
+      matched criteria, scan id) preserved; the pool entry is consumed.
+    * **duplicate** — this LinkedIn URL is already a lead of this campaign, so
+      nothing is inserted; the pool entry is still consumed and pointed at the
+      existing lead, and the entry is reported back so the UI can say so.
+    * **error** — validation failed or the entry is gone; it stays in the pool.
+    """
+    from api.v1.leads import build_lead, find_duplicate_lead
+    from models.feed_lead import FeedLead, FeedLeadStatus
+
+    campaign = await _get_owned_campaign(campaign_id, payload.owner_email, db)
+
+    requested_ids = list(dict.fromkeys(payload.feed_lead_ids))  # de-dupe, keep order
+    result = await db.execute(
+        select(FeedLead).where(
+            FeedLead.id.in_(requested_ids),
+            FeedLead.owner_email == payload.owner_email,
+        )
+    )
+    found = {row.id: row for row in result.scalars().all()}
+
+    added: list[Lead] = []
+    duplicates: list[FeedLeadImportSkipped] = []
+    errors: list[FeedLeadImportSkipped] = []
+    imported_at = datetime.now(timezone.utc)
+    # Guards against the same profile appearing twice inside one selection.
+    seen_urls: set[str] = set()
+
+    for feed_lead_id in requested_ids:
+        feed_lead = found.get(feed_lead_id)
+        if feed_lead is None:
+            errors.append(FeedLeadImportSkipped(
+                feed_lead_id=feed_lead_id,
+                reason="not_found",
+                message="This feed lead no longer exists.",
+            ))
+            continue
+
+        display_name = " ".join(
+            part for part in [feed_lead.first_name, feed_lead.last_name] if part
+        ) or feed_lead.linkedin_url
+
+        if feed_lead.status == FeedLeadStatus.IMPORTED:
+            duplicates.append(FeedLeadImportSkipped(
+                feed_lead_id=feed_lead.id,
+                linkedin_url=feed_lead.linkedin_url,
+                name=display_name,
+                reason="duplicate",
+                message="Already imported into a campaign.",
+            ))
+            continue
+
+        try:
+            cleaned = validate_lead_fields(
+                feed_lead.first_name, feed_lead.last_name, feed_lead.linkedin_url
+            )
+        except ValueError as exc:
+            errors.append(FeedLeadImportSkipped(
+                feed_lead_id=feed_lead.id,
+                linkedin_url=feed_lead.linkedin_url,
+                name=display_name,
+                reason="invalid",
+                message=str(exc),
+            ))
+            continue
+
+        existing = await find_duplicate_lead(db, campaign.id, cleaned["linkedin_url"])
+        if existing is not None or cleaned["linkedin_url"] in seen_urls:
+            # Consume the pool entry: the profile is in the campaign already.
+            feed_lead.status = FeedLeadStatus.IMPORTED
+            feed_lead.imported_campaign_id = campaign.id
+            feed_lead.imported_lead_id = existing.id if existing else None
+            feed_lead.imported_at = imported_at
+            duplicates.append(FeedLeadImportSkipped(
+                feed_lead_id=feed_lead.id,
+                linkedin_url=cleaned["linkedin_url"],
+                name=display_name,
+                reason="duplicate",
+                message=f"Already in {campaign.name} leads",
+            ))
+            continue
+
+        lead = build_lead(
+            campaign_id=campaign.id,
+            first_name=cleaned["first_name"],
+            last_name=cleaned["last_name"],
+            linkedin_url=cleaned["linkedin_url"],
+            headline=feed_lead.headline,
+            source=LeadSource.JOB_FEED_SCAN,
+            source_post_url=feed_lead.source_post_url,
+            matched_score=feed_lead.matched_score,
+            matched_criteria=feed_lead.matched_criteria,
+            scan_id=feed_lead.scan_id,
+        )
+        db.add(lead)
+
+        feed_lead.status = FeedLeadStatus.IMPORTED
+        feed_lead.imported_campaign_id = campaign.id
+        feed_lead.imported_lead_id = lead.id
+        feed_lead.imported_at = imported_at
+
+        seen_urls.add(cleaned["linkedin_url"])
+        added.append(lead)
+
+    await db.commit()
+    for lead in added:
+        await db.refresh(lead)
+
+    return FeedLeadImportResponse(
+        campaign_id=campaign.id,
+        campaign_name=campaign.name,
+        added=[LeadResponse.model_validate(lead) for lead in added],
+        duplicates=duplicates,
+        errors=errors,
+    )

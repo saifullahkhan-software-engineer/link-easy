@@ -123,6 +123,18 @@ CREATE TYPE public.feed_scroll_job_status AS ENUM (
 
 ALTER TYPE public.feed_scroll_job_status OWNER TO postgres;
 
+--
+-- Name: feed_lead_status; Type: TYPE; Schema: public; Owner: postgres
+--
+
+CREATE TYPE public.feed_lead_status AS ENUM (
+    'saved',
+    'imported'
+);
+
+
+ALTER TYPE public.feed_lead_status OWNER TO postgres;
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -246,6 +258,7 @@ CREATE TABLE public.feed_scroll_results (
     score double precision DEFAULT 0 NOT NULL,
     matched_terms json,
     scan_batch_id character varying NOT NULL,
+    dismissed_at timestamp with time zone,
     scanned_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -271,11 +284,49 @@ CREATE TABLE public.leads (
     last_action_at timestamp with time zone,
     next_action_at timestamp with time zone,
     notes text,
+    source character varying,
+    source_post_url character varying,
+    matched_score double precision,
+    matched_criteria json,
+    scan_id character varying,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
 ALTER TABLE public.leads OWNER TO postgres;
+
+--
+-- Name: feed_leads; Type: TABLE; Schema: public; Owner: postgres
+--
+-- Staging pool for profiles saved from Feed Scroll scan results.  One pool per
+-- feed scroll job; entries are consumed (status = 'imported') when a campaign
+-- pulls them into public.leads.
+--
+
+CREATE TABLE public.feed_leads (
+    id character varying NOT NULL,
+    owner_email character varying NOT NULL,
+    feed_scroll_job_id character varying NOT NULL,
+    feed_scroll_result_id character varying,
+    linkedin_url character varying NOT NULL,
+    first_name character varying,
+    last_name character varying,
+    headline character varying,
+    label character varying,
+    source character varying DEFAULT 'job_feed_scan'::character varying NOT NULL,
+    source_post_url character varying,
+    matched_score double precision,
+    matched_criteria json,
+    scan_id character varying,
+    status public.feed_lead_status DEFAULT 'saved'::public.feed_lead_status NOT NULL,
+    imported_campaign_id character varying,
+    imported_lead_id character varying,
+    imported_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.feed_leads OWNER TO postgres;
 
 --
 -- Name: linkedin_accounts; Type: TABLE; Schema: public; Owner: postgres
@@ -393,6 +444,14 @@ ALTER TABLE ONLY public.feed_scroll_results
 
 
 --
+-- Name: feed_leads feed_leads_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feed_leads
+    ADD CONSTRAINT feed_leads_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: leads leads_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
 --
 
@@ -478,6 +537,27 @@ CREATE INDEX ix_feed_scroll_results_post_urn ON public.feed_scroll_results USING
 --
 
 CREATE INDEX ix_feed_scroll_results_scan_batch_id ON public.feed_scroll_results USING btree (scan_batch_id);
+
+
+--
+-- Name: ix_feed_leads_owner_email; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ix_feed_leads_owner_email ON public.feed_leads USING btree (owner_email);
+
+
+--
+-- Name: ix_feed_leads_feed_scroll_job_id; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ix_feed_leads_feed_scroll_job_id ON public.feed_leads USING btree (feed_scroll_job_id);
+
+
+--
+-- Name: ix_feed_leads_job_url; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX ix_feed_leads_job_url ON public.feed_leads USING btree (feed_scroll_job_id, linkedin_url);
 
 
 --
@@ -569,6 +649,14 @@ ALTER TABLE ONLY public.feed_scroll_jobs
 
 ALTER TABLE ONLY public.feed_scroll_results
     ADD CONSTRAINT feed_scroll_results_feed_scroll_job_id_fkey FOREIGN KEY (feed_scroll_job_id) REFERENCES public.feed_scroll_jobs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: feed_leads feed_leads_feed_scroll_job_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feed_leads
+    ADD CONSTRAINT feed_leads_feed_scroll_job_id_fkey FOREIGN KEY (feed_scroll_job_id) REFERENCES public.feed_scroll_jobs(id) ON DELETE CASCADE;
 
 
 --

@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { Spinner } from '../components/Spinner';
 import ManualLeadForm from '../components/leads/ManualLeadForm';
 import CsvUpload from '../components/leads/CsvUpload';
+import FeedLeadsPicker from '../components/leads/FeedLeadsPicker';
 import LeadsTable from '../components/leads/LeadsTable';
 import Modal from '../components/Modal';
 
@@ -536,8 +537,9 @@ export default function CampaignCreatePage() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-700 px-5 pt-4">
             <div className="flex gap-1" role="tablist" aria-label="Add leads">
               {[
-                ['manual', 'Add manually'],
-                ['csv', 'Upload CSV'],
+                ['manual', 'Manual leads'],
+                ['csv', 'Load CSV'],
+                ['feed', 'Feed leads'],
               ].map(([key, label]) => (
                 <button
                   key={key}
@@ -572,17 +574,25 @@ export default function CampaignCreatePage() {
 
           {/* Tab body */}
           <div className="p-5">
-            {leadTab === 'manual' ? (
+            {leadTab === 'manual' && (
               <ManualLeadForm
                 campaignId={createdCampaign.id}
                 ownerEmail={ownerEmail}
                 onLeadAdded={() => fetchLeadsForCampaign(createdCampaign.id, true)}
               />
-            ) : (
+            )}
+            {leadTab === 'csv' && (
               <CsvUpload
                 campaignId={createdCampaign.id}
                 ownerEmail={ownerEmail}
                 onUploaded={() => fetchLeadsForCampaign(createdCampaign.id, false)}
+              />
+            )}
+            {leadTab === 'feed' && (
+              <FeedLeadsPicker
+                campaignId={createdCampaign.id}
+                ownerEmail={ownerEmail}
+                onImported={() => fetchLeadsForCampaign(createdCampaign.id, false)}
               />
             )}
           </div>

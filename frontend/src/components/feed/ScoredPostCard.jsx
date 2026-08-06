@@ -1,3 +1,4 @@
+import AddToLeadButton from './AddToLeadButton';
 import ScoreBadge from './ScoreBadge';
 
 /* ------------------------- small helpers ------------------------- */
@@ -55,6 +56,34 @@ function getLinkedInProfileUrl(post) {
   return '';
 }
 
+// Split the poster's display name into first/last, exactly like the CSV import
+// expects them.  Structured columns win; the full display name is the fallback
+// for older rows ("Jane van Dijk" → first "Jane", last "van Dijk").
+export function parseAuthorName(post) {
+  const first = (post?.author_first_name || '').trim();
+  const last = (post?.author_last_name || '').trim();
+  if (first && last) return { first_name: first, last_name: last };
+
+  const parts = authorDisplayName(post)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  if (parts.length === 0) return { first_name: first, last_name: last };
+  if (parts.length === 1) return { first_name: first || parts[0], last_name: last };
+  return {
+    first_name: first || parts[0],
+    last_name: last || parts.slice(1).join(' '),
+  };
+}
+
+// Only personal profiles (/in/<slug>) can become leads — company/school pages
+// are not people, and the backend rejects them with the same rule.
+export function personalProfileUrl(post) {
+  const url = getLinkedInProfileUrl(post);
+  return /^https:\/\/www\.linkedin\.com\/in\//i.test(url) ? url.replace(/\/$/, '') : '';
+}
+
 // Human-readable author/profile URL (for example, "linkedin.com/in/jane-doe") shown on the card.
 function profileUrlDisplay(post) {
   const url = getLinkedInProfileUrl(post);
@@ -105,17 +134,48 @@ function avatarColor(name) {
  * ("From your feed · 1st connection · 5d").  The post body itself contains
  * only the actual post text (metadata is stripped at extraction time).
  */
-export default function ScoredPostCard({ post, rank }) {
+export default function ScoredPostCard({
+  post,
+  rank,
+  pools = [],
+  currentPoolId,
+  ownerEmail,
+  savedState = null,
+  onSavedToFeedLeads,
+  onDismiss,
+}) {
   const postUrl = getLinkedInPostUrl(post);
   const profileUrl = getLinkedInProfileUrl(post);
   const name = authorDisplayName(post);
   const metaLine = postMetaLine(post);
   const profileDisplay = profileUrlDisplay(post);
 
+  // Everything the Feed Leads pool needs from this card: the parsed name and
+  // verified profile link the user can already see, plus the scan metadata
+  // (post URL, score, matched criteria, scan id) kept for analytics.
+  const leadProfile = {
+    ...parseAuthorName(post),
+    linkedin_url: personalProfileUrl(post),
+    headline: post.author_headline || null,
+  };
+  const leadMetadata = {
+    feed_scroll_result_id: post.id,
+    source_post_url: postUrl || post.post_url || null,
+    matched_score: post.score ?? null,
+    matched_criteria: post.matched_terms || null,
+    scan_id: post.scan_batch_id || null,
+  };
+
   const openPost = () => {
     if (postUrl) window.open(postUrl, '_blank', 'noopener,noreferrer');
   };
   const stop = (e) => e.stopPropagation();
+
+  // Remove this post from the results view (soft dismiss handled by the API).
+  const handleDismiss = (e) => {
+    stop(e);
+    onDismiss?.(post);
+  };
 
   const avatar = (extra = '') => (
     <span
@@ -139,7 +199,21 @@ export default function ScoredPostCard({ post, rank }) {
             {post.scanned_at ? new Date(post.scanned_at).toLocaleString() : 'Recently scanned'}
           </span>
         </div>
-        {post.score != null && <ScoreBadge score={post.score} />}
+        <div className="flex items-center gap-2">
+          {post.score != null && <ScoreBadge score={post.score} />}
+          {onDismiss && (
+            <button
+              type="button"
+              onClick={handleDismiss}
+              title="Remove this post — read it and not useful? Dismiss it from your results."
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-zinc-400 transition hover:bg-red-500/10 hover:text-red-300"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0Z" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* LinkedIn-style white post card — click anywhere to open the post */}
@@ -266,22 +340,45 @@ export default function ScoredPostCard({ post, rank }) {
             </span>
           </div>
 
-          {/* Link to the post — always present (every post has a link) */}
-          {postUrl && (
-            <a
-              href={postUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={`Open post on LinkedIn: ${postUrl}`}
-              onClick={stop}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-semibold text-[#0a66c2] transition hover:bg-[#0a66c2]/10"
-            >
-              Open post
-              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
-              </svg>
-            </a>
-          )}
+          <div className="flex shrink-0 items-center gap-1">
+            {/* Save this profile to a Feed Leads list (never straight into a
+                campaign — the campaign picks these up later). */}
+            {leadProfile.linkedin_url ? (
+              <AddToLeadButton
+                profile={leadProfile}
+                metadata={leadMetadata}
+                pools={pools}
+                currentPoolId={currentPoolId}
+                ownerEmail={ownerEmail}
+                savedState={savedState}
+                onSaved={onSavedToFeedLeads}
+              />
+            ) : (
+              <span
+                className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-zinc-400"
+                title="Only personal profiles (linkedin.com/in/…) can be saved as leads"
+              >
+                Add to Lead
+              </span>
+            )}
+
+            {/* Link to the post — always present (every post has a link) */}
+            {postUrl && (
+              <a
+                href={postUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Open post on LinkedIn: ${postUrl}`}
+                onClick={stop}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-semibold text-[#0a66c2] transition hover:bg-[#0a66c2]/10"
+              >
+                Open post
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                </svg>
+              </a>
+            )}
+          </div>
         </div>
       </div>
 

@@ -156,6 +156,7 @@ class FeedScrollResultResponse(BaseModel):
     score: float
     matched_terms: Optional[list[str]]
     scan_batch_id: str
+    dismissed_at: Optional[datetime] = None
     scanned_at: datetime
     created_at: datetime
 

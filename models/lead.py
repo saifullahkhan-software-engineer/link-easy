@@ -3,9 +3,17 @@ Lead model — one row per LinkedIn profile being targeted by a campaign.
 FILE: models/lead.py
 """
 import enum
-from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, DateTime, Enum as SAEnum, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.sql import func
 from database import Base
+
+
+# How a lead entered the campaign.  Every pathway writes the same leads table;
+# this only records provenance so the UI/analytics can tell them apart.
+class LeadSource(str, enum.Enum):
+    MANUAL = "manual"            # "Add manually" form
+    CSV_IMPORT = "csv_import"    # CSV bulk upload
+    JOB_FEED_SCAN = "job_feed_scan"  # Saved from a Feed Scroll scan result
  
  
 class LeadStatus(str, enum.Enum):
@@ -43,4 +51,16 @@ class Lead(Base):
     next_action_at     = Column(DateTime(timezone=True), nullable=True)
  
     notes          = Column(Text, nullable=True)        # Admin / debug notes
+
+    # ── Provenance ────────────────────────────────────────────────────────
+    # Where this lead came from ("manual" | "csv_import" | "job_feed_scan").
+    # Legacy rows created before this column existed stay NULL.
+    source           = Column(String, nullable=True)
+    # Feed-scan only: the post the profile was matched on, its relevance score
+    # and the criteria that matched, plus the scan batch it belonged to.
+    source_post_url  = Column(String, nullable=True)
+    matched_score    = Column(Float, nullable=True)
+    matched_criteria = Column(JSON, nullable=True)
+    scan_id          = Column(String, nullable=True)
+
     created_at     = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

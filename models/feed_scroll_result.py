@@ -33,5 +33,12 @@ class FeedScrollResult(Base):
     matched_terms = Column(JSON, nullable=True)  # ["Software Engineer", "database design"]
     scan_batch_id = Column(String, nullable=False, index=True)  # Groups posts from same scan
 
+    # Soft-dismiss: when a user reads a post and decides it is not useful they
+    # can remove it from the results view.  We flag it instead of hard-deleting
+    # so the row still counts as "already stored" for the scanner's de-dup — a
+    # dismissed post therefore never reappears on the next scheduled scan.  NULL
+    # means "still visible".
+    dismissed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
     scanned_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

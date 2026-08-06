@@ -318,10 +318,13 @@ async def get_feed_scroll_results(
 
     # Only return posts that actually matched the criteria.  Posts with a
     # score of 0 (or below the relevance floor) are never surfaced — score
-    # must be greater than 1.
+    # must be greater than 1.  Dismissed posts (read and marked "not useful")
+    # are filtered out so the user sees a clean list of posts still worth
+    # acting on.
     _base = select(FeedScrollResult).where(
         FeedScrollResult.feed_scroll_job_id == job_id,
         FeedScrollResult.score > 1.0,
+        FeedScrollResult.dismissed_at.is_(None),
     )
 
     if scan_batch_id:
@@ -346,6 +349,89 @@ async def get_feed_scroll_results(
         )
 
     return [FeedScrollResultResponse.model_validate(p) for p in posts]
+
+
+async def _load_owned_result(
+    job_id: str, result_id: str, owner_email: str, db: AsyncSession
+) -> tuple[FeedScrollJob, FeedScrollResult] | None:
+    """Return the job + result if both exist and belong to the owner.
+
+    Returns ``None`` when either the job or the result is missing or not owned
+    by this user, so callers can return a uniform 404.
+    """
+    job_result = await db.execute(
+        select(FeedScrollJob).where(
+            FeedScrollJob.id == job_id,
+            FeedScrollJob.owner_email == owner_email,
+        )
+    )
+    job = job_result.scalars().first()
+    if not job:
+        return None
+
+    result_query = await db.execute(
+        select(FeedScrollResult).where(
+            FeedScrollResult.id == result_id,
+            FeedScrollResult.feed_scroll_job_id == job_id,
+        )
+    )
+    result = result_query.scalars().first()
+    if not result:
+        return None
+
+    return job, result
+
+
+@router.delete("/jobs/{job_id}/results/{result_id}", status_code=200)
+async def dismiss_feed_scroll_result(
+    job_id: str,
+    result_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a single scanned post from the results view.
+
+    This is a soft dismiss: the row is flagged with ``dismissed_at`` rather than
+    deleted, so it disappears from the list but still counts as "already stored"
+    for the scanner's de-dup — a dismissed post therefore never reappears on the
+    next scheduled scan.  Idempotent: dismissing something already dismissed is a
+    no-op 200, and a missing/foreign result is a 404.  Dismissing a post whose
+    author was saved to a Feed Leads pool does not touch that pool entry.
+    """
+    owned = await _load_owned_result(job_id, result_id, owner_email, db)
+    if not owned:
+        raise HTTPException(status_code=404, detail="Feed scroll result not found")
+    _job, result = owned
+
+    result.dismissed_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    return {"message": "Post removed from results", "id": result_id}
+
+
+@router.post("/jobs/{job_id}/results/{result_id}/restore", status_code=200)
+async def restore_feed_scroll_result(
+    job_id: str,
+    result_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Undo a dismiss so the post shows up in the results view again.
+
+    Used by the "Undo" affordance after a quick removal.  Returns 404 when the
+    result is missing/not owned, and 200 (with ``restored: False``) when the
+    post was not actually dismissed.
+    """
+    owned = await _load_owned_result(job_id, result_id, owner_email, db)
+    if not owned:
+        raise HTTPException(status_code=404, detail="Feed scroll result not found")
+    _job, result = owned
+
+    restored = result.dismissed_at is not None
+    result.dismissed_at = None
+    await db.commit()
+
+    return {"message": "Post restored to results", "id": result_id, "restored": restored}
 
 
 @router.post("/jobs/{job_id}/scan", status_code=200)

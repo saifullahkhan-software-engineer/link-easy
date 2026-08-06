@@ -10,6 +10,51 @@ const STEP_LABELS = {
   thanks_if_accepted: 'Thanks if accepted',
 };
 
+// Where the lead came from. Feed Scroll matches, CSV imports and manual entries
+// all live in the same table — this only labels their origin.
+const SOURCE_TAGS = {
+  job_feed_scan: {
+    label: 'Feed scan',
+    className: 'bg-sky-500/10 text-sky-300 ring-sky-500/20',
+  },
+  csv_import: {
+    label: 'CSV',
+    className: 'bg-violet-500/10 text-violet-300 ring-violet-500/20',
+  },
+  manual: {
+    label: 'Manual',
+    className: 'bg-zinc-500/10 text-zinc-400 ring-zinc-500/20',
+  },
+};
+
+function sourceTitle(lead) {
+  const parts = [];
+  if (lead.source === 'job_feed_scan') {
+    parts.push('Saved from a Feed Scroll match');
+    if (lead.matched_score != null) parts.push(`Score: ${Number(lead.matched_score).toFixed(1)}`);
+    if (lead.matched_criteria?.length) parts.push(`Matched: ${lead.matched_criteria.join(', ')}`);
+    if (lead.source_post_url) parts.push(lead.source_post_url);
+  } else if (lead.source === 'csv_import') {
+    parts.push('Imported from a CSV upload');
+  } else if (lead.source === 'manual') {
+    parts.push('Added manually');
+  }
+  return parts.join('\n');
+}
+
+function SourceTag({ lead }) {
+  const tag = SOURCE_TAGS[lead.source];
+  if (!tag) return null;
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ${tag.className}`}
+      title={sourceTitle(lead)}
+    >
+      {tag.label}
+    </span>
+  );
+}
+
 function formatRemaining(nextActionAt, now) {
   const nextAt = Date.parse(nextActionAt);
   if (!Number.isFinite(nextAt)) return null;
@@ -45,7 +90,8 @@ export default function LeadsTable({ leads, loading, steps = [], now = Date.now(
         </svg>
         <p className="text-sm font-medium text-zinc-400">No leads yet</p>
         <p className="mt-1 text-xs text-zinc-600">
-          Add prospects manually above, or import a CSV — then start the campaign.
+          Add prospects manually, import a CSV, or pull in saved feed leads — then start the
+          campaign.
         </p>
       </div>
     );
@@ -77,7 +123,10 @@ export default function LeadsTable({ leads, loading, steps = [], now = Date.now(
             return (
               <tr key={lead.id} className="transition hover:bg-surface-800/60">
                 <td className="px-4 py-3">
-                  <p className="font-medium text-zinc-200">{name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-zinc-200">{name}</p>
+                    <SourceTag lead={lead} />
+                  </div>
                   {lead.headline && (
                     <p className="mt-0.5 max-w-[260px] truncate text-xs text-zinc-500">{lead.headline}</p>
                   )}
