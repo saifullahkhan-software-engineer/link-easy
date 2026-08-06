@@ -280,28 +280,28 @@ export default function ScoredPostCard({
                   {profileDisplay}
                 </a>
               )}
-              {postUrl && (
-                <a
-                  href={postUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={postUrl}
-                  onClick={stop}
-                  className="ml-auto text-xs font-medium text-[#0a66c2] transition hover:underline"
-                >
-                  Post link
-                </a>
-              )}
             </div>
           </div>
-          {postUrl && (
+          {leadProfile.linkedin_url ? (
+            <div className="mt-1 shrink-0">
+              <AddToLeadButton
+                profile={leadProfile}
+                metadata={leadMetadata}
+                pools={pools}
+                currentPoolId={currentPoolId}
+                ownerEmail={ownerEmail}
+                savedState={savedState}
+                onSaved={onSavedToFeedLeads}
+              />
+            </div>
+          ) : postUrl ? (
             <span className="mt-1 inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-[#0a66c2]">
               Open in LinkedIn
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
               </svg>
             </span>
-          )}
+          ) : null}
         </div>
 
         {/* Post body — real spacing & formatting, actual post text only */}
@@ -341,28 +341,7 @@ export default function ScoredPostCard({
           </div>
 
           <div className="flex shrink-0 items-center gap-1">
-            {/* Save this profile to a Feed Leads list (never straight into a
-                campaign — the campaign picks these up later). */}
-            {leadProfile.linkedin_url ? (
-              <AddToLeadButton
-                profile={leadProfile}
-                metadata={leadMetadata}
-                pools={pools}
-                currentPoolId={currentPoolId}
-                ownerEmail={ownerEmail}
-                savedState={savedState}
-                onSaved={onSavedToFeedLeads}
-              />
-            ) : (
-              <span
-                className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-zinc-400"
-                title="Only personal profiles (linkedin.com/in/…) can be saved as leads"
-              >
-                Add to Lead
-              </span>
-            )}
-
-            {/* Link to the post — always present (every post has a link) */}
+            {/* Link to the post */}
             {postUrl && (
               <a
                 href={postUrl}
