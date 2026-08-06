@@ -63,6 +63,15 @@ export const campaignsApi = {
     api.get(`/campaigns/${campaignId}/jobs`, { params: { owner_email: ownerEmail } }),
   listSteps: (campaignId, ownerEmail) =>
     api.get(`/campaigns/${campaignId}/steps`, { params: { owner_email: ownerEmail } }),
+  // Lead intake — both write the same leads table as CSV/manual import.
+  quickAddLead: (campaignId, payload) =>
+    api.post(`/campaigns/${campaignId}/leads/quick-add`, payload),
+  importFeedLeads: (campaignId, ownerEmail, feedLeadIds) =>
+    api.post(
+      `/campaigns/${campaignId}/leads/import-feed-leads`,
+      { owner_email: ownerEmail, feed_lead_ids: feedLeadIds },
+      { timeout: 60_000 }
+    ),
 };
 
 /* --------------------------------- leads --------------------------------- */
@@ -107,4 +116,26 @@ export const leadsApi = {
       timeout: 60_000,
     });
   },
+};
+
+/* ------------------------------- feed leads ------------------------------ */
+/* The staging pool between a Feed Scroll scan and a campaign. Saving a post's
+ * author parks it in the pool of that feed scroll job; a campaign later pulls
+ * a selection of them in through campaignsApi.importFeedLeads. */
+export const feedLeadsApi = {
+  save: (payload) => api.post('/feed-leads', payload),
+  list: (ownerEmail, { feedScrollJobId, status = 'saved' } = {}) =>
+    api.get('/feed-leads', {
+      params: {
+        owner_email: ownerEmail,
+        ...(feedScrollJobId ? { feed_scroll_job_id: feedScrollJobId } : {}),
+        ...(status ? { status } : {}),
+      },
+    }),
+  pools: (ownerEmail, { onlyWithSaved = false } = {}) =>
+    api.get('/feed-leads/pools', {
+      params: { owner_email: ownerEmail, only_with_saved: onlyWithSaved },
+    }),
+  remove: (feedLeadId, ownerEmail) =>
+    api.delete(`/feed-leads/${feedLeadId}`, { params: { owner_email: ownerEmail } }),
 };

@@ -179,6 +179,11 @@ const CASES = [
           created_at: '2026-08-01T10:00:00Z',
           updated_at: '2026-08-05T08:00:00Z',
         }),
+      'GET /api/v1/feed-leads/pools': (res) =>
+        json(res, 200, [
+          { feed_scroll_job_id: 'feed-job-1', name: 'Backend job hunt', mode: 'job_search', status: 'active', saved_count: 0, imported_count: 0, last_saved_at: null },
+        ]),
+      'GET /api/v1/feed-leads': (res) => json(res, 200, []),
       'GET /api/v1/feed-scroll/jobs/feed-job-1/results': (res) =>
         json(res, 200, [
           {
@@ -213,6 +218,90 @@ const CASES = [
       'we shipped a big feature today',
       'Post link',
       'Open post',
+      'Add to Lead',
+    ],
+  },
+  {
+    name: 'feed scroll results — profile already saved shows the Added state, not an addable button',
+    path: '/app/feed-scroll/jobs/feed-job-1',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/feed-scroll/jobs/feed-job-1': (res) =>
+        json(res, 200, {
+          id: 'feed-job-1',
+          account_email: 'li@test.dev',
+          owner_email: 'owner@test.dev',
+          name: 'Backend job hunt',
+          mode: 'job_search',
+          status: 'active',
+          experience_min_years: null,
+          experience_max_years: null,
+          job_titles: ['Software Engineer'],
+          skill_set: [],
+          keywords: ['remote'],
+          feed_interval_hours: 1,
+          posts_per_scan: 20,
+          last_scanned_at: '2026-08-05T08:00:00Z',
+          next_scan_at: null,
+          created_at: '2026-08-01T10:00:00Z',
+          updated_at: '2026-08-05T08:00:00Z',
+        }),
+      'GET /api/v1/feed-leads/pools': (res) =>
+        json(res, 200, [
+          { feed_scroll_job_id: 'feed-job-1', name: 'Backend job hunt', mode: 'job_search', status: 'active', saved_count: 1, imported_count: 0, last_saved_at: '2026-08-05T09:00:00Z' },
+        ]),
+      // status=saved and status=imported hit the same stub; only the saved
+      // profile is returned, which is what the card state is derived from.
+      'GET /api/v1/feed-leads': (res, req) =>
+        json(res, 200, new URL(req.url, 'http://x').searchParams.get('status') === 'saved'
+          ? [{
+              id: 'fl-1',
+              owner_email: 'owner@test.dev',
+              feed_scroll_job_id: 'feed-job-1',
+              feed_scroll_result_id: 'res-1',
+              linkedin_url: 'https://www.linkedin.com/in/janedoe',
+              first_name: 'Jane',
+              last_name: 'Doe',
+              headline: null,
+              label: null,
+              source: 'job_feed_scan',
+              source_post_url: 'https://www.linkedin.com/feed/update/urn:li:activity:7123456789012345678/',
+              matched_score: 82,
+              matched_criteria: ['Software Engineer'],
+              scan_id: 'batch-1',
+              status: 'saved',
+              imported_campaign_id: null,
+              imported_lead_id: null,
+              imported_at: null,
+              created_at: '2026-08-05T09:00:00Z',
+            }]
+          : []),
+      'GET /api/v1/feed-scroll/jobs/feed-job-1/results': (res) =>
+        json(res, 200, [
+          {
+            id: 'res-1',
+            feed_scroll_job_id: 'feed-job-1',
+            post_urn: 'urn:li:activity:7123456789012345678',
+            post_url: 'https://www.linkedin.com/feed/update/urn:li:activity:7123456789012345678/',
+            author_name: 'Jane Doe',
+            author_first_name: 'Jane',
+            author_last_name: 'Doe',
+            author_profile_url: 'https://www.linkedin.com/in/janedoe',
+            connection_degree: '1st',
+            post_time: '5d',
+            post_text: 'Excited to share that we shipped a big feature today!',
+            score: 82,
+            matched_terms: ['Software Engineer'],
+            scan_batch_id: 'batch-1',
+            scanned_at: '2026-08-05T08:00:00Z',
+            created_at: '2026-08-05T08:00:00Z',
+          },
+        ]),
+    },
+    mustContain: [
+      'Added ✓',
+      'waiting in this scan',
+      'add them to a campaign',
     ],
   },
 ];
@@ -252,7 +341,7 @@ for (const testCase of CASES) {
   });
   for (const [k, v] of Object.entries(storage)) window.localStorage.setItem(k, v);
 
-  const globals = ['window', 'document', 'localStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'customElements', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame', 'MutationObserver', 'self',
+  const globals = ['window', 'document', 'localStorage', 'sessionStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'customElements', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame', 'MutationObserver', 'self',
     // Browsers make axios use its XHR adapter — mirror that here so relative
     // /api/v1 URLs resolve against the jsdom origin (the stub server).
     'XMLHttpRequest', 'FormData', 'Blob', 'FileReader'];

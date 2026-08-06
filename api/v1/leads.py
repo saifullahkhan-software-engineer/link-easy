@@ -19,9 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from api.dependencies import get_current_user, get_db
-from models.lead import Lead, LeadStatus
+from models.lead import Lead, LeadSource, LeadStatus
 from models.user import User
-from schemas.lead import LeadCreate, LeadResponse, LeadUpdate, validate_linkedin_url_str
+from schemas.lead import (
+    LeadCreate,
+    LeadResponse,
+    LeadUpdate,
+    validate_lead_fields,
+)
 
 router = APIRouter(prefix="/api/v1/leads", tags=["leads"])
 
@@ -29,6 +34,59 @@ router = APIRouter(prefix="/api/v1/leads", tags=["leads"])
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+async def find_duplicate_lead(
+    db: AsyncSession,
+    campaign_id: str,
+    linkedin_url: str,
+) -> Lead | None:
+    """Return the existing lead with this LinkedIn URL in this campaign, if any."""
+    result = await db.execute(
+        select(Lead).where(
+            Lead.campaign_id == campaign_id,
+            Lead.linkedin_url == linkedin_url,
+        )
+    )
+    return result.scalars().first()
+
+
+def build_lead(
+    campaign_id: str,
+    first_name: str,
+    last_name: str,
+    linkedin_url: str,
+    headline: str | None = None,
+    source: LeadSource | str = LeadSource.MANUAL,
+    source_post_url: str | None = None,
+    matched_score: float | None = None,
+    matched_criteria: list[str] | None = None,
+    scan_id: str | None = None,
+) -> Lead:
+    """
+    Build a campaign lead row.
+
+    Every pathway (manual form, CSV import, Feed Leads import) funnels through
+    this so a lead always lands in the same table with the same defaults —
+    ``status=pending``, first step scheduled immediately — and only differs by
+    the recorded ``source`` metadata.
+    """
+    return Lead(
+        id=str(uuid.uuid4()),
+        campaign_id=campaign_id,
+        linkedin_url=linkedin_url,
+        first_name=first_name,
+        last_name=last_name,
+        headline=headline,
+        status=LeadStatus.PENDING,
+        current_step=1,
+        next_action_at=datetime.now(timezone.utc),
+        source=getattr(source, "value", source),
+        source_post_url=source_post_url,
+        matched_score=matched_score,
+        matched_criteria=matched_criteria,
+        scan_id=scan_id,
+    )
+
 
 async def _get_lead_or_404(
     lead_id: str,
@@ -87,18 +145,15 @@ async def create_lead(
     if not campaign:
         raise HTTPException(status_code=400, detail="Campaign not found or does not belong to you")
     
-    lead = Lead(
-        id=str(uuid.uuid4()),
+    lead = build_lead(
         campaign_id=payload.campaign_id,
-        linkedin_url=payload.linkedin_url,
         first_name=payload.first_name,
         last_name=payload.last_name,
+        linkedin_url=payload.linkedin_url,
         headline=payload.headline,
-        status=LeadStatus.PENDING,
-        current_step=1,
-        next_action_at=datetime.now(timezone.utc)
+        source=LeadSource.MANUAL,
     )
-    
+
     db.add(lead)
     await db.commit()
     await db.refresh(lead)
@@ -192,29 +247,18 @@ async def upload_leads_csv(
     parsed_rows: list[dict] = []
 
     for row_index, row in enumerate(rows, start=2):  # row 1 is the header
-        first_name = row.get('first_name', '').strip()
-        last_name  = row.get('last_name',  '').strip()
-        raw_url    = row.get('linkedin_url', '').strip()
-
-        if not first_name or not last_name or not raw_url:
-            validation_errors.append(
-                f"Row {row_index}: missing required field(s) "
-                f"(first_name={first_name!r}, last_name={last_name!r}, linkedin_url={raw_url!r})"
-            )
-            continue
-
+        # Shared validation — identical rules for CSV, manual entry, the Feed
+        # Leads pool and campaign quick-add.
         try:
-            linkedin_url = validate_linkedin_url_str(raw_url)
+            cleaned = validate_lead_fields(
+                row.get('first_name'), row.get('last_name'), row.get('linkedin_url')
+            )
         except ValueError as exc:
-            validation_errors.append(f"Row {row_index}: invalid linkedin_url {raw_url!r} — {exc}")
+            validation_errors.append(f"Row {row_index}: {exc}")
             continue
 
-        parsed_rows.append({
-            'first_name':   first_name,
-            'last_name':    last_name,
-            'linkedin_url': linkedin_url,
-            'headline':     row.get('headline', '').strip() or None,
-        })
+        cleaned['headline'] = row.get('headline', '').strip() or None
+        parsed_rows.append(cleaned)
 
     if validation_errors:
         raise HTTPException(
@@ -228,16 +272,13 @@ async def upload_leads_csv(
     # ── Second pass: persist only after all rows passed validation ────────────
     created_leads: list[Lead] = []
     for row_data in parsed_rows:
-        lead = Lead(
-            id=str(uuid.uuid4()),
+        lead = build_lead(
             campaign_id=campaign_id,
-            linkedin_url=row_data['linkedin_url'],
             first_name=row_data['first_name'],
             last_name=row_data['last_name'],
+            linkedin_url=row_data['linkedin_url'],
             headline=row_data['headline'],
-            status=LeadStatus.PENDING,
-            current_step=1,
-            next_action_at=datetime.now(timezone.utc)
+            source=LeadSource.CSV_IMPORT,
         )
         db.add(lead)
         created_leads.append(lead)

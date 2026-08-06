@@ -13,6 +13,7 @@ from api.v1.linkedin import router as linkedin_router
 from api.v1.users import router as users_router
 from api.v1.campaigns import router as campaign_router
 from api.v1.leads import router as leads_router
+from api.v1.feed_leads import router as feed_leads_router
 
 from api.v1.test_automation import router as test_automation_router
 from api.v1.feed_scroll import router as feed_scroll_router
@@ -68,6 +69,7 @@ app.include_router(users_router)
 app.include_router(linkedin_router)
 app.include_router(campaign_router)
 app.include_router(leads_router)
+app.include_router(feed_leads_router)
 app.include_router(test_automation_router)
 app.include_router(feed_scroll_router)
 

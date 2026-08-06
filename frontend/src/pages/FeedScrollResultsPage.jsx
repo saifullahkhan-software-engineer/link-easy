@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { feedScrollApi } from '../api/endpoints';
+import { feedLeadsApi, feedScrollApi } from '../api/endpoints';
 import { getUserEmail, getErrorMessage } from '../api/client';
-import ScoredPostCard from '../components/feed/ScoredPostCard';
+import ScoredPostCard, { personalProfileUrl } from '../components/feed/ScoredPostCard';
+import { isSessionSaved } from '../components/feed/AddToLeadButton';
 import Modal from '../components/Modal';
 import { Spinner } from '../components/Spinner';
 
@@ -20,9 +21,57 @@ export default function FeedScrollResultsPage() {
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [sortBy, setSortBy] = useState('score'); // 'score' | 'latest'
 
+  // Feed Leads state: which lists exist (for the save popover) and which
+  // profiles of this scan are already staged/consumed (for the button state).
+  const [pools, setPools] = useState([]);
+  const [feedLeadStates, setFeedLeadStates] = useState({}); // linkedin_url → 'saved' | 'imported'
+
   useEffect(() => {
     loadData();
   }, [jobId]);
+
+  // Server-known state so a page reload (or a re-scan surfacing the same post)
+  // still shows "Added ✓" instead of an addable button.
+  const loadFeedLeads = useCallback(async () => {
+    if (!jobId || !ownerEmail) return;
+    try {
+      const [poolsRes, savedRes, importedRes] = await Promise.all([
+        feedLeadsApi.pools(ownerEmail),
+        feedLeadsApi.list(ownerEmail, { feedScrollJobId: jobId, status: 'saved' }),
+        feedLeadsApi.list(ownerEmail, { feedScrollJobId: jobId, status: 'imported' }),
+      ]);
+      setPools(poolsRes.data || []);
+      const states = {};
+      (importedRes.data || []).forEach((item) => {
+        states[(item.linkedin_url || '').toLowerCase()] = 'imported';
+      });
+      (savedRes.data || []).forEach((item) => {
+        states[(item.linkedin_url || '').toLowerCase()] = 'saved';
+      });
+      setFeedLeadStates(states);
+    } catch {
+      // Non-fatal: the cards still work, they just start without saved marks.
+    }
+  }, [jobId, ownerEmail]);
+
+  useEffect(() => {
+    loadFeedLeads();
+  }, [loadFeedLeads]);
+
+  const savedCountForJob = useMemo(
+    () => Object.values(feedLeadStates).filter((state) => state === 'saved').length,
+    [feedLeadStates]
+  );
+
+  // Combine the server snapshot with marks made in this browser session.
+  const savedStateFor = useCallback(
+    (post) => {
+      const url = personalProfileUrl(post).toLowerCase();
+      if (!url) return null;
+      return feedLeadStates[url] || (isSessionSaved(jobId, url) ? 'saved' : null);
+    },
+    [feedLeadStates, jobId]
+  );
 
   const loadData = async () => {
     try {
@@ -272,6 +321,15 @@ export default function FeedScrollResultsPage() {
               <p className="mt-0.5 text-xs text-zinc-500">
                 Up to 20 highest-scoring posts with verified profile and post links.
               </p>
+              {savedCountForJob > 0 && (
+                <p className="mt-1 text-xs text-emerald-300">
+                  {savedCountForJob} profile{savedCountForJob === 1 ? '' : 's'} waiting in this
+                  scan&apos;s feed leads —{' '}
+                  <Link to="/app/campaigns/create" className="font-semibold underline hover:text-emerald-200">
+                    add them to a campaign
+                  </Link>
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <span className="text-xs text-zinc-500">Sort by</span>
@@ -309,7 +367,16 @@ export default function FeedScrollResultsPage() {
           </div>
 
           {displayResults.map((post, index) => (
-            <ScoredPostCard key={post.id} post={post} rank={index + 1} />
+            <ScoredPostCard
+              key={post.id}
+              post={post}
+              rank={index + 1}
+              pools={pools}
+              currentPoolId={jobId}
+              ownerEmail={ownerEmail}
+              savedState={savedStateFor(post)}
+              onSavedToFeedLeads={loadFeedLeads}
+            />
           ))}
         </div>
       )}
