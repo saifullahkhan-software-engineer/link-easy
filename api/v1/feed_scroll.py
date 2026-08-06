@@ -5,7 +5,10 @@ FILE: api/v1/feed_scroll.py
 POST   /api/v1/feed-scroll/jobs          — create feed scroll job
 GET    /api/v1/feed-scroll/jobs          — list user's feed scroll jobs
 GET    /api/v1/feed-scroll/jobs/{id}     — get single job
-PATCH  /api/v1/feed-scroll/jobs/{id}     — update job (pause/resume)
+PATCH  /api/v1/feed-scroll/jobs/{id}     — update job (name, criteria, interval,
+                                        status; criteria edits re-score stored
+                                        results so the next scan picks up posts
+                                        matching the new criteria)
 DELETE /api/v1/feed-scroll/jobs/{id}     — delete job
 GET    /api/v1/feed-scroll/jobs/{id}/results — get scored posts for a job
 POST   /api/v1/feed-scroll/jobs/{id}/scan    — trigger immediate manual scan
@@ -18,7 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from api.dependencies import get_db
-from models.feed_scroll_job import MAX_POSTS_PER_SCAN, FeedScrollJob, FeedScrollJobStatus
+from models.feed_scroll_job import (
+    MAX_POSTS_PER_SCAN,
+    FeedScrollJob,
+    FeedScrollJobStatus,
+    FeedScrollMode,
+)
 from models.feed_scroll_result import FeedScrollResult
 from models.linkedin_account import LinkedInAccount
 from automation.actions.feed_scroll import _post_identity_key, _resolve_result_urls
@@ -139,6 +147,60 @@ async def get_feed_scroll_job(
     return FeedScrollJobResponse.model_validate(job)
 
 
+def _ensure_job_criteria(job: FeedScrollJob) -> None:
+    """Reject an edit that would leave the job with no usable search criteria."""
+    if job.mode == FeedScrollMode.JOB_SEARCH:
+        if not any((job.job_titles, job.skill_set, job.keywords)):
+            raise HTTPException(
+                status_code=400,
+                detail="Job search requires at least one job title, skill, or keyword",
+            )
+    elif not job.keywords:
+        raise HTTPException(
+            status_code=400,
+            detail="Post search requires at least one keyword",
+        )
+
+
+async def _re_score_results(db: AsyncSession, job: FeedScrollJob) -> tuple[int, int]:
+    """Re-score every stored result against the job's current criteria.
+
+    Rows whose score drops to the relevance floor (<= 1) no longer match the
+    edited criteria and are deleted, so the results page and the next scan
+    only reflect the new keywords / experience / job titles.  Posts that
+    survive keep their updated score and matched terms.
+
+    Returns ``(kept, removed)``.
+    """
+    from automation.scoring.feed_scorer import score_post
+
+    config = {
+        "mode": job.mode.value,
+        "job_titles": job.job_titles or [],
+        "skill_set": job.skill_set or [],
+        "experience_min_years": job.experience_min_years,
+        "experience_max_years": job.experience_max_years,
+        "keywords": job.keywords or [],
+    }
+
+    result = await db.execute(
+        select(FeedScrollResult).where(FeedScrollResult.feed_scroll_job_id == job.id)
+    )
+    rows = result.scalars().all()
+
+    kept = removed = 0
+    for row in rows:
+        score, matched_terms = score_post(row.post_text or "", config)
+        if score <= 1.0:
+            await db.delete(row)
+            removed += 1
+        else:
+            row.score = score
+            row.matched_terms = matched_terms
+            kept += 1
+    return kept, removed
+
+
 @router.patch("/jobs/{job_id}", response_model=FeedScrollJobResponse)
 async def update_feed_scroll_job(
     job_id: str,
@@ -146,7 +208,18 @@ async def update_feed_scroll_job(
     owner_email: str,
     db: AsyncSession = Depends(get_db),
 ) -> FeedScrollJobResponse:
-    """Update a feed scroll job (name, criteria, interval, status)."""
+    """Update a feed scroll job (name, criteria, interval, status).
+
+    Every field present in the payload is applied verbatim — including nulls
+    and empty lists, which clear experience bounds / tag fields; omitted
+    fields are left untouched.
+
+    When any search-criteria field changes (experience, job titles, skills,
+    keywords), all stored results are re-scored against the new criteria:
+    posts that no longer match are removed and survivors get fresh scores, so
+    the next scan picks up posts matching the new criteria instead of mixing
+    old and new match rules.
+    """
     result = await db.execute(
         select(FeedScrollJob).where(
             FeedScrollJob.id == job_id,
@@ -157,29 +230,34 @@ async def update_feed_scroll_job(
     if not job:
         raise HTTPException(status_code=404, detail="Feed scroll job not found")
 
-    # Update fields
-    if payload.name is not None:
-        job.name = payload.name
-    if payload.status is not None:
-        job.status = payload.status
-    if payload.experience_min_years is not None:
-        job.experience_min_years = payload.experience_min_years
-    if payload.experience_max_years is not None:
-        job.experience_max_years = payload.experience_max_years
-    if payload.job_titles is not None:
-        job.job_titles = payload.job_titles
-    if payload.skill_set is not None:
-        job.skill_set = payload.skill_set
-    if payload.keywords is not None:
-        job.keywords = payload.keywords
-    if payload.feed_interval_hours is not None:
-        job.feed_interval_hours = payload.feed_interval_hours
-    if payload.posts_per_scan is not None:
-        job.posts_per_scan = payload.posts_per_scan
+    updates = payload.model_dump(exclude_unset=True)
+    criteria_fields = {
+        "experience_min_years",
+        "experience_max_years",
+        "job_titles",
+        "skill_set",
+        "keywords",
+    }
+    criteria_changed = bool(criteria_fields.intersection(updates))
+
+    for field, value in updates.items():
+        setattr(job, field, value)
+
+    # The merged job must keep at least one usable criterion for its mode.
+    _ensure_job_criteria(job)
+
+    rescored = removed = None
+    if criteria_changed:
+        rescored, removed = await _re_score_results(db, job)
 
     await db.commit()
     await db.refresh(job)
-    return FeedScrollJobResponse.model_validate(job)
+
+    response = FeedScrollJobResponse.model_validate(job)
+    if criteria_changed:
+        response.rescored_results = rescored
+        response.removed_results = removed
+    return response
 
 
 @router.delete("/jobs/{job_id}", status_code=200)
