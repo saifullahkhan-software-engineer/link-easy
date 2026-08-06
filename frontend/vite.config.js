@@ -10,6 +10,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // Dev previews (e.g. sandboxed environments) reach the app through a
+    // hostname that is not localhost — accept any host in development.
+    allowedHosts: true,
     proxy: {
       '/api': {
         target: backendUrl,

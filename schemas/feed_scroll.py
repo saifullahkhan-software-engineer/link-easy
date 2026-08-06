@@ -16,8 +16,12 @@ from models.feed_scroll_job import (
 
 
 def normalize_tags(v: Any) -> Optional[list[str]]:
-    """Split comma/semicolon/newline-separated strings into a list of trimmed unique strings."""
-    if not v:
+    """Split comma/semicolon/newline-separated strings into a list of trimmed unique strings.
+
+    ``None`` is preserved so callers can distinguish "field not provided"
+    (leave unchanged) from an explicit empty list (clear the field).
+    """
+    if v is None:
         return None
     if isinstance(v, str):
         v = [v]
@@ -33,7 +37,7 @@ def normalize_tags(v: Any) -> Optional[list[str]]:
             cleaned = part.strip()
             if cleaned and cleaned not in result:
                 result.append(cleaned)
-    return result or None
+    return result
 
 
 class FeedScrollJobCreate(BaseModel):
@@ -121,6 +125,12 @@ class FeedScrollJobResponse(BaseModel):
     next_scan_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
+
+    # Set only on criteria edits (PATCH): how many previously stored results
+    # were re-scored and kept, and how many were removed because they no
+    # longer match the new keywords / experience / job titles.
+    rescored_results: Optional[int] = None
+    removed_results: Optional[int] = None
 
     model_config = {"from_attributes": True}
 

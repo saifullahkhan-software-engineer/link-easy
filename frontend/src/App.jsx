@@ -14,6 +14,7 @@ import CampaignCreatePage from './pages/CampaignCreatePage';
 import CampaignStatusPage from './pages/CampaignStatusPage';
 import FeedScrollJobsPage from './pages/FeedScrollJobsPage';
 import FeedScrollCreatePage from './pages/FeedScrollCreatePage';
+import FeedScrollEditPage from './pages/FeedScrollEditPage';
 import FeedScrollResultsPage from './pages/FeedScrollResultsPage';
 
 export default function App() {
@@ -59,6 +60,7 @@ export default function App() {
             <Route path="feed-scroll" element={<FeedScrollJobsPage />} />
             <Route path="feed-scroll/create" element={<FeedScrollCreatePage />} />
             <Route path="feed-scroll/jobs/:jobId" element={<FeedScrollResultsPage />} />
+            <Route path="feed-scroll/jobs/:jobId/edit" element={<FeedScrollEditPage />} />
           </Route>
 
           {/* catch-all */}
