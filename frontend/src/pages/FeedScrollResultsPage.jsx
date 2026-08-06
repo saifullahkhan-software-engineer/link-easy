@@ -137,6 +137,39 @@ export default function FeedScrollResultsPage() {
     }
   };
 
+  // Soft-dismiss a single scanned post: hide it from the local list now and
+  // let the API flag it so the scanner's de-dup never brings it back.  The
+  // toast offers an Undo that restores the row and the card.
+  const handleDismiss = async (post) => {
+    try {
+      await feedScrollApi.deleteResult(jobId, post.id, ownerEmail);
+      setResults((prev) => prev.filter((r) => r.id !== post.id));
+      toast.success('Post removed from results', {
+        id: `dismiss-${post.id}`,
+        duration: 6000,
+        action: {
+          label: 'Undo',
+          onClick: () => undoDismiss(post),
+        },
+      });
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to remove post'));
+    }
+  };
+
+  const undoDismiss = async (post) => {
+    try {
+      await feedScrollApi.restoreResult(jobId, post.id, ownerEmail);
+      setResults((prev) => {
+        if (prev.some((r) => r.id === post.id)) return prev;
+        return [...prev, post];
+      });
+      toast.dismiss(`dismiss-${post.id}`);
+    } catch {
+      toast.error('Could not restore that post');
+    }
+  };
+
   const handleDelete = async () => {
     if (!job?.id) return;
     setDeleteLoading(true);
@@ -376,6 +409,7 @@ export default function FeedScrollResultsPage() {
               ownerEmail={ownerEmail}
               savedState={savedStateFor(post)}
               onSavedToFeedLeads={loadFeedLeads}
+              onDismiss={handleDismiss}
             />
           ))}
         </div>

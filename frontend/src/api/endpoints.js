@@ -95,6 +95,17 @@ export const feedScrollApi = {
     api.post(`/feed-scroll/jobs/${jobId}/activate`, null, { params: { owner_email: ownerEmail } }),
   pauseJob: (jobId, ownerEmail) =>
     api.post(`/feed-scroll/jobs/${jobId}/pause`, null, { params: { owner_email: ownerEmail } }),
+  // Remove a single scanned post from the results view (soft dismiss). The
+  // row stays in the DB so the scanner's de-dup won't bring it back.
+  deleteResult: (jobId, resultId, ownerEmail) =>
+    api.delete(`/feed-scroll/jobs/${jobId}/results/${resultId}`, {
+      params: { owner_email: ownerEmail },
+    }),
+  // Undo a dismiss — bring the post back into the results view.
+  restoreResult: (jobId, resultId, ownerEmail) =>
+    api.post(`/feed-scroll/jobs/${jobId}/results/${resultId}/restore`, null, {
+      params: { owner_email: ownerEmail },
+    }),
   triggerScan: (jobId, ownerEmail) =>
     api.post(`/feed-scroll/jobs/${jobId}/scan`, null, {
       params: { owner_email: ownerEmail },

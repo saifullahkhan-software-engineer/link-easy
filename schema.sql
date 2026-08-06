@@ -258,6 +258,7 @@ CREATE TABLE public.feed_scroll_results (
     score double precision DEFAULT 0 NOT NULL,
     matched_terms json,
     scan_batch_id character varying NOT NULL,
+    dismissed_at timestamp with time zone,
     scanned_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
