@@ -2,7 +2,7 @@
 
 ## Summary
 
-The feed scrolling automation flow has been fully implemented. This feature allows users to automatically scan the LinkedIn feed, score posts based on custom criteria, and view the top 15 most relevant posts.
+The feed scrolling automation flow has been fully implemented. This feature allows users to automatically scan the LinkedIn feed, score posts based on custom criteria, and view the top 20 most relevant posts.
 
 ## What Was Implemented
 
@@ -29,7 +29,8 @@ The feed scrolling automation flow has been fully implemented. This feature allo
 - **`automation/actions/feed_scroll.py`** - Feed scrolling and post extraction
   - Navigates to LinkedIn feed
   - Scrolls naturally using human-like behavior
-  - Extracts post content (text, author, URN, URL)
+  - Extracts post content plus the author profile URL and post URL
+  - Only accepts cards with both resolvable LinkedIn links
   - Collects 20-30 posts per scan
 
 #### 5. Celery Task
@@ -38,7 +39,7 @@ The feed scrolling automation flow has been fully implemented. This feature allo
   - Verifies LinkedIn session
   - Scrolls feed and collects posts
   - Scores posts using regex engine
-  - Stores top 15 results in database
+  - Stores top 20 results in database
   - Self-schedules next scan based on interval
 
 #### 6. API Endpoints
@@ -71,7 +72,7 @@ The feed scrolling automation flow has been fully implemented. This feature allo
 #### 3. Pages
 - **`frontend/src/pages/FeedScrollJobsPage.jsx`** - Lists all feed scroll jobs
 - **`frontend/src/pages/FeedScrollCreatePage.jsx`** - Create job form with mode toggle
-- **`frontend/src/pages/FeedScrollResultsPage.jsx`** - View top 15 scored posts
+- **`frontend/src/pages/FeedScrollResultsPage.jsx`** - View top 20 scored posts
 
 #### 4. Navigation
 - **`frontend/src/App.jsx`** - Added routes for feed scroll pages
@@ -85,7 +86,8 @@ The feed scrolling automation flow has been fully implemented. This feature allo
    - Experience interval (e.g., 2-3 years)
    - Job titles (e.g., Software Engineer, Python Developer)
    - Skill set (e.g., Database Design, Development)
-   - Weighted scoring across all criteria
+   - Optional keywords / extra terms (e.g., remote, SaaS, hiring urgently)
+   - Weighted scoring across all criteria; keyword matches contribute an additional 15-point signal
 
 2. **Post Search Mode**
    - Freeform keywords/topics
@@ -105,10 +107,10 @@ The feed scrolling automation flow has been fully implemented. This feature allo
 - Future-ready for AI scorer (ScorerInterface protocol)
 
 ### Results Display
-- Shows top 15 posts per scan
+- Shows top 20 posts per scan
 - Ranked by score (highest first)
 - Displays: rank, author, post text, score, matched terms
-- "View on LinkedIn" link for each post
+- Every result includes a verified author profile URL and post URL
 - Scan history (last scan, next scan times)
 
 ## Usage Flow
@@ -120,7 +122,7 @@ The feed scrolling automation flow has been fully implemented. This feature allo
    - Opens LinkedIn feed in stealth browser
    - Scrolls naturally, collects posts
    - Scores posts against criteria
-   - Stores top 15 in database
+   - Stores top 20 in database
 5. User views results page showing scored posts
 6. User can pause/resume/trigger manual scans
 

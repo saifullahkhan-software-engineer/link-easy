@@ -42,18 +42,20 @@ function getLinkedInPostUrl(post) {
   return '';
 }
 
-// Author's LinkedIn profile URL (absolute).
+// Author's LinkedIn personal or organization profile URL (absolute).
 function getLinkedInProfileUrl(post) {
   const raw = (post?.author_profile_url || '').trim();
   if (!raw) return '';
   if (raw.startsWith('//www.linkedin.com/')) return `https:${raw}`;
   if (raw.startsWith('/')) return `https://www.linkedin.com${raw}`;
   if (raw.startsWith('www.linkedin.com/')) return `https://${raw}`;
-  if (/^https?:\/\/(www\.)?linkedin\.com\/in\//i.test(raw)) return raw.replace(/^http:/i, 'https:');
+  if (/^https?:\/\/(www\.)?linkedin\.com\/(in|company|school|showcase)\//i.test(raw)) {
+    return raw.replace(/^http:/i, 'https:');
+  }
   return '';
 }
 
-// Human-readable profile URL ("linkedin.com/in/jane-doe") shown on the card.
+// Human-readable author/profile URL (for example, "linkedin.com/in/jane-doe") shown on the card.
 function profileUrlDisplay(post) {
   const url = getLinkedInProfileUrl(post);
   if (!url) return '';
@@ -209,9 +211,11 @@ export default function ScoredPostCard({ post, rank }) {
                   href={postUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="ml-auto text-xs text-[#0a66c2]"
+                  title={postUrl}
+                  onClick={stop}
+                  className="ml-auto text-xs font-medium text-[#0a66c2] transition hover:underline"
                 >
-                  Link
+                  Post link
                 </a>
               )}
             </div>

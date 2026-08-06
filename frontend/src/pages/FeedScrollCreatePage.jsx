@@ -25,7 +25,8 @@ export default function FeedScrollCreatePage() {
   const [jobTitles, setJobTitles] = useState([]);
   const [skillSet, setSkillSet] = useState([]);
 
-  // Post Search fields
+  // Keywords work in both modes: as an extra weighted signal for Job Search
+  // and as the primary matching criteria for Post Search.
   const [keywords, setKeywords] = useState([]);
 
   // Pending text inputs (before tag conversion)
@@ -93,8 +94,8 @@ export default function FeedScrollCreatePage() {
     const finalKeywords = combineTags(keywords, pendingKeyword);
 
     if (mode === 'job_search') {
-      if (finalJobTitles.length === 0 && finalSkillSet.length === 0) {
-        toast.error('Please add at least one job title or skill');
+      if (finalJobTitles.length === 0 && finalSkillSet.length === 0 && finalKeywords.length === 0) {
+        toast.error('Please add at least one job title, skill, or keyword');
         return;
       }
     } else {
@@ -110,7 +111,8 @@ export default function FeedScrollCreatePage() {
       owner_email: ownerEmail,
       mode,
       feed_interval_hours: intervalHours,
-      posts_per_scan: 15,
+      // Every scan retains up to the 20 highest-scoring verified posts.
+      posts_per_scan: 20,
     };
 
     if (mode === 'job_search') {
@@ -118,6 +120,7 @@ export default function FeedScrollCreatePage() {
       payload.experience_max_years = experienceMax ? parseInt(experienceMax) : null;
       payload.job_titles = finalJobTitles;
       payload.skill_set = finalSkillSet;
+      payload.keywords = finalKeywords;
     } else {
       payload.keywords = finalKeywords;
     }
@@ -267,6 +270,25 @@ export default function FeedScrollCreatePage() {
                 onPendingChange={setPendingSkill}
                 placeholder="Type or paste skills (separated by commas or Enter)..."
               />
+            </div>
+
+            {/* Keywords */}
+            <div>
+              <label className="mb-1.5 flex items-center gap-2 text-sm font-medium text-zinc-300">
+                Keywords / Extra Terms
+                <span className="rounded bg-surface-700 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+                  Optional
+                </span>
+              </label>
+              <TagInput
+                tags={keywords}
+                onChange={setKeywords}
+                onPendingChange={setPendingKeyword}
+                placeholder="e.g., remote, SaaS, hiring urgently (comma-separated or Enter)..."
+              />
+              <p className="mt-1 text-xs text-zinc-500">
+                Add terms that make the job search more precise. Keyword matches add an extra relevance signal alongside titles, skills, and experience.
+              </p>
             </div>
           </div>
         )}

@@ -9,7 +9,6 @@ import random
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from celery import shared_task
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -22,12 +21,18 @@ from automation.browser import launch_persistent_browser
 from automation.session import verify_session, LinkedInSessionStatus
 from automation.actions.feed_scroll import (
     scroll_feed_and_collect,
-    _normalise_post_url,
     _post_identity_key,
+    _resolve_result_urls,
 )
 from automation.scoring.feed_scorer import score_post
 from core.logging_config import should_log_debug, should_take_screenshots
-from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus
+from models.feed_scroll_job import (
+    DEFAULT_POSTS_PER_SCAN,
+    MAX_POSTS_PER_SCAN,
+    FeedScrollJob,
+    FeedScrollJobStatus,
+)
+from models.feed_scroll_result import FeedScrollResult
 
 # Force diagnostic screenshots during feed scroll scans (very helpful for debugging)
 FORCE_FEED_SCREENSHOTS = True
@@ -35,14 +40,14 @@ FORCE_FEED_SCREENSHOTS = True
 # Every scan looks for 20-30 posts in the feed...
 COLLECT_MIN_POSTS = 20
 COLLECT_MAX_POSTS = 30
-# ...but only the top 15 scored posts are ever kept per job.
-MAX_POSTS_KEPT = 15
+# ...but only the top twenty scored posts are ever kept per job.
+MAX_POSTS_KEPT = MAX_POSTS_PER_SCAN
 
 
 def _should_screenshot() -> bool:
     """Force screenshots for feed scroll debugging."""
     return FORCE_FEED_SCREENSHOTS or should_take_screenshots()
-from models.feed_scroll_result import FeedScrollResult
+
 
 logger = get_logger(__name__)
 
@@ -104,8 +109,11 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
 
         account_email = job.account_email
         # A job may request fewer, but never more than MAX_POSTS_KEPT — every
-        # scan keeps only the top 15 scored posts.
-        keep_limit = min(job.posts_per_scan or MAX_POSTS_KEPT, MAX_POSTS_KEPT)
+        # scan keeps up to the top twenty scored posts.
+        keep_limit = max(
+            1,
+            min(job.posts_per_scan or DEFAULT_POSTS_PER_SCAN, MAX_POSTS_KEPT),
+        )
 
     # Run the async browser automation
     try:
@@ -190,22 +198,27 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
 
         top_posts = []
         skipped_existing = 0
-        skipped_no_link = 0
+        skipped_missing_urls = 0
         for post_data in unique_relevant_posts:
-            # Every stored post must be clickable: normalise any relative/URN
-            # link into an absolute URL, and drop posts with no resolvable link.
-            post_url = _normalise_post_url(
-                post_data.get("post_url"), post_data.get("post_urn")
+            # Every stored result must include both outbound LinkedIn links.
+            # Re-validate here even though extraction does it too: workers may
+            # receive posts from a future collector or a retry with partial data.
+            resolved_urls = _resolve_result_urls(
+                post_data.get("post_url"),
+                post_data.get("post_urn"),
+                post_data.get("author_profile_url"),
             )
-            if not post_url:
-                skipped_no_link += 1
+            if not resolved_urls:
+                skipped_missing_urls += 1
                 if should_log_debug():
                     logger.debug(
-                        "Skipping post without a resolvable LinkedIn URL: %s",
+                        "Skipping post without both resolvable LinkedIn URLs: %s",
                         post_data.get("post_urn"),
                     )
                 continue
+            post_url, author_profile_url = resolved_urls
             post_data["post_url"] = post_url
+            post_data["author_profile_url"] = author_profile_url
 
             key = _post_identity_key(
                 post_data.get("post_urn"), post_url,
@@ -222,8 +235,8 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             f"🏆 Top {len(top_posts)} new unique posts after scoring "
             f"(from {len(raw_posts)} raw, {len(scored_posts)} scored, "
             f"{len(relevant_posts)} with score > 1, "
-            f"{len(unique_relevant_posts)} unique, {skipped_no_link} without a "
-            f"post link, {skipped_existing} already stored). "
+            f"{len(unique_relevant_posts)} unique, {skipped_missing_urls} without "
+            f"both post/profile links, {skipped_existing} already stored). "
             f"Highest score: {top_posts[0]['score'] if top_posts else 0}"
         )
 
@@ -333,7 +346,7 @@ async def _run_feed_scroll_async(account_email: str, keep_limit: int, job) -> di
                         pass
 
                     # Scroll feed and collect 20-30 posts per scan; the scorer
-                    # keeps only the top 15 afterwards.
+                    # keeps up to the top 20 after ranking them.
                     posts = await scroll_feed_and_collect(
                         page,
                         target_posts=random.randint(COLLECT_MIN_POSTS, COLLECT_MAX_POSTS),

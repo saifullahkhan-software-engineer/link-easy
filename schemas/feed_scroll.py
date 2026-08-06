@@ -5,9 +5,14 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from models.feed_scroll_job import FeedScrollMode, FeedScrollJobStatus
+from models.feed_scroll_job import (
+    DEFAULT_POSTS_PER_SCAN,
+    MAX_POSTS_PER_SCAN,
+    FeedScrollMode,
+    FeedScrollJobStatus,
+)
 
 
 def normalize_tags(v: Any) -> Optional[list[str]]:
@@ -43,19 +48,40 @@ class FeedScrollJobCreate(BaseModel):
     experience_max_years: Optional[int] = Field(None, ge=0)
     job_titles: Optional[list[str]] = None
     skill_set: Optional[list[str]] = None
-
-    # Post Search criteria
+    # Keywords strengthen a job search as a separate, weighted signal.  They
+    # remain the sole criterion for post_search mode.
     keywords: Optional[list[str]] = None
 
     # Scheduling
     feed_interval_hours: int = Field(1, ge=1, le=24)
-    # How many top scored posts to keep per scan (capped at 15 in the worker)
-    posts_per_scan: int = Field(15, ge=1, le=15)
+    # Keep up to the twenty highest-scoring posts from a scan.
+    posts_per_scan: int = Field(
+        DEFAULT_POSTS_PER_SCAN, ge=1, le=MAX_POSTS_PER_SCAN
+    )
 
     @field_validator("job_titles", "skill_set", "keywords", mode="before")
     @classmethod
     def clean_tag_fields(cls, v: Any) -> Optional[list[str]]:
         return normalize_tags(v)
+
+    @model_validator(mode="after")
+    def validate_search_criteria(self) -> "FeedScrollJobCreate":
+        """Require at least one useful criterion in either search mode."""
+        if self.mode == FeedScrollMode.JOB_SEARCH:
+            if not any((self.job_titles, self.skill_set, self.keywords)):
+                raise ValueError(
+                    "Job search requires at least one job title, skill, or keyword"
+                )
+        elif not self.keywords:
+            raise ValueError("Post search requires at least one keyword")
+
+        if (
+            self.experience_min_years is not None
+            and self.experience_max_years is not None
+            and self.experience_min_years > self.experience_max_years
+        ):
+            raise ValueError("Minimum experience cannot exceed maximum experience")
+        return self
 
 
 class FeedScrollJobUpdate(BaseModel):
@@ -68,7 +94,7 @@ class FeedScrollJobUpdate(BaseModel):
     skill_set: Optional[list[str]] = None
     keywords: Optional[list[str]] = None
     feed_interval_hours: Optional[int] = Field(None, ge=1, le=24)
-    posts_per_scan: Optional[int] = Field(None, ge=1, le=15)
+    posts_per_scan: Optional[int] = Field(None, ge=1, le=MAX_POSTS_PER_SCAN)
 
     @field_validator("job_titles", "skill_set", "keywords", mode="before")
     @classmethod
@@ -102,18 +128,18 @@ class FeedScrollJobResponse(BaseModel):
 class FeedScrollResultResponse(BaseModel):
     """Single scored post returned to the client.
 
-    Every surfaced post is guaranteed to carry a clickable ``post_url``; the
-    author details (first/last name and profile URL) come from the feed card
-    and are used by the results page listing.
+    Every surfaced post is guaranteed to carry both a clickable ``post_url``
+    and the author's clickable ``author_profile_url``.  Rows missing either
+    URL are filtered before this response is built.
     """
     id: str
     feed_scroll_job_id: str
     post_urn: Optional[str]
-    post_url: Optional[str]
+    post_url: str
     author_name: Optional[str]
     author_first_name: Optional[str]
     author_last_name: Optional[str]
-    author_profile_url: Optional[str]
+    author_profile_url: str
     connection_degree: Optional[str]
     post_time: Optional[str]
     post_text: Optional[str]

@@ -7,9 +7,16 @@ It stores the user's feed scanning configuration: mode (job_search or post_searc
 search criteria, and scheduling interval.
 """
 import enum
-from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text, JSON
+from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Integer, String, JSON
 from sqlalchemy.sql import func
 from database import Base
+
+
+# Feed scans retain at most twenty ranked posts.  These constants are shared by
+# the model, API schema, and worker so a new limit cannot silently drift between
+# the UI and background task.
+DEFAULT_POSTS_PER_SCAN = 20
+MAX_POSTS_PER_SCAN = 20
 
 
 class FeedScrollMode(str, enum.Enum):
@@ -43,14 +50,18 @@ class FeedScrollJob(Base):
     experience_max_years = Column(Integer, nullable=True)
     job_titles = Column(JSON, nullable=True)    # ["Software Engineer", "Python Developer"]
     skill_set = Column(JSON, nullable=True)      # ["database design", "development"]
-
-    # ── Post Search criteria ──
-    keywords = Column(JSON, nullable=True)       # ["AI", "machine learning"]
+    # Shared keyword terms: extra job-search precision or post-search topics.
+    keywords = Column(JSON, nullable=True)       # ["remote", "SaaS", "hiring urgently"]
 
     # ── Scheduling ──
     feed_interval_hours = Column(Integer, nullable=False, default=1)
-    # How many top scored posts to keep per scan (worker caps this at 15)
-    posts_per_scan = Column(Integer, nullable=False, default=15)
+    # Keep up to the twenty highest-scoring posts from each scan.
+    posts_per_scan = Column(
+        Integer,
+        nullable=False,
+        default=DEFAULT_POSTS_PER_SCAN,
+        server_default=str(DEFAULT_POSTS_PER_SCAN),
+    )
 
     # ── Timestamps ──
     last_scanned_at = Column(DateTime(timezone=True), nullable=True)

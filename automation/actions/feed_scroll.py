@@ -413,10 +413,11 @@ def _extract_post_time(text: str | None) -> str | None:
 def _normalise_profile_url(href: str | None) -> str | None:
     """Return an absolute LinkedIn profile URL from any href shape we store.
 
-    Accepts relative (``/in/...``), protocol-relative (``//www.linkedin.com/
-    in/...``), plain-domain (``www.linkedin.com/in/...``) and absolute forms,
-    and strips tracking query strings (``miniProfileUrn``, ``trk``, ...).
-    Returns ``None`` for anything that is not a LinkedIn profile link.
+    Accepts personal and organization profile paths (``/in/...``,
+    ``/company/...``, ``/school/...``, or ``/showcase/...``), relative,
+    protocol-relative, plain-domain, and absolute forms.  Tracking query
+    strings (``miniProfileUrn``, ``trk``, ...) are stripped.  Returns ``None``
+    for anything that is not a LinkedIn profile link.
     """
     cleaned = (href or "").strip()
     if not cleaned:
@@ -429,16 +430,37 @@ def _normalise_profile_url(href: str | None) -> str | None:
     elif cleaned.startswith("www.linkedin.com/"):
         cleaned = f"https://{cleaned}"
 
-    if re.match(r"^https?://(www\.)?linkedin\.com/in/[^/?#]+/?$", cleaned):
+    if re.match(
+        r"^https?://(www\.)?linkedin\.com/(?:in|company|school|showcase)/[^/?#]+/?$",
+        cleaned,
+    ):
         return cleaned.replace("http://", "https://", 1)
     return None
+
+
+def _resolve_result_urls(
+    post_url: str | None,
+    post_urn: str | None,
+    author_profile_url: str | None,
+) -> tuple[str, str] | None:
+    """Resolve the two LinkedIn links required for a surfaced result.
+
+    A card is useful only when someone can open both the matching post and its
+    author's profile.  Centralising the invariant lets extraction, persistence,
+    and API reads apply the exact same URL validation and normalization rules.
+    """
+    resolved_post_url = _normalise_post_url(post_url, post_urn)
+    resolved_profile_url = _normalise_profile_url(author_profile_url)
+    if not resolved_post_url or not resolved_profile_url:
+        return None
+    return resolved_post_url, resolved_profile_url
 
 
 def _looks_like_person_name(text: str | None) -> bool:
     """True when ``text`` is plausibly a single person's display name.
 
     LinkedIn's actor anchor exposes the author name as its visible text and/or
-    in an aria-label, but the same card also carries ``/in/`` links for
+    in an aria-label, but the same card also carries profile links for
     engagement aggregates ("Muhammad … and 38 others"), the reposter and the
     viewer.  This filter keeps only tokens that read like a name so the post's
     actual author is chosen rather than a bystander.
@@ -488,10 +510,11 @@ def _name_from_aria(aria: str | None) -> str | None:
 def _author_from_anchors(anchors: list[dict]) -> tuple[str | None, str | None]:
     """Choose the post author's ``(name, profile_url)`` from a card's anchors.
 
-    On LinkedIn's CSS-modules feed the author is an ``<a href="/in/...">`` whose
-    visible text (or aria-label) is the display name.  Reposts and engagement
-    aggregates expose their own ``/in/`` links too, so candidates are filtered
-    to anchors whose name reads like a person, and the LAST such candidate is
+    On LinkedIn's CSS-modules feed the author is usually an ``<a>`` with a
+    personal or organization profile href whose visible text (or aria-label) is
+    the display name.  Reposts and engagement aggregates expose their own
+    profile links too, so candidates are filtered to anchors whose name reads
+    like a person, and the LAST such candidate is
     preferred: on a repost the original author follows the "reposted this"
     notice, while on a normal card there is only one author.
     """
@@ -604,9 +627,9 @@ async def scroll_feed_and_collect(
     Returns:
         List of dicts with keys: post_urn, post_url, author_name,
         author_first_name, author_last_name, author_profile_url,
-        connection_degree, post_time, post_text.  Every returned post has a
-        non-empty ``post_url`` (posts without a resolvable LinkedIn link are
-        skipped).
+        connection_degree, post_time, post_text.  Every returned post has both
+        a non-empty ``post_url`` and ``author_profile_url``; cards without both
+        resolvable LinkedIn links are skipped.
     """
     collected_posts = []
     seen_urns = set()
@@ -923,8 +946,8 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
 
     Returns list of dicts with: post_urn, post_url, author_name,
     author_first_name, author_last_name, author_profile_url, connection_degree,
-    post_time, post_text.  Cards without a resolvable post link are skipped so
-    every collected post is clickable in the UI.
+    post_time, post_text.  Cards without both a resolvable post link and author
+    profile link are skipped so every collected result has two clickable URLs.
     """
     posts = []
     local_seen_keys = set()
@@ -1002,14 +1025,23 @@ async def _extract_visible_posts(page: Page, seen_urns: set) -> list[dict]:
             if not post_urn:
                 continue
 
-            # Build post URL (prefer the real permalink href)
+            # Resolve both outbound URLs before accepting the card.  The result
+            # screen intentionally surfaces only posts where users can open the
+            # actual LinkedIn post *and* the author's LinkedIn profile.
             post_url = await _get_post_url(element, post_urn, anchors)
-            if not post_url:
-                # Every post shown in the UI must be clickable — skip cards for
-                # which no LinkedIn post link could be resolved.
+            resolved_urls = _resolve_result_urls(
+                post_url, post_urn, author_profile_url
+            )
+            if not resolved_urls:
                 if should_log_debug():
-                    logger.debug(f"Post {idx}: no post URL found (urn={post_urn}), skipping")
+                    logger.debug(
+                        "Post %s: missing a resolvable post or author profile URL "
+                        "(urn=%s), skipping",
+                        idx,
+                        post_urn,
+                    )
                 continue
+            post_url, author_profile_url = resolved_urls
             identity = _post_identity_key(post_urn, post_url, author_name, post_text)
             if post_urn in seen_urns or identity in seen_urns or identity in local_seen_keys:
                 continue
@@ -1250,9 +1282,13 @@ async def _get_author_name(element, anchors: list[dict] | None = None) -> str | 
             except Exception:
                 continue
 
-        # Last-ditch: look for any prominent link near top
+        # Last-ditch: look for any prominent personal or organization profile
+        # link near the top of the card.
         try:
-            links = await element.query_selector_all("a[href*='/in/']")
+            links = await element.query_selector_all(
+                "a[href*='/in/'], a[href*='/company/'], a[href*='/school/'], "
+                "a[href*='/showcase/']"
+            )
             for link in links[:2]:
                 txt = await link.inner_text()
                 if txt and len(txt.strip()) > 2 and len(txt.strip()) < 60:
@@ -1281,15 +1317,32 @@ async def _get_author_profile_url(element, anchors: list[dict] | None = None) ->
     if url:
         return url
 
-    # Legacy fallback.
+    # Avatar-only actor links sometimes have no visible text or aria-label, so
+    # they do not qualify as an author-name candidate above.  If the card has
+    # exactly one valid profile URL, it is still safe to keep it rather than
+    # throwing away an otherwise complete post.
+    profile_urls = []
+    for anchor in anchors or []:
+        candidate = _normalise_profile_url(anchor.get("href"))
+        if candidate and candidate not in profile_urls:
+            profile_urls.append(candidate)
+    if len(profile_urls) == 1:
+        return profile_urls[0]
+
+    # Legacy fallback.  Check every plausible actor link instead of accepting
+    # only the first selector match (which can be a wrapper with no href on
+    # some older feed variants).
     try:
-        link = await element.query_selector(
-            "a[href*='/in/'], a[href*='linkedin.com/in/'], "
+        links = await element.query_selector_all(
+            "a[href*='/in/'], a[href*='/company/'], a[href*='/school/'], "
+            "a[href*='/showcase/'], a[href*='linkedin.com/in/'], "
             "a[data-control-name='actor_container'], a[href*='miniProfileUrn']"
         )
-        if link:
+        for link in links:
             href = await link.get_attribute("href")
-            return _normalise_profile_url(href)
+            candidate = _normalise_profile_url(href)
+            if candidate:
+                return candidate
     except Exception:
         pass
     return None

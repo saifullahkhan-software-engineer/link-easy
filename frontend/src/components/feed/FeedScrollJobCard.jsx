@@ -110,6 +110,11 @@ export default function FeedScrollJobCard({ job, onPause, onResume, onDelete }) 
               {skill}
             </span>
           ))}
+          {job.keywords?.slice(0, 3).map((keyword) => (
+            <span key={keyword} className="rounded bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
+              Keyword: {keyword}
+            </span>
+          ))}
         </div>
       )}
     </div>
