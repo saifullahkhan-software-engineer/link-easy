@@ -32,10 +32,22 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run database initializations on startup, start background tasks."""
+    """Run database initializations on startup, start background tasks.
+
+    Every startup step is wrapped so that the *reason* for a shutdown is
+    always visible in the logs.  Previously an exception inside
+    ``init_db`` / ``run_migrations`` would bubble out of the lifespan and
+    Uvicorn would simply stop the server after the Alembic
+    ``Will assume transactional DDL.`` line — leaving the user with no
+    traceback and the impression that the service “shut itself down”.
+    """
     # Fail loudly at startup if the credential encryption key is missing or
     # malformed — a config mistake must not silently corrupt/expose secrets.
-    validate_encryption_key()
+    try:
+        validate_encryption_key()
+    except Exception:
+        logger.exception("Startup aborted: CREDENTIAL_ENCRYPTION_KEY is missing or malformed")
+        raise
 
     # Ensure tables exist, then apply pending schema migrations.  This project
     # does not have Alembic revisions for the original/base tables, so a brand
@@ -44,14 +56,46 @@ async def lifespan(app: FastAPI):
     # migrations afterward (e.g. feed_scroll_results.post_url and the feed-scroll
     # tables for older deployments).  Alembic's runner uses asyncio.run(), so
     # execute it in a worker thread from FastAPI's already-running event loop.
-    await init_db()
+    try:
+        await init_db()
+        logger.info("Database init (create_all) completed")
+    except Exception:
+        logger.exception("Startup aborted: init_db() failed — check DATABASE_URL and that Postgres is reachable")
+        raise
+
     logger.info("Running database migrations on startup...")
-    await asyncio.to_thread(run_migrations)
+    try:
+        # run_migrations() internally calls asyncio.run(), which must NOT run
+        # inside the main event loop thread on Windows (ProactorEventLoop).
+        # asyncio.to_thread() moves it to a worker thread where no loop is
+        # running, so asyncio.run() can create its own loop safely.
+        await asyncio.to_thread(run_migrations)
+        logger.info("Database migrations completed")
+    except Exception:
+        # Migrations are idempotent and the base tables already exist via
+        # init_db(), so the API can still serve traffic even if a migration
+        # fails.  Log the full traceback loudly, then re-raise so the
+        # operator notices — or comment out the `raise` to allow degraded
+        # startup.
+        logger.exception(
+            "Database migrations failed — the service will not start. "
+            "Fix the migration error or set SKIP_MIGRATIONS=1 to start without migrating"
+        )
+        raise
+
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)
+    logger.info("Service startup complete — application is ready")
     try:
         yield
     finally:
-        cleanup_task.cancel()
+        logger.info("Shutting down — cancelling periodic cleanup task")
+        try:
+            cleanup_task.cancel()
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Error while cancelling cleanup task")
 
 
 app = FastAPI(title="LinkeFlow Authentication API", lifespan=lifespan)
@@ -98,6 +142,11 @@ async def db_check(
         )
 
 if __name__ == "__main__":
+    import logging
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # Ensure startup errors are always visible, even if the user runs
+    # `python main.py` without --log-level.  Uvicorn's default INFO level
+    # hides lifespan tracebacks; we force it to show them.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")

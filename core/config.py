@@ -11,10 +11,14 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "production"  # "development" or "production"
     # It's crucial to set a strong, secret key in your environment.
     # You can generate one with: openssl rand -hex 32
-    JWT_SECRET: str
+    # Accepts both JWT_SECRET (canonical) and JWT_SECRET_KEY (docker-compose legacy alias)
+    JWT_SECRET: str = ""  # type: ignore
+    JWT_SECRET_KEY: str | None = None  # legacy alias used in docker-compose.yml
     # 32-byte hex key for AES-256-GCM LinkedIn credential encryption.
     # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
-    CREDENTIAL_ENCRYPTION_KEY: str
+    # Accepts both CREDENTIAL_ENCRYPTION_KEY and ENCRYPTION_KEY
+    CREDENTIAL_ENCRYPTION_KEY: str = ""  # type: ignore
+    ENCRYPTION_KEY: str | None = None  # legacy alias
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -25,9 +29,19 @@ class Settings(BaseSettings):
     # Email settings
     RESEND_API_KEY: str
     FROM_EMAIL: str
-    
+
     # Redis settings
     REDIS_URL: str
+
+    @model_validator(mode="after")
+    def _resolve_legacy_aliases(self):
+        # JWT_SECRET <- JWT_SECRET_KEY fallback (docker-compose uses JWT_SECRET_KEY)
+        if not self.JWT_SECRET and self.JWT_SECRET_KEY:
+            self.JWT_SECRET = self.JWT_SECRET_KEY
+        # CREDENTIAL_ENCRYPTION_KEY <- ENCRYPTION_KEY fallback
+        if not self.CREDENTIAL_ENCRYPTION_KEY and self.ENCRYPTION_KEY:
+            self.CREDENTIAL_ENCRYPTION_KEY = self.ENCRYPTION_KEY
+        return self
 
     # Root directory for durable per-account Chromium profile directories.
     # Each LinkedInAccount gets <PROFILE_STORAGE_DIR>/<account.id> as its
