@@ -28,19 +28,15 @@ async def get_db() -> AsyncSession:
         yield session
 
 
-async def get_current_user(
-    auth: HTTPAuthorizationCredentials | None = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db),
+async def get_current_user_from_token(
+    token: str, db: AsyncSession
 ) -> User:
-    """Dependency to get the current authenticated user."""
-    if auth is None or auth.scheme != "Bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    """Validate an access-token string and load the matching user.
 
-    token = auth.credentials
+    Used by the normal ``get_current_user`` dependency and by SSE endpoints,
+    where EventSource cannot send an ``Authorization`` header, so the token
+    arrives as a ``?token=...`` query parameter instead.
+    """
     try:
         payload = jwt.decode(
             token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM]
@@ -60,6 +56,21 @@ async def get_current_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+async def get_current_user(
+    auth: HTTPAuthorizationCredentials | None = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Dependency to get the current authenticated user."""
+    if auth is None or auth.scheme != "Bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return await get_current_user_from_token(auth.credentials, db)
 
 
 def require_roles(allowed_roles: Iterable[UserRole]):

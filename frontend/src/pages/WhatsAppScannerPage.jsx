@@ -4,6 +4,8 @@ import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import TagInput from '../components/feed/TagInput';
 import { Spinner } from '../components/Spinner';
+import BrowserViewPanel from '../components/live/BrowserViewPanel';
+import LiveLogsPanel from '../components/live/LiveLogsPanel';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -289,9 +291,17 @@ export default function WhatsAppScannerPage() {
         </div>
         {status === 'waiting_qr' && (
           <p className="mt-3 text-sm text-yellow-400">
-            A browser window has opened with WhatsApp Web. Scan the QR code with your phone to connect.
+            The browser is open below — scan the WhatsApp Web QR code with your phone to connect.
+            (It streams live from the server; if it isn't showing yet, wait a moment or press Start in
+            the Live Browser View.)
           </p>
         )}
+      </div>
+
+      {/* ── Section 1.5: Live browser view + API logs ─────────────── */}
+      <div className="grid items-stretch gap-6 lg:grid-cols-2">
+        <BrowserViewPanel />
+        <LiveLogsPanel />
       </div>
 
       {/* ── Section 2: Group Selection ──────────────────────────── */}

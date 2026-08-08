@@ -1,9 +1,12 @@
 import asyncio
+import logging
+import time
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from jose import jwt as jose_jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
@@ -18,8 +21,10 @@ from api.v1.feed_leads import router as feed_leads_router
 from api.v1.test_automation import router as test_automation_router
 from api.v1.feed_scroll import router as feed_scroll_router
 from api.v1.whatsapp_scanner import router as whatsapp_scanner_router
+from api.v1.live import router as live_router
 from core.config import settings
 from core.logging_config import get_logger
+from core.live_hub import HubLogHandler, log_hub
 from core.security import validate_encryption_key
 from database import init_db
 from models.roles import UserRole
@@ -84,6 +89,18 @@ async def lifespan(app: FastAPI):
         raise
 
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)
+
+    # Wire application log records into the live log stream (API logs come
+    # from the middleware below).  The handler is attached once; records
+    # bubble up from every module's logger to the root.
+    _hub_handler = HubLogHandler()
+    _hub_handler.bind_loop(asyncio.get_running_loop())
+    logging.getLogger().addHandler(_hub_handler)
+    # uvicorn.error / uvicorn.access are non-propagating, so attach directly
+    # (access logs would duplicate the middleware's api events — skip them).
+    for _name in ("uvicorn", "uvicorn.error"):
+        logging.getLogger(_name).addHandler(_hub_handler)
+
     logger.info("Service startup complete — application is ready")
     try:
         yield
@@ -97,6 +114,30 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Error while cancelling cleanup task")
 
+        # Stop the embedded browser view (if any) so no orphan Chromium lingers.
+        try:
+            from services.browser_view import browser_view
+
+            await browser_view.stop()
+        except Exception:
+            logger.exception("Error while stopping browser view")
+
+
+def _request_user_email(request: Request) -> str | None:
+    """Best-effort email of the caller for the API log stream (no DB hit)."""
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        return None
+    try:
+        payload = jose_jwt.decode(
+            auth[7:].strip(),
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+        return payload.get("sub")
+    except Exception:
+        return None
+
 
 app = FastAPI(title="LinkeFlow Authentication API", lifespan=lifespan)
 
@@ -109,6 +150,36 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def log_api_calls(request: Request, call_next):
+    """Publish every API call to the live log stream.
+
+    Live-stream endpoints are excluded so the log console doesn't feed on
+    itself (the SSE connections stay open indefinitely).
+    """
+    path = request.url.path
+    if path.startswith("/api/v1/live"):
+        return await call_next(request)
+
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+
+    await log_hub.publish(
+        {
+            "type": "api",
+            "level": "INFO",
+            "method": request.method,
+            "path": path,
+            "query": request.url.query[:160] or None,
+            "status": response.status_code,
+            "duration_ms": round(duration_ms, 1),
+            "user": _request_user_email(request),
+        }
+    )
+    return response
+
+
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(linkedin_router)
@@ -118,6 +189,7 @@ app.include_router(feed_leads_router)
 app.include_router(test_automation_router)
 app.include_router(feed_scroll_router)
 app.include_router(whatsapp_scanner_router)
+app.include_router(live_router)
 
 
 @app.get("/")
