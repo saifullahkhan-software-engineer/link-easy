@@ -24,7 +24,6 @@ from api.v1.whatsapp_scanner import router as whatsapp_scanner_router
 from api.v1.live import router as live_router
 from core.config import settings
 from core.logging_config import get_logger
-from core.live_hub import HubLogHandler, log_hub
 from core.security import validate_encryption_key
 from database import init_db
 from models.roles import UserRole
@@ -90,17 +89,6 @@ async def lifespan(app: FastAPI):
 
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)
 
-    # Wire application log records into the live log stream (API logs come
-    # from the middleware below).  The handler is attached once; records
-    # bubble up from every module's logger to the root.
-    _hub_handler = HubLogHandler()
-    _hub_handler.bind_loop(asyncio.get_running_loop())
-    logging.getLogger().addHandler(_hub_handler)
-    # uvicorn.error / uvicorn.access are non-propagating, so attach directly
-    # (access logs would duplicate the middleware's api events — skip them).
-    for _name in ("uvicorn", "uvicorn.error"):
-        logging.getLogger(_name).addHandler(_hub_handler)
-
     logger.info("Service startup complete — application is ready")
     try:
         yield
@@ -152,10 +140,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_api_calls(request: Request, call_next):
-    """Publish every API call to the live log stream.
+    """Log every API call to the terminal (backend logs).
 
-    Live-stream endpoints are excluded so the log console doesn't feed on
-    itself (the SSE connections stay open indefinitely).
+    In production, logs go to the terminal/backend for easy monitoring.
+    Live-stream endpoints are excluded to prevent feedback loops.
     """
     path = request.url.path
     if path.startswith("/api/v1/live"):
@@ -165,17 +153,16 @@ async def log_api_calls(request: Request, call_next):
     response = await call_next(request)
     duration_ms = (time.perf_counter() - start) * 1000
 
-    await log_hub.publish(
-        {
-            "type": "api",
-            "level": "INFO",
-            "method": request.method,
-            "path": path,
-            "query": request.url.query[:160] or None,
-            "status": response.status_code,
-            "duration_ms": round(duration_ms, 1),
-            "user": _request_user_email(request),
-        }
+    # Log to terminal instead of frontend
+    user = _request_user_email(request)
+    logger.info(
+        "API call: %s %s%s -> %d (%s ms)%s",
+        request.method,
+        path,
+        f"?{request.url.query[:160]}" if request.url.query else "",
+        response.status_code,
+        f"{duration_ms:.1f}",
+        f" user={user}" if user else "",
     )
     return response
 

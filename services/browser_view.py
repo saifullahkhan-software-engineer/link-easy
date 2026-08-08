@@ -15,13 +15,16 @@ The old WhatsApp connect flow launched a NON-headless browser with
 ``headless=False`` in the Celery worker.  On a server / container / sandbox
 there is no display, so the "browser window" that the frontend promised never
 appeared anywhere the user could see it — the page just sat there saying
-"A browser window has opened...".
+"A browser window has opened...". 
 
 With this manager the QR code is rendered into the WhatsApp Scanner page
 itself: the browser runs headless, `Page.startScreencast` (CDP) emits JPEG
 frames, and the frontend displays them as a live view the user can click
 and scroll.  A screenshot-polling fallback is used if screencast is
 unsupported in the bundled driver.
+
+Note: The browser is ONLY opened for QR scan and 2FA entry. After successful
+connection, the browser is stopped to free resources. Logs go to terminal.
 """
 import asyncio
 import base64
@@ -29,7 +32,7 @@ import logging
 import time
 from typing import Optional
 
-from core.live_hub import EventHub, log_hub
+from core.live_hub import EventHub
 
 logger = logging.getLogger("browser_view")
 
@@ -267,16 +270,13 @@ class BrowserViewManager:
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self.events.publish(event))
-            loop.create_task(
-                log_hub.publish(
-                    {
-                        "type": "app",
-                        "level": "INFO",
-                        "logger": "browser_view",
-                        "message": message,
-                    }
-                )
-            )
+            # Log to terminal instead of frontend
+            level = logging.INFO
+            if status == "error":
+                level = logging.ERROR
+            elif status == "starting":
+                level = logging.INFO
+            logger.log(level, message)
         except RuntimeError:
             pass
 
