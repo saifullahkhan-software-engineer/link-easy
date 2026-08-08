@@ -99,6 +99,7 @@ class FeedScrollJobUpdate(BaseModel):
     keywords: Optional[list[str]] = None
     feed_interval_hours: Optional[int] = Field(None, ge=1, le=24)
     posts_per_scan: Optional[int] = Field(None, ge=1, le=MAX_POSTS_PER_SCAN)
+    remaining_seconds: Optional[int] = None
 
     @field_validator("job_titles", "skill_set", "keywords", mode="before")
     @classmethod
@@ -121,6 +122,7 @@ class FeedScrollJobResponse(BaseModel):
     keywords: Optional[list[str]]
     feed_interval_hours: int
     posts_per_scan: int
+    remaining_seconds: Optional[int] = None
     last_scanned_at: Optional[datetime]
     next_scan_at: Optional[datetime]
     created_at: datetime

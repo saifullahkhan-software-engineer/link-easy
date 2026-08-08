@@ -230,6 +230,7 @@ CREATE TABLE public.feed_scroll_jobs (
     keywords json,
     feed_interval_hours integer DEFAULT 1 NOT NULL,
     posts_per_scan integer DEFAULT 20 NOT NULL,
+    remaining_seconds integer,
     last_scanned_at timestamp with time zone,
     next_scan_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,

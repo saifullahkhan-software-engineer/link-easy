@@ -1,27 +1,67 @@
 import { Link } from 'react-router-dom';
 import ScoreBadge from './ScoreBadge';
 
-export default function FeedScrollJobCard({ job, onPause, onResume, onDelete }) {
+export function formatLastScanned(dateStr, now = Date.now()) {
+  if (!dateStr) return 'Never';
+  const date = new Date(dateStr);
+  const diffMs = now - date.getTime();
+  if (diffMs < 0) return 'Just now';
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${diffDays}d ago`;
+}
+
+export function formatScanRemaining(nextScanAt, now = Date.now()) {
+  if (!nextScanAt) return null;
+  const nextAt = Date.parse(nextScanAt);
+  if (!Number.isFinite(nextAt)) return null;
+  const diffMs = nextAt - now;
+  const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
+  if (totalSeconds === 0) return 'Due now';
+
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) return `in ${days}d ${hours}h ${minutes}m ${seconds}s`;
+  if (hours > 0) return `in ${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `in ${minutes}m ${seconds}s`;
+  return `in ${seconds}s`;
+}
+
+export function formatRemainingSeconds(totalSeconds) {
+  if (totalSeconds == null || totalSeconds < 0) return null;
+  if (totalSeconds === 0) return '0s';
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+export default function FeedScrollJobCard({ job, now = Date.now(), onPause, onResume, onDelete }) {
   const statusColor = {
     active: 'text-green-400 bg-green-500/10 ring-green-500/20',
     paused: 'text-yellow-400 bg-yellow-500/10 ring-yellow-500/20',
     draft: 'text-zinc-400 bg-zinc-500/10 ring-zinc-500/20',
   };
 
-  const formatDate = (dateStr) => {
-    if (!dateStr) return 'Never';
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now - date;
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    return `${diffDays}d ago`;
-  };
+  const pausedRemaining =
+    job.remaining_seconds != null
+      ? job.remaining_seconds
+      : job.next_scan_at
+      ? Math.max(0, Math.floor((new Date(job.next_scan_at).getTime() - now) / 1000))
+      : null;
 
   return (
     <div className="rounded-xl border border-surface-700 bg-surface-800 p-5 transition hover:border-surface-600">
@@ -43,12 +83,25 @@ export default function FeedScrollJobCard({ job, onPause, onResume, onDelete }) 
             <span className="text-sm text-zinc-400">Interval: {job.feed_interval_hours}h</span>
           </div>
 
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-zinc-500">
-            <span>Last scan: {formatDate(job.last_scanned_at)}</span>
-            {job.next_scan_at && job.status === 'active' && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-500">
+            <span>Last scan: {formatLastScanned(job.last_scanned_at, now)}</span>
+            {job.status === 'active' && job.next_scan_at && (
               <>
                 <span>•</span>
-                <span>Next scan: {formatDate(job.next_scan_at)}</span>
+                <span>
+                  Next scan:{' '}
+                  <span className="font-mono font-medium text-emerald-400">
+                    {formatScanRemaining(job.next_scan_at, now)}
+                  </span>
+                </span>
+              </>
+            )}
+            {job.status === 'paused' && pausedRemaining != null && (
+              <>
+                <span>•</span>
+                <span className="font-mono text-yellow-400">
+                  Next scan: Paused ({formatRemainingSeconds(pausedRemaining)} remaining)
+                </span>
               </>
             )}
           </div>

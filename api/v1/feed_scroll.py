@@ -14,7 +14,7 @@ GET    /api/v1/feed-scroll/jobs/{id}/results — get scored posts for a job
 POST   /api/v1/feed-scroll/jobs/{id}/scan    — trigger immediate manual scan
 """
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -465,7 +465,12 @@ async def activate_feed_scroll_job(
     owner_email: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Activate a feed scroll job and schedule the first scan."""
+    """Activate or resume a feed scroll job.
+
+    If the job was paused with remaining time, resumes the remaining countdown
+    from now so the remaining time starts dropping again from the time difference.
+    Otherwise schedules the first scan.
+    """
     from worker.celery_app import celery_app
 
     result = await db.execute(
@@ -481,15 +486,23 @@ async def activate_feed_scroll_job(
     if job.status == FeedScrollJobStatus.ACTIVE:
         raise HTTPException(status_code=409, detail="Job is already active")
 
+    now = datetime.now(timezone.utc)
     job.status = FeedScrollJobStatus.ACTIVE
-    job.next_scan_at = datetime.now(timezone.utc)
 
-    # Schedule first scan immediately
-    celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=10)
-
-    await db.commit()
-
-    return {"message": f"Job '{job.name}' activated. First scan starting..."}
+    if job.remaining_seconds is not None and job.remaining_seconds > 0:
+        delay_seconds = job.remaining_seconds
+        job.next_scan_at = now + timedelta(seconds=delay_seconds)
+        job.remaining_seconds = None
+        celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=max(5, delay_seconds))
+        await db.commit()
+        return {"message": f"Job '{job.name}' resumed. Next scan in {delay_seconds} seconds."}
+    else:
+        job.remaining_seconds = None
+        job.next_scan_at = now + timedelta(seconds=10)
+        # Schedule first scan immediately
+        celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=10)
+        await db.commit()
+        return {"message": f"Job '{job.name}' activated. First scan starting..."}
 
 
 @router.post("/jobs/{job_id}/pause", status_code=200)
@@ -498,7 +511,7 @@ async def pause_feed_scroll_job(
     owner_email: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Pause an active feed scroll job."""
+    """Pause an active feed scroll job and preserve remaining scan time."""
     result = await db.execute(
         select(FeedScrollJob).where(
             FeedScrollJob.id == job_id,
@@ -512,7 +525,17 @@ async def pause_feed_scroll_job(
     if job.status != FeedScrollJobStatus.ACTIVE:
         raise HTTPException(status_code=400, detail="Job is not active")
 
+    now = datetime.now(timezone.utc)
+    if job.next_scan_at:
+        next_at = job.next_scan_at if job.next_scan_at.tzinfo else job.next_scan_at.replace(tzinfo=timezone.utc)
+        if next_at > now:
+            job.remaining_seconds = max(0, int((next_at - now).total_seconds()))
+        else:
+            job.remaining_seconds = 0
+    else:
+        job.remaining_seconds = job.feed_interval_hours * 3600
+
     job.status = FeedScrollJobStatus.PAUSED
     await db.commit()
 
-    return {"message": f"Job '{job.name}' paused"}
+    return {"message": f"Job '{job.name}' paused", "remaining_seconds": job.remaining_seconds}

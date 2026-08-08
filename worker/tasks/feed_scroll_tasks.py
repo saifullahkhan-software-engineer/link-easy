@@ -272,6 +272,7 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
         job.last_scanned_at = scan_time
         next_scan = scan_time + timedelta(hours=job.feed_interval_hours)
         job.next_scan_at = next_scan
+        job.remaining_seconds = None
 
         logger.info(
             f"✅ Feed scan complete for job {feed_scroll_job_id}: "
@@ -281,6 +282,37 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
         # Schedule next scan
         if job.status == FeedScrollJobStatus.ACTIVE:
             _schedule_next_scan(job.id, job.feed_interval_hours)
+
+
+@celery_app.task(name="tasks.dispatch_due_feed_scans")
+def dispatch_due_feed_scans():
+    """Queue feed scroll scans whose due time (next_scan_at) has arrived.
+
+    Run periodically by Celery Beat so that if the worker or application
+    was closed/restarted, overdue scans are dispatched reliably without
+    relying solely on in-memory Celery timers.
+    """
+    now = datetime.now(timezone.utc)
+    with get_sync_db() as db:
+        due_jobs = (
+            db.query(FeedScrollJob)
+            .filter(
+                FeedScrollJob.status == FeedScrollJobStatus.ACTIVE,
+                FeedScrollJob.next_scan_at != None,
+                FeedScrollJob.next_scan_at <= now,
+            )
+            .all()
+        )
+        job_ids = [j.id for j in due_jobs]
+
+    dispatched = 0
+    for job_id in job_ids:
+        celery_app.send_task("tasks.run_feed_scroll", args=[job_id])
+        dispatched += 1
+
+    if dispatched:
+        logger.info(f"📅 Dispatched {dispatched} due feed scroll scan(s)")
+    return {"scans_dispatched": dispatched}
 
 
 async def _run_feed_scroll_async(account_email: str, keep_limit: int, job) -> dict:

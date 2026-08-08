@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { feedLeadsApi, feedScrollApi } from '../api/endpoints';
 import { getUserEmail, getErrorMessage } from '../api/client';
 import ScoredPostCard, { personalProfileUrl } from '../components/feed/ScoredPostCard';
+import {
+  formatLastScanned,
+  formatScanRemaining,
+  formatRemainingSeconds,
+} from '../components/feed/FeedScrollJobCard';
 import { isSessionSaved } from '../components/feed/AddToLeadButton';
 import Modal from '../components/Modal';
 import { Spinner } from '../components/Spinner';
@@ -20,6 +25,8 @@ export default function FeedScrollResultsPage() {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [sortBy, setSortBy] = useState('score'); // 'score' | 'latest'
+  const [now, setNow] = useState(Date.now());
+  const tickRef = useRef(null);
 
   // Feed Leads state: which lists exist (for the save popover) and which
   // profiles of this scan are already staged/consumed (for the button state).
@@ -29,6 +36,16 @@ export default function FeedScrollResultsPage() {
   useEffect(() => {
     loadData();
   }, [jobId]);
+
+  /* Live 1-second tick for scan remaining countdown */
+  useEffect(() => {
+    clearInterval(tickRef.current);
+    if ((job?.status === 'active' && job?.next_scan_at) || job?.status === 'paused') {
+      setNow(Date.now());
+      tickRef.current = setInterval(() => setNow(Date.now()), 1000);
+    }
+    return () => clearInterval(tickRef.current);
+  }, [job]);
 
   // Server-known state so a page reload (or a re-scan surfacing the same post)
   // still shows "Added ✓" instead of an addable button.
@@ -294,13 +311,24 @@ export default function FeedScrollResultsPage() {
 
       {/* Scan info */}
       <div className="mb-4 rounded-lg border border-surface-700 bg-surface-800 p-3">
-        <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
           <span className="text-zinc-400">
-            Last scan: {job.last_scanned_at ? new Date(job.last_scanned_at).toLocaleString() : 'Never'}
+            Last scan: {job.last_scanned_at ? formatLastScanned(job.last_scanned_at, now) : 'Never'}
           </span>
-          {job.next_scan_at && job.status === 'active' && (
+          {job.status === 'active' && job.next_scan_at && (
             <span className="text-zinc-400">
-              Next scan: {new Date(job.next_scan_at).toLocaleString()}
+              Next scan:{' '}
+              <span className="font-mono font-medium text-emerald-400">
+                {formatScanRemaining(job.next_scan_at, now)}
+              </span>
+            </span>
+          )}
+          {job.status === 'paused' && (job.remaining_seconds != null || job.next_scan_at) && (
+            <span className="text-zinc-400">
+              Next scan:{' '}
+              <span className="font-mono text-yellow-400">
+                Paused ({formatRemainingSeconds(job.remaining_seconds ?? Math.max(0, Math.floor((new Date(job.next_scan_at).getTime() - now) / 1000)))} remaining)
+              </span>
             </span>
           )}
         </div>

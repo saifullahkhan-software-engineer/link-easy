@@ -49,6 +49,10 @@ celery_app.conf.update(
             'task': 'tasks.dispatch_due_account_sessions',
             'schedule': 60.0,  # Every minute
         },
+        'dispatch-due-feed-scans': {
+            'task': 'tasks.dispatch_due_feed_scans',
+            'schedule': 60.0,  # Every minute
+        },
         'reconcile-stalled-leads': {
             'task': 'tasks.reconcile_stalled_leads',
             'schedule': 900.0,  # Every 15 minutes (900 seconds)

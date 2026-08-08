@@ -62,6 +62,8 @@ class FeedScrollJob(Base):
         default=DEFAULT_POSTS_PER_SCAN,
         server_default=str(DEFAULT_POSTS_PER_SCAN),
     )
+    # Preserves remaining scan countdown when job is paused or application restarts.
+    remaining_seconds = Column(Integer, nullable=True)
 
     # ── Timestamps ──
     last_scanned_at = Column(DateTime(timezone=True), nullable=True)
