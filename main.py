@@ -17,6 +17,7 @@ from api.v1.feed_leads import router as feed_leads_router
 
 from api.v1.test_automation import router as test_automation_router
 from api.v1.feed_scroll import router as feed_scroll_router
+from api.v1.whatsapp_scanner import router as whatsapp_scanner_router
 from core.config import settings
 from core.logging_config import get_logger
 from core.security import validate_encryption_key
@@ -72,6 +73,7 @@ app.include_router(leads_router)
 app.include_router(feed_leads_router)
 app.include_router(test_automation_router)
 app.include_router(feed_scroll_router)
+app.include_router(whatsapp_scanner_router)
 
 
 @app.get("/")
