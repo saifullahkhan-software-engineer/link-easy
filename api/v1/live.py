@@ -3,7 +3,7 @@ Live browser view + API log streaming.
 
 FILE: api/v1/live.py
 
-GET   /api/v1/live/logs               → SSE stream of API-call + app logs
+GET   /api/v1/live/logs               → SSE stream of app logs (backend terminal is primary)
 GET   /api/v1/live/browser/status     → browser view status (JSON)
 POST  /api/v1/live/browser/start      → start the embedded headless browser
 POST  /api/v1/live/browser/stop       → stop it
@@ -16,6 +16,11 @@ Authentication
 EventSource cannot send ``Authorization`` headers, so the SSE endpoints and
 the frame endpoint accept the access token as ``?token=...``.  The control
 endpoints use the normal Bearer header via ``get_current_user``.
+
+Note: In production, logs are written to the terminal/backend for easy
+monitoring. The /api/v1/live/logs endpoint is available for debugging
+when STREAM_LOGS_TO_FRONTEND=true is set. The browser view is ONLY opened
+for QR scan and 2FA entry during WhatsApp connection.
 """
 import asyncio
 import base64
