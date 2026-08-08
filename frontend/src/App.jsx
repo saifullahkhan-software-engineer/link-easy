@@ -17,6 +17,7 @@ import FeedScrollCreatePage from './pages/FeedScrollCreatePage';
 import FeedScrollEditPage from './pages/FeedScrollEditPage';
 import FeedScrollResultsPage from './pages/FeedScrollResultsPage';
 import FeedScrollAppliedPostsPage from './pages/FeedScrollAppliedPostsPage';
+import WhatsAppScannerPage from './pages/WhatsAppScannerPage';
 
 export default function App() {
   return (
@@ -64,6 +65,7 @@ export default function App() {
             <Route path="feed-scroll/jobs/:jobId/edit" element={<FeedScrollEditPage />} />
             <Route path="feed-scroll/jobs/:jobId/applied" element={<FeedScrollAppliedPostsPage />} />
             <Route path="feed-scroll/jobs/:jobId/applied-posts" element={<FeedScrollAppliedPostsPage />} />
+            <Route path="whatsapp-scanner" element={<WhatsAppScannerPage />} />
           </Route>
 
           {/* catch-all */}

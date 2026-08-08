@@ -17,7 +17,11 @@ celery_app = Celery(
     "LinkeFlow",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["worker.tasks.campaign_tasks", "worker.tasks.feed_scroll_tasks"],
+    include=[
+        "worker.tasks.campaign_tasks",
+        "worker.tasks.feed_scroll_tasks",
+        "worker.tasks.whatsapp_tasks",
+    ],
 )
  
 celery_app.conf.update(
@@ -56,6 +60,10 @@ celery_app.conf.update(
         'reconcile-stalled-leads': {
             'task': 'tasks.reconcile_stalled_leads',
             'schedule': 900.0,  # Every 15 minutes (900 seconds)
+        },
+        'check-whatsapp-messages': {
+            'task': 'tasks.check_whatsapp_messages',
+            'schedule': 120.0,  # Every 2 minutes
         },
     },
 )

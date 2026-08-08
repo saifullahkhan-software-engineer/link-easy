@@ -173,3 +173,27 @@ export const feedLeadsApi = {
   remove: (feedLeadId, ownerEmail) =>
     api.delete(`/feed-leads/${feedLeadId}`, { params: { owner_email: ownerEmail } }),
 };
+
+/* ----------------------------- whatsapp scanner ---------------------------- */
+const WHATSAPP_TIMEOUT = 120_000;
+
+export const whatsappApi = {
+  connect: () =>
+    api.post('/whatsapp/connect', null, { timeout: WHATSAPP_TIMEOUT }),
+  getStatus: () =>
+    api.get('/whatsapp/status'),
+  getGroups: () =>
+    api.get('/whatsapp/groups', { timeout: WHATSAPP_TIMEOUT }),
+  selectGroups: (payload) =>
+    api.post('/whatsapp/groups/select', payload),
+  getFilters: () =>
+    api.get('/whatsapp/filters'),
+  saveFilters: (payload) =>
+    api.post('/whatsapp/filters', payload),
+  getMessages: (params = {}) =>
+    api.get('/whatsapp/messages', { params }),
+  triggerScan: () =>
+    api.post('/whatsapp/scan/trigger', null, { timeout: WHATSAPP_TIMEOUT }),
+  getStats: () =>
+    api.get('/whatsapp/stats'),
+};

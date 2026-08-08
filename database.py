@@ -6,6 +6,7 @@ from core.config import settings
 Base = declarative_base()
 
 from models.linkedin_account import LinkedInAccount  # noqa: F401
+from models.whatsapp import WhatsAppSession, WhatsAppMonitoredGroup, WhatsAppForwardGroup, WhatsAppRawMessage, WhatsAppScanFilter  # noqa: F401
 
 engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 
