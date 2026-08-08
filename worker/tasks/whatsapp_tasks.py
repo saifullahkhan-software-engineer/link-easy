@@ -51,6 +51,13 @@ def connect_whatsapp(self):
 
     Waits for the user to scan the QR code, then saves the session
     (cookies + storage state) to PostgreSQL.
+
+    NOTE: the API endpoint ``POST /api/v1/whatsapp/connect`` no longer
+    queues this task — it runs the browser in-process via
+    ``services.browser_view`` and streams it into the WhatsApp Scanner page
+    (``/api/v1/live/browser/stream``), so the QR code is visible to the user
+    even on servers without a display.  This task remains as a fallback for
+    manual/CLI use on machines with a real desktop session.
     """
     logger.info("🚀 Starting WhatsApp connection task...")
 

@@ -2,7 +2,7 @@
 WhatsApp Job Scanner — API endpoints.
 FILE: api/v1/whatsapp_scanner.py
 
-POST   /api/v1/whatsapp/connect          → start session task
+POST   /api/v1/whatsapp/connect          → start embedded browser view + QR watcher
 GET    /api/v1/whatsapp/status           → connection status
 GET    /api/v1/whatsapp/groups           → list all groups
 POST   /api/v1/whatsapp/groups/select    → save monitored + forward groups
@@ -11,7 +11,17 @@ POST   /api/v1/whatsapp/filters          → save filters
 GET    /api/v1/whatsapp/messages         → paginated list with scores/status
 POST   /api/v1/whatsapp/scan/trigger     → manually trigger scan task
 GET    /api/v1/whatsapp/stats            → matched/rejected/forwarded counts
+
+Connecting: instead of queueing a Celery task that opens a non-headless
+browser on the server's display (invisible to the user), ``POST /connect``
+launches the in-process headless browser view (services/browser_view.py) and
+streams it into the WhatsApp Scanner page, then a background asyncio task
+watches for the QR scan and persists the session state.
 """
+import asyncio
+import time
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -40,6 +50,7 @@ from models.whatsapp import (
     WhatsAppScanFilter,
 )
 from core.logging_config import get_logger
+from core.live_hub import log_hub
 
 logger = get_logger(__name__)
 
@@ -49,15 +60,97 @@ router = APIRouter(prefix="/api/v1/whatsapp", tags=["whatsapp-scanner"])
 # ── POST /connect ────────────────────────────────────────────────────────────
 
 
+async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 180) -> None:
+    """Background task: wait for the QR code in the embedded browser view.
+
+    Polls the live browser page until WhatsApp Web shows the chat list
+    (i.e. the QR was scanned), then persists cookies/storage state and marks
+    the session connected.  On timeout the session is marked disconnected.
+    """
+    from services.browser_view import browser_view
+    from services.whatsapp_browser import get_storage_state, is_logged_in
+    from database import async_session
+
+    logger.info("👀 Watching for WhatsApp QR scan (session id=%s)", session_id)
+    await log_hub.publish(
+        {
+            "type": "app",
+            "level": "INFO",
+            "logger": "whatsapp_scanner",
+            "message": f"👀 Watching for WhatsApp QR scan (session id={session_id})",
+        }
+    )
+
+    deadline = time.monotonic() + max_wait_seconds
+    logged_in = False
+    while time.monotonic() < deadline:
+        page = browser_view.page
+        if page is None or browser_view.status not in ("running", "starting"):
+            logger.warning("Browser view stopped while waiting for QR — aborting watch")
+            break
+        try:
+            if await is_logged_in(page):
+                logged_in = True
+                break
+        except Exception as exc:  # page may be mid-navigation
+            logger.debug("QR check error: %s", exc)
+        await asyncio.sleep(2)
+
+    storage_state = None
+    if logged_in:
+        logger.info("✅ QR code scanned — extracting session state…")
+        try:
+            storage_state = await get_storage_state(browser_view.context)
+        except Exception as exc:
+            logger.error("Could not extract storage state: %s", exc)
+            storage_state = None
+
+    async with async_session() as db:
+        row = (
+            await db.execute(
+                select(WhatsAppSession).where(WhatsAppSession.id == session_id)
+            )
+        ).scalar_one_or_none()
+        if row:
+            if storage_state is not None:
+                row.storage_state_json = storage_state
+                row.cookies_json = storage_state.get("cookies", [])
+                row.status = "connected"
+                row.is_active = True
+                row.updated_at = datetime.now(timezone.utc)
+                message = "✅ WhatsApp connected — session state saved"
+            else:
+                row.status = "error" if logged_in else "disconnected"
+                row.is_active = False
+                message = (
+                    "❌ WhatsApp connect failed — could not save session state"
+                    if logged_in
+                    else "⏰ QR scan timed out — connection marked disconnected"
+                )
+        else:
+            message = f"ℹ️ Session {session_id} no longer exists — watcher exiting"
+        await db.commit()
+
+    logger.info(message)
+    await log_hub.publish(
+        {"type": "app", "level": "INFO", "logger": "whatsapp_scanner", "message": message}
+    )
+
+
 @router.post("/connect", response_model=WhatsAppConnectResponse)
 async def connect_whatsapp(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppConnectResponse:
-    """Start a Celery task that launches a non-headless browser for WhatsApp QR login."""
-    from worker.celery_app import celery_app
+    """Launch the embedded browser view for WhatsApp QR login.
 
-    # Check if there's already a task in progress
+    The browser runs headless inside the API process and is streamed to the
+    page via ``/api/v1/live/browser/stream``; a background watcher saves the
+    session state once the QR code is scanned.
+    """
+    from services.browser_view import WHATSAPP_URL, browser_view
+
+    # Check if there's already a connection in progress
     result = await db.execute(
         select(WhatsAppSession).order_by(WhatsAppSession.id.desc()).limit(1)
     )
@@ -65,7 +158,7 @@ async def connect_whatsapp(
 
     if existing and existing.status == "waiting_qr":
         return WhatsAppConnectResponse(
-            message="A WhatsApp connection is already in progress — scan the QR code.",
+            message="A WhatsApp connection is already in progress — scan the QR code in the Live Browser view.",
             status="waiting_qr",
         )
 
@@ -77,13 +170,34 @@ async def connect_whatsapp(
     new_session = WhatsAppSession(status="waiting_qr", is_active=True)
     db.add(new_session)
     await db.commit()
+    await db.refresh(new_session)
 
-    # Start the Celery connect task
-    celery_app.send_task("tasks.connect_whatsapp", countdown=2)
+    # Launch (or reuse) the embedded headless browser on WhatsApp Web.
+    start_result = await browser_view.ensure_started(WHATSAPP_URL)
+    if start_result.get("status") == "error":
+        new_session.status = "error"
+        new_session.is_active = False
+        await db.commit()
+        logger.error(
+            "📱 WhatsApp connect failed to open browser view: %s",
+            start_result.get("error"),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Could not open the browser view: "
+                f"{start_result.get('error')}. "
+                "Check that Chromium is installed and the patchright browser "
+                "binaries are present."
+            ),
+        )
 
-    logger.info("📱 WhatsApp connect task queued")
+    # Watch for the QR scan in the background (no Celery needed).
+    asyncio.create_task(_watch_qr_scan(new_session.id))
+
+    logger.info("📱 WhatsApp connect started — browser view streaming (session id=%s)", new_session.id)
     return WhatsAppConnectResponse(
-        message="WhatsApp connection started. Open the browser to scan QR code.",
+        message="WhatsApp connection started — scan the QR code in the Live Browser view below.",
         status="waiting_qr",
     )
 

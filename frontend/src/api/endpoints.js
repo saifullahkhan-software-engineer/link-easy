@@ -1,4 +1,4 @@
-import api from './client';
+import api, { getAccessToken } from './client';
 
 /* ---------------------------------- auth --------------------------------- */
 export const authApi = {
@@ -196,4 +196,24 @@ export const whatsappApi = {
     api.post('/whatsapp/scan/trigger', null, { timeout: WHATSAPP_TIMEOUT }),
   getStats: () =>
     api.get('/whatsapp/stats'),
+};
+
+/* --------------------------------- live debug ------------------------------ */
+// EventSource cannot send Authorization headers, so the live streams accept
+// the access token as a query parameter (?token=...) instead.
+const liveStreamUrl = (path) => {
+  const base = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+  const token = getAccessToken();
+  const sep = path.includes('?') ? '&' : '?';
+  return `${base}${path}${sep}token=${encodeURIComponent(token || '')}`;
+};
+
+export const liveApi = {
+  logsStreamUrl: () => liveStreamUrl('/live/logs'),
+  browserStreamUrl: () => liveStreamUrl('/live/browser/stream'),
+  browserFrameUrl: () => liveStreamUrl('/live/browser/frame'),
+  browserStatus: () => api.get('/live/browser/status'),
+  browserStart: (url) => api.post('/live/browser/start', { url }),
+  browserStop: () => api.post('/live/browser/stop'),
+  browserInput: (payload) => api.post('/live/browser/input', payload),
 };
