@@ -5,10 +5,9 @@ FILE: core/live_hub.py
 
 Two kinds of events flow through hubs in this app:
 
-  * ``log_hub``  — API-call log entries (from the HTTP middleware) and app
-                   log records (from the logging handler). Consumed by the
-                   ``/api/v1/live/logs`` SSE stream so the frontend can show
-                   a real-time console of what the backend is doing.
+  * ``log_hub``  — Application log records (from the logging handler).
+                   Used for backward compatibility; in production, logs
+                   go to the terminal/backend, not the frontend.
   * browser view hub (owned by ``services.browser_view``) — screencast JPEG
                    frames + status events. Consumed by the
                    ``/api/v1/live/browser/stream`` SSE stream.
@@ -20,9 +19,16 @@ lines are NOT streamed here — API-call and in-process logs are.
 """
 import asyncio
 import logging
+import os
 import time
 from collections import deque
 from typing import Deque, Optional, Set
+
+
+def _should_stream_logs() -> bool:
+    """Check if logs should be streamed to frontend (dev only)."""
+    env = os.environ.get("STREAM_LOGS_TO_FRONTEND", "").lower()
+    return env in ("true", "1", "yes")
 
 
 class EventHub:
@@ -87,6 +93,9 @@ class HubLogHandler(logging.Handler):
     schedules the async publish on whichever loop is running — either the
     current loop when called from inside it, or the app loop captured at
     startup via :meth:`bind_loop`.
+
+    In production, logs are written to the terminal/backend only.
+    Set STREAM_LOGS_TO_FRONTEND=true to enable frontend log streaming (dev only).
     """
 
     def __init__(self, hub: EventHub = log_hub, level: int = logging.INFO):
@@ -99,6 +108,10 @@ class HubLogHandler(logging.Handler):
         self._loop = loop
 
     def emit(self, record: logging.LogRecord) -> None:
+        # In production, logs go to terminal only — don't stream to frontend
+        if not _should_stream_logs():
+            return
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:

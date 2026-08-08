@@ -17,6 +17,13 @@ browser on the server's display (invisible to the user), ``POST /connect``
 launches the in-process headless browser view (services/browser_view.py) and
 streams it into the WhatsApp Scanner page, then a background asyncio task
 watches for the QR scan and persists the session state.
+
+The browser is ONLY opened when needed for:
+1. QR code scanning to connect WhatsApp
+2. 2FA code entry (if required after QR scan)
+
+After successful connection, the browser is stopped to free resources.
+Logs are written to the terminal/backend for easy monitoring.
 """
 import asyncio
 import time
@@ -50,7 +57,6 @@ from models.whatsapp import (
     WhatsAppScanFilter,
 )
 from core.logging_config import get_logger
-from core.live_hub import log_hub
 
 logger = get_logger(__name__)
 
@@ -66,23 +72,21 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 180) -> None:
     Polls the live browser page until WhatsApp Web shows the chat list
     (i.e. the QR was scanned), then persists cookies/storage state and marks
     the session connected.  On timeout the session is marked disconnected.
+
+    After successful login, the browser is stopped to free resources.
+    If 2FA is needed, the browser remains open for the user to enter the code.
+    Once 2FA is completed (logged in), the browser is stopped.
     """
     from services.browser_view import browser_view
     from services.whatsapp_browser import get_storage_state, is_logged_in
     from database import async_session
 
     logger.info("👀 Watching for WhatsApp QR scan (session id=%s)", session_id)
-    await log_hub.publish(
-        {
-            "type": "app",
-            "level": "INFO",
-            "logger": "whatsapp_scanner",
-            "message": f"👀 Watching for WhatsApp QR scan (session id={session_id})",
-        }
-    )
 
     deadline = time.monotonic() + max_wait_seconds
     logged_in = False
+    encountered_2fa = False
+    two_fa_completed = False
     while time.monotonic() < deadline:
         page = browser_view.page
         if page is None or browser_view.status not in ("running", "starting"):
@@ -91,7 +95,19 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 180) -> None:
         try:
             if await is_logged_in(page):
                 logged_in = True
+                if encountered_2fa:
+                    two_fa_completed = True
+                    logger.info("✅ 2FA completed — WhatsApp logged in successfully")
                 break
+            
+            # Check for 2FA page
+            if await _check_2fa_page(page):
+                if not encountered_2fa:
+                    encountered_2fa = True
+                    logger.info("🔐 2FA required — keeping browser open for code entry")
+                    logger.info("📝 User must enter the 6-digit code in the browser view")
+                # Keep browser open for 2FA - don't break, continue waiting
+                # The user needs to enter the code manually via the browser view
         except Exception as exc:  # page may be mid-navigation
             logger.debug("QR check error: %s", exc)
         await asyncio.sleep(2)
@@ -132,9 +148,65 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 180) -> None:
         await db.commit()
 
     logger.info(message)
-    await log_hub.publish(
-        {"type": "app", "level": "INFO", "logger": "whatsapp_scanner", "message": message}
-    )
+
+    # Stop the browser after successful login
+    # - If no 2FA was needed: stop immediately after QR scan
+    # - If 2FA was needed: stop after 2FA is completed
+    if logged_in:
+        if two_fa_completed:
+            logger.info("🛑 Stopping browser view after 2FA completion")
+        else:
+            logger.info("🛑 Stopping browser view after successful WhatsApp connection")
+        try:
+            await browser_view.stop()
+        except Exception as exc:
+            logger.warning("Error stopping browser view: %s", exc)
+    elif encountered_2fa and not logged_in:
+        # 2FA was needed but we timed out waiting for completion
+        logger.warning("⏰ 2FA code entry timed out — browser will remain open")
+        logger.info("💡 User can manually stop the browser via the UI or API")
+
+
+async def _check_2fa_page(page) -> bool:
+    """Check if the current page is asking for 2FA (two-factor authentication).
+    
+    Returns True if 2FA is required.
+    """
+    try:
+        # Check for 2FA input field - WhatsApp Web shows a screen to enter the 6-digit code
+        content = await page.content()
+        
+        # Look for 2FA indicators
+        two_fa_indicators = [
+            "Two-factor authentication",
+            "Enter the code",
+            "enter the 6-digit",
+            "authentication code",
+            "enter-manual-code",
+        ]
+        
+        for indicator in two_fa_indicators:
+            if indicator.lower() in content.lower():
+                return True
+        
+        # Also check via selector for 2FA input
+        two_fa_input = await page.query_selector(
+            'input[data-testid="enter-manual-code"], input[type="text"], input[inputmode="numeric"]'
+        )
+        if two_fa_input:
+            # Check if it's likely a 2FA input by looking at nearby text
+            parent = await two_fa_input.evaluate("el => el.parentElement?.parentElement?.parentElement")
+            if parent:
+                parent_text = await page.evaluate(
+                    "el => el.textContent", parent
+                )
+                if "code" in parent_text.lower() or "2fa" in parent_text.lower() or "authentication" in parent_text.lower():
+                    return True
+            
+    except Exception as e:
+        logger.debug("Error checking for 2FA page: %s", e)
+    
+    return False
 
 
 @router.post("/connect", response_model=WhatsAppConnectResponse)
@@ -147,6 +219,9 @@ async def connect_whatsapp(
     The browser runs headless inside the API process and is streamed to the
     page via ``/api/v1/live/browser/stream``; a background watcher saves the
     session state once the QR code is scanned.
+
+    The browser is ONLY opened for QR scan and 2FA entry. After successful
+    connection, the browser is stopped. Logs are written to the terminal.
     """
     from services.browser_view import WHATSAPP_URL, browser_view
 
@@ -157,6 +232,7 @@ async def connect_whatsapp(
     existing = result.scalars().first()
 
     if existing and existing.status == "waiting_qr":
+        logger.info("📱 WhatsApp connection already in progress (session id=%s)", existing.id)
         return WhatsAppConnectResponse(
             message="A WhatsApp connection is already in progress — scan the QR code in the Live Browser view.",
             status="waiting_qr",
@@ -165,6 +241,7 @@ async def connect_whatsapp(
     # Deactivate any existing sessions
     if existing:
         existing.is_active = False
+        await db.commit()
 
     # Create a new pending session record
     new_session = WhatsAppSession(status="waiting_qr", is_active=True)
@@ -173,6 +250,7 @@ async def connect_whatsapp(
     await db.refresh(new_session)
 
     # Launch (or reuse) the embedded headless browser on WhatsApp Web.
+    logger.info("📱 Starting browser view for WhatsApp QR scan (session id=%s)", new_session.id)
     start_result = await browser_view.ensure_started(WHATSAPP_URL)
     if start_result.get("status") == "error":
         new_session.status = "error"
@@ -195,7 +273,7 @@ async def connect_whatsapp(
     # Watch for the QR scan in the background (no Celery needed).
     asyncio.create_task(_watch_qr_scan(new_session.id))
 
-    logger.info("📱 WhatsApp connect started — browser view streaming (session id=%s)", new_session.id)
+    logger.info("📱 WhatsApp connect started — scan QR code in browser view (session id=%s)", new_session.id)
     return WhatsAppConnectResponse(
         message="WhatsApp connection started — scan the QR code in the Live Browser view below.",
         status="waiting_qr",
