@@ -2,15 +2,15 @@
 WhatsApp Job Scanner — API endpoints.
 FILE: api/v1/whatsapp_scanner.py
 
-POST   /api/whatsapp/connect          → start session task
-GET    /api/whatsapp/status           → connection status
-GET    /api/whatsapp/groups           → list all groups
-POST   /api/whatsapp/groups/select    → save monitored + forward groups
-GET    /api/whatsapp/filters          → get current filters
-POST   /api/whatsapp/filters          → save filters
-GET    /api/whatsapp/messages         → paginated list with scores/status
-POST   /api/whatsapp/scan/trigger     → manually trigger scan task
-GET    /api/whatsapp/stats            → matched/rejected/forwarded counts
+POST   /api/v1/whatsapp/connect          → start session task
+GET    /api/v1/whatsapp/status           → connection status
+GET    /api/v1/whatsapp/groups           → list all groups
+POST   /api/v1/whatsapp/groups/select    → save monitored + forward groups
+GET    /api/v1/whatsapp/filters          → get current filters
+POST   /api/v1/whatsapp/filters          → save filters
+GET    /api/v1/whatsapp/messages         → paginated list with scores/status
+POST   /api/v1/whatsapp/scan/trigger     → manually trigger scan task
+GET    /api/v1/whatsapp/stats            → matched/rejected/forwarded counts
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +43,7 @@ from core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/whatsapp", tags=["whatsapp-scanner"])
+router = APIRouter(prefix="/api/v1/whatsapp", tags=["whatsapp-scanner"])
 
 
 # ── POST /connect ────────────────────────────────────────────────────────────
