@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { feedScrollApi } from '../api/endpoints';
@@ -13,12 +13,24 @@ export default function FeedScrollJobsPage() {
   const [loading, setLoading] = useState(true);
   const [jobToDelete, setJobToDelete] = useState(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const tickRef = useRef(null);
   const navigate = useNavigate();
   const ownerEmail = getUserEmail();
 
   useEffect(() => {
     loadJobs();
   }, []);
+
+  /* Live 1-second tick for all visible active countdowns */
+  useEffect(() => {
+    clearInterval(tickRef.current);
+    if (jobs.some((j) => (j.status === 'active' && j.next_scan_at) || j.status === 'paused')) {
+      setNow(Date.now());
+      tickRef.current = setInterval(() => setNow(Date.now()), 1000);
+    }
+    return () => clearInterval(tickRef.current);
+  }, [jobs]);
 
   const loadJobs = async () => {
     try {
@@ -119,6 +131,7 @@ export default function FeedScrollJobsPage() {
             <FeedScrollJobCard
               key={job.id}
               job={job}
+              now={now}
               onPause={handlePause}
               onResume={handleResume}
               onDelete={setJobToDelete}

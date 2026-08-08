@@ -1,27 +1,67 @@
 import { Link } from 'react-router-dom';
 import ScoreBadge from './ScoreBadge';
 
-export default function FeedScrollJobCard({ job, onPause, onResume, onDelete }) {
+export function formatLastScanned(dateStr, now = Date.now()) {
+  if (!dateStr) return 'Never';
+  const date = new Date(dateStr);
+  const diffMs = now - date.getTime();
+  if (diffMs < 0) return 'Just now';
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${diffDays}d ago`;
+}
+
+export function formatScanRemaining(nextScanAt, now = Date.now()) {
+  if (!nextScanAt) return null;
+  const nextAt = Date.parse(nextScanAt);
+  if (!Number.isFinite(nextAt)) return null;
+  const diffMs = nextAt - now;
+  const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
+  if (totalSeconds === 0) return 'Due now';
+
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) return `in ${days}d ${hours}h ${minutes}m ${seconds}s`;
+  if (hours > 0) return `in ${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `in ${minutes}m ${seconds}s`;
+  return `in ${seconds}s`;
+}
+
+export function formatRemainingSeconds(totalSeconds) {
+  if (totalSeconds == null || totalSeconds < 0) return null;
+  if (totalSeconds === 0) return '0s';
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+export default function FeedScrollJobCard({ job, now = Date.now(), onPause, onResume, onDelete }) {
   const statusColor = {
     active: 'text-green-400 bg-green-500/10 ring-green-500/20',
     paused: 'text-yellow-400 bg-yellow-500/10 ring-yellow-500/20',
     draft: 'text-zinc-400 bg-zinc-500/10 ring-zinc-500/20',
   };
 
-  const formatDate = (dateStr) => {
-    if (!dateStr) return 'Never';
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now - date;
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    return `${diffDays}d ago`;
-  };
+  const pausedRemaining =
+    job.remaining_seconds != null
+      ? job.remaining_seconds
+      : job.next_scan_at
+      ? Math.max(0, Math.floor((new Date(job.next_scan_at).getTime() - now) / 1000))
+      : null;
 
   return (
     <div className="rounded-xl border border-surface-700 bg-surface-800 p-5 transition hover:border-surface-600">
@@ -43,33 +83,36 @@ export default function FeedScrollJobCard({ job, onPause, onResume, onDelete }) 
             <span className="text-sm text-zinc-400">Interval: {job.feed_interval_hours}h</span>
           </div>
 
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-zinc-500">
-            <span>Last scan: {formatDate(job.last_scanned_at)}</span>
-            {job.next_scan_at && job.status === 'active' && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-500">
+            <span>Last scan: {formatLastScanned(job.last_scanned_at, now)}</span>
+            {job.status === 'active' && job.next_scan_at && (
               <>
                 <span>•</span>
-                <span>Next scan: {formatDate(job.next_scan_at)}</span>
+                <span>
+                  Next scan:{' '}
+                  <span className="font-mono font-medium text-emerald-400">
+                    {formatScanRemaining(job.next_scan_at, now)}
+                  </span>
+                </span>
+              </>
+            )}
+            {job.status === 'paused' && pausedRemaining != null && (
+              <>
+                <span>•</span>
+                <span className="font-mono text-yellow-400">
+                  Next scan: Paused ({formatRemainingSeconds(pausedRemaining)} remaining)
+                </span>
               </>
             )}
           </div>
         </div>
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <Link
             to={`/app/feed-scroll/jobs/${job.id}`}
             className="inline-flex items-center justify-center rounded-lg border border-surface-700 bg-surface-700 px-3 py-1.5 text-sm font-medium text-zinc-200 transition hover:bg-surface-600 hover:text-zinc-100"
           >
             View
-          </Link>
-          <Link
-            to={`/app/feed-scroll/jobs/${job.id}/edit`}
-            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-surface-700 bg-surface-800 px-3 py-1.5 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 hover:text-zinc-100"
-            title="Edit keywords, experience, and job titles for the next scan"
-          >
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-              <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
-            </svg>
-            Edit
           </Link>
           {job.status === 'active' ? (
             <button
@@ -86,6 +129,26 @@ export default function FeedScrollJobCard({ job, onPause, onResume, onDelete }) 
               Resume
             </button>
           )}
+          <Link
+            to={`/app/feed-scroll/jobs/${job.id}/edit`}
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-surface-700 bg-surface-800 px-3 py-1.5 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 hover:text-zinc-100"
+            title="Edit keywords, experience, and job titles for the next scan"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+            </svg>
+            Edit
+          </Link>
+          <Link
+            to={`/app/feed-scroll/jobs/${job.id}/applied`}
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-300 transition hover:bg-emerald-500/15 hover:text-emerald-200"
+            title="View posts marked as applied"
+          >
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+            </svg>
+            Applied Posts
+          </Link>
           <button
             onClick={() => onDelete?.(job)}
             className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-300 transition hover:bg-red-500/15"

@@ -230,6 +230,7 @@ CREATE TABLE public.feed_scroll_jobs (
     keywords json,
     feed_interval_hours integer DEFAULT 1 NOT NULL,
     posts_per_scan integer DEFAULT 20 NOT NULL,
+    remaining_seconds integer,
     last_scanned_at timestamp with time zone,
     next_scan_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -265,6 +266,33 @@ CREATE TABLE public.feed_scroll_results (
 
 
 ALTER TABLE public.feed_scroll_results OWNER TO postgres;
+
+--
+-- Name: feed_scroll_applied_posts; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.feed_scroll_applied_posts (
+    id character varying NOT NULL,
+    feed_scroll_job_id character varying NOT NULL,
+    owner_email character varying NOT NULL,
+    post_urn character varying,
+    post_url character varying NOT NULL,
+    author_name character varying,
+    author_first_name character varying,
+    author_last_name character varying,
+    author_profile_url character varying NOT NULL,
+    connection_degree character varying,
+    post_time character varying,
+    post_text text,
+    score double precision DEFAULT 0 NOT NULL,
+    matched_terms json,
+    scan_batch_id character varying,
+    applied_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.feed_scroll_applied_posts OWNER TO postgres;
 
 --
 -- Name: leads; Type: TABLE; Schema: public; Owner: postgres

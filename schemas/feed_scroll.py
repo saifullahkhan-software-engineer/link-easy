@@ -99,6 +99,7 @@ class FeedScrollJobUpdate(BaseModel):
     keywords: Optional[list[str]] = None
     feed_interval_hours: Optional[int] = Field(None, ge=1, le=24)
     posts_per_scan: Optional[int] = Field(None, ge=1, le=MAX_POSTS_PER_SCAN)
+    remaining_seconds: Optional[int] = None
 
     @field_validator("job_titles", "skill_set", "keywords", mode="before")
     @classmethod
@@ -121,6 +122,7 @@ class FeedScrollJobResponse(BaseModel):
     keywords: Optional[list[str]]
     feed_interval_hours: int
     posts_per_scan: int
+    remaining_seconds: Optional[int] = None
     last_scanned_at: Optional[datetime]
     next_scan_at: Optional[datetime]
     created_at: datetime
@@ -157,7 +159,54 @@ class FeedScrollResultResponse(BaseModel):
     matched_terms: Optional[list[str]]
     scan_batch_id: str
     dismissed_at: Optional[datetime] = None
+    is_applied: bool = False
+    applied_at: Optional[datetime] = None
     scanned_at: datetime
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class FeedScrollAppliedPostResponse(BaseModel):
+    """Post marked as applied by the user."""
+    id: str
+    feed_scroll_job_id: str
+    owner_email: str
+    post_urn: Optional[str] = None
+    post_url: str
+    author_name: Optional[str] = None
+    author_first_name: Optional[str] = None
+    author_last_name: Optional[str] = None
+    author_profile_url: str
+    connection_degree: Optional[str] = None
+    post_time: Optional[str] = None
+    post_text: Optional[str] = None
+    score: float = 0.0
+    matched_terms: Optional[list[str]] = None
+    scan_batch_id: Optional[str] = None
+    applied_at: datetime
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FeedScrollAppliedPostCreate(BaseModel):
+    """Payload to mark a post as applied."""
+    result_id: Optional[str] = None
+    post_urn: Optional[str] = None
+    post_url: str
+    author_name: Optional[str] = None
+    author_first_name: Optional[str] = None
+    author_last_name: Optional[str] = None
+    author_profile_url: str
+    connection_degree: Optional[str] = None
+    post_time: Optional[str] = None
+    post_text: Optional[str] = None
+    score: Optional[float] = 0.0
+    matched_terms: Optional[list[str]] = None
+    scan_batch_id: Optional[str] = None
+
+
+class FeedScrollBulkDeleteRequest(BaseModel):
+    """Payload to delete multiple applied posts."""
+    post_ids: list[str]

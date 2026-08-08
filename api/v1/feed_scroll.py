@@ -14,7 +14,7 @@ GET    /api/v1/feed-scroll/jobs/{id}/results — get scored posts for a job
 POST   /api/v1/feed-scroll/jobs/{id}/scan    — trigger immediate manual scan
 """
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,9 +28,13 @@ from models.feed_scroll_job import (
     FeedScrollMode,
 )
 from models.feed_scroll_result import FeedScrollResult
+from models.feed_scroll_applied_post import FeedScrollAppliedPost
 from models.linkedin_account import LinkedInAccount
 from automation.actions.feed_scroll import _post_identity_key, _resolve_result_urls
 from schemas.feed_scroll import (
+    FeedScrollAppliedPostCreate,
+    FeedScrollAppliedPostResponse,
+    FeedScrollBulkDeleteRequest,
     FeedScrollJobCreate,
     FeedScrollJobResponse,
     FeedScrollJobUpdate,
@@ -348,7 +352,221 @@ async def get_feed_scroll_results(
             result.scalars().all(), max_items=RESULTS_PAGE_LIMIT
         )
 
-    return [FeedScrollResultResponse.model_validate(p) for p in posts]
+    # Crossmatch against applied posts so the results view immediately indicates
+    # which posts have already been marked as applied.
+    applied_result = await db.execute(
+        select(FeedScrollAppliedPost).where(
+            FeedScrollAppliedPost.feed_scroll_job_id == job_id,
+            FeedScrollAppliedPost.owner_email == owner_email,
+        )
+    )
+    applied_rows = applied_result.scalars().all()
+    applied_urls = {ap.post_url: ap.applied_at for ap in applied_rows if ap.post_url}
+    applied_urns = {ap.post_urn: ap.applied_at for ap in applied_rows if ap.post_urn}
+
+    responses = []
+    for p in posts:
+        resp = FeedScrollResultResponse.model_validate(p)
+        if p.post_url in applied_urls or (p.post_urn and p.post_urn in applied_urns):
+            resp.is_applied = True
+            resp.applied_at = applied_urls.get(p.post_url) or applied_urns.get(p.post_urn)
+        responses.append(resp)
+
+    return responses
+
+
+@router.post("/jobs/{job_id}/results/{result_id}/apply", response_model=FeedScrollAppliedPostResponse)
+async def mark_post_applied(
+    job_id: str,
+    result_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+) -> FeedScrollAppliedPostResponse:
+    """Mark a scanned feed post as applied.
+
+    Stores the post permanently in `feed_scroll_applied_posts` and ensures
+    subsequent scans automatically crossmatch and skip it to prevent duplication.
+    """
+    owned = await _load_owned_result(job_id, result_id, owner_email, db)
+    if not owned:
+        raise HTTPException(status_code=404, detail="Feed scroll result not found")
+    job, result = owned
+
+    # Check if already marked as applied
+    existing_q = await db.execute(
+        select(FeedScrollAppliedPost).where(
+            FeedScrollAppliedPost.feed_scroll_job_id == job_id,
+            FeedScrollAppliedPost.owner_email == owner_email,
+            (
+                (FeedScrollAppliedPost.post_url == result.post_url)
+                | (
+                    (FeedScrollAppliedPost.post_urn != None)
+                    & (FeedScrollAppliedPost.post_urn == result.post_urn)
+                )
+            ),
+        )
+    )
+    existing = existing_q.scalars().first()
+    if existing:
+        return FeedScrollAppliedPostResponse.model_validate(existing)
+
+    applied_post = FeedScrollAppliedPost(
+        id=str(uuid.uuid4()),
+        feed_scroll_job_id=job.id,
+        owner_email=owner_email,
+        post_urn=result.post_urn,
+        post_url=result.post_url,
+        author_name=result.author_name,
+        author_first_name=result.author_first_name,
+        author_last_name=result.author_last_name,
+        author_profile_url=result.author_profile_url,
+        connection_degree=result.connection_degree,
+        post_time=result.post_time,
+        post_text=result.post_text,
+        score=result.score,
+        matched_terms=result.matched_terms,
+        scan_batch_id=result.scan_batch_id,
+        applied_at=datetime.now(timezone.utc),
+    )
+    db.add(applied_post)
+    await db.commit()
+    await db.refresh(applied_post)
+
+    return FeedScrollAppliedPostResponse.model_validate(applied_post)
+
+
+@router.post("/jobs/{job_id}/applied-posts", response_model=FeedScrollAppliedPostResponse)
+async def create_applied_post(
+    job_id: str,
+    payload: FeedScrollAppliedPostCreate,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+) -> FeedScrollAppliedPostResponse:
+    """Manually add or record a post as applied for a feed scroll job."""
+    job_result = await db.execute(
+        select(FeedScrollJob).where(
+            FeedScrollJob.id == job_id,
+            FeedScrollJob.owner_email == owner_email,
+        )
+    )
+    job = job_result.scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Feed scroll job not found")
+
+    applied_post = FeedScrollAppliedPost(
+        id=str(uuid.uuid4()),
+        feed_scroll_job_id=job.id,
+        owner_email=owner_email,
+        post_urn=payload.post_urn,
+        post_url=payload.post_url,
+        author_name=payload.author_name,
+        author_first_name=payload.author_first_name,
+        author_last_name=payload.author_last_name,
+        author_profile_url=payload.author_profile_url,
+        connection_degree=payload.connection_degree,
+        post_time=payload.post_time,
+        post_text=payload.post_text,
+        score=payload.score or 0.0,
+        matched_terms=payload.matched_terms,
+        scan_batch_id=payload.scan_batch_id,
+        applied_at=datetime.now(timezone.utc),
+    )
+    db.add(applied_post)
+    await db.commit()
+    await db.refresh(applied_post)
+
+    return FeedScrollAppliedPostResponse.model_validate(applied_post)
+
+
+@router.get("/jobs/{job_id}/applied-posts", response_model=list[FeedScrollAppliedPostResponse])
+async def list_applied_posts(
+    job_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+) -> list[FeedScrollAppliedPostResponse]:
+    """Get all posts marked as applied for a feed scroll job."""
+    job_result = await db.execute(
+        select(FeedScrollJob).where(
+            FeedScrollJob.id == job_id,
+            FeedScrollJob.owner_email == owner_email,
+        )
+    )
+    job = job_result.scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Feed scroll job not found")
+
+    result = await db.execute(
+        select(FeedScrollAppliedPost)
+        .where(
+            FeedScrollAppliedPost.feed_scroll_job_id == job_id,
+            FeedScrollAppliedPost.owner_email == owner_email,
+        )
+        .order_by(FeedScrollAppliedPost.applied_at.desc())
+    )
+    posts = result.scalars().all()
+    return [FeedScrollAppliedPostResponse.model_validate(p) for p in posts]
+
+
+@router.delete("/jobs/{job_id}/applied-posts/{applied_id}", status_code=200)
+async def delete_applied_post(
+    job_id: str,
+    applied_id: str,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a single applied post entry."""
+    result = await db.execute(
+        select(FeedScrollAppliedPost).where(
+            FeedScrollAppliedPost.id == applied_id,
+            FeedScrollAppliedPost.feed_scroll_job_id == job_id,
+            FeedScrollAppliedPost.owner_email == owner_email,
+        )
+    )
+    post = result.scalars().first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Applied post not found")
+
+    await db.delete(post)
+    await db.commit()
+    return {"message": "Applied post deleted successfully", "id": applied_id}
+
+
+@router.post("/jobs/{job_id}/applied-posts/bulk-delete", status_code=200)
+async def bulk_delete_applied_posts(
+    job_id: str,
+    payload: FeedScrollBulkDeleteRequest,
+    owner_email: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete multiple applied post entries by ID."""
+    from sqlalchemy import delete as sa_delete
+
+    job_result = await db.execute(
+        select(FeedScrollJob).where(
+            FeedScrollJob.id == job_id,
+            FeedScrollJob.owner_email == owner_email,
+        )
+    )
+    job = job_result.scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Feed scroll job not found")
+
+    if not payload.post_ids:
+        return {"message": "No posts provided to delete", "deleted_count": 0, "deleted_ids": []}
+
+    stmt = sa_delete(FeedScrollAppliedPost).where(
+        FeedScrollAppliedPost.id.in_(payload.post_ids),
+        FeedScrollAppliedPost.feed_scroll_job_id == job_id,
+        FeedScrollAppliedPost.owner_email == owner_email,
+    )
+    res = await db.execute(stmt)
+    await db.commit()
+
+    return {
+        "message": f"{res.rowcount} applied post(s) deleted successfully",
+        "deleted_count": res.rowcount,
+        "deleted_ids": payload.post_ids,
+    }
 
 
 async def _load_owned_result(
@@ -465,7 +683,12 @@ async def activate_feed_scroll_job(
     owner_email: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Activate a feed scroll job and schedule the first scan."""
+    """Activate or resume a feed scroll job.
+
+    If the job was paused with remaining time, resumes the remaining countdown
+    from now so the remaining time starts dropping again from the time difference.
+    Otherwise schedules the first scan.
+    """
     from worker.celery_app import celery_app
 
     result = await db.execute(
@@ -481,15 +704,23 @@ async def activate_feed_scroll_job(
     if job.status == FeedScrollJobStatus.ACTIVE:
         raise HTTPException(status_code=409, detail="Job is already active")
 
+    now = datetime.now(timezone.utc)
     job.status = FeedScrollJobStatus.ACTIVE
-    job.next_scan_at = datetime.now(timezone.utc)
 
-    # Schedule first scan immediately
-    celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=10)
-
-    await db.commit()
-
-    return {"message": f"Job '{job.name}' activated. First scan starting..."}
+    if job.remaining_seconds is not None and job.remaining_seconds > 0:
+        delay_seconds = job.remaining_seconds
+        job.next_scan_at = now + timedelta(seconds=delay_seconds)
+        job.remaining_seconds = None
+        celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=max(5, delay_seconds))
+        await db.commit()
+        return {"message": f"Job '{job.name}' resumed. Next scan in {delay_seconds} seconds."}
+    else:
+        job.remaining_seconds = None
+        job.next_scan_at = now + timedelta(seconds=10)
+        # Schedule first scan immediately
+        celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=10)
+        await db.commit()
+        return {"message": f"Job '{job.name}' activated. First scan starting..."}
 
 
 @router.post("/jobs/{job_id}/pause", status_code=200)
@@ -498,7 +729,7 @@ async def pause_feed_scroll_job(
     owner_email: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Pause an active feed scroll job."""
+    """Pause an active feed scroll job and preserve remaining scan time."""
     result = await db.execute(
         select(FeedScrollJob).where(
             FeedScrollJob.id == job_id,
@@ -512,7 +743,17 @@ async def pause_feed_scroll_job(
     if job.status != FeedScrollJobStatus.ACTIVE:
         raise HTTPException(status_code=400, detail="Job is not active")
 
+    now = datetime.now(timezone.utc)
+    if job.next_scan_at:
+        next_at = job.next_scan_at if job.next_scan_at.tzinfo else job.next_scan_at.replace(tzinfo=timezone.utc)
+        if next_at > now:
+            job.remaining_seconds = max(0, int((next_at - now).total_seconds()))
+        else:
+            job.remaining_seconds = 0
+    else:
+        job.remaining_seconds = job.feed_interval_hours * 3600
+
     job.status = FeedScrollJobStatus.PAUSED
     await db.commit()
 
-    return {"message": f"Job '{job.name}' paused"}
+    return {"message": f"Job '{job.name}' paused", "remaining_seconds": job.remaining_seconds}
