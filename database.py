@@ -8,7 +8,12 @@ Base = declarative_base()
 from models.linkedin_account import LinkedInAccount  # noqa: F401
 from models.whatsapp import WhatsAppSession, WhatsAppMonitoredGroup, WhatsAppForwardGroup, WhatsAppRawMessage, WhatsAppScanFilter  # noqa: F401
 
-engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=settings.DEBUG,
+    pool_pre_ping=True,
+    connect_args={"timeout": 10, "command_timeout": 10},
+)
 
 # Create a configured "Session" class.
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

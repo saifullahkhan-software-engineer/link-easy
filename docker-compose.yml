@@ -42,10 +42,16 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeflow
       - REDIS_URL=redis://redis:6379/0
+      # Canonical names (code reads these). Legacy aliases still work but prefer these.
+      - JWT_SECRET=your_jwt_secret_key_here
+      - CREDENTIAL_ENCRYPTION_KEY=your_64_char_hex_key_here
       - JWT_SECRET_KEY=your_jwt_secret_key_here
+      - ENCRYPTION_KEY=your_64_char_hex_key_here
       - JWT_ALGORITHM=HS256
-      - ENCRYPTION_KEY=your_encryption_key_here
       - RESEND_API_KEY=your_resend_api_key_here
+      - PASSWORD_RESET_URL=http://localhost:5173/reset-password
+      - BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+      - FROM_EMAIL=noreply@example.com
       - ENVIRONMENT=production
     depends_on:
       postgres:
@@ -63,10 +69,15 @@ services:
     environment: &celery_environment
       - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeflow
       - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=your_jwt_secret_key_here
+      - CREDENTIAL_ENCRYPTION_KEY=your_64_char_hex_key_here
       - JWT_SECRET_KEY=your_jwt_secret_key_here
+      - ENCRYPTION_KEY=your_64_char_hex_key_here
       - JWT_ALGORITHM=HS256
-      - ENCRYPTION_KEY=your_encryption_key_here
       - RESEND_API_KEY=your_resend_api_key_here
+      - PASSWORD_RESET_URL=http://localhost:5173/reset-password
+      - BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+      - FROM_EMAIL=noreply@example.com
       - ENVIRONMENT=production
     depends_on: &celery_dependencies
       postgres:
