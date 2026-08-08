@@ -5,7 +5,6 @@ import { getErrorMessage } from '../api/client';
 import TagInput from '../components/feed/TagInput';
 import { Spinner } from '../components/Spinner';
 import BrowserViewPanel from '../components/live/BrowserViewPanel';
-import LiveLogsPanel from '../components/live/LiveLogsPanel';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -298,11 +297,8 @@ export default function WhatsAppScannerPage() {
         )}
       </div>
 
-      {/* ── Section 1.5: Live browser view + API logs ─────────────── */}
-      <div className="grid items-stretch gap-6 lg:grid-cols-2">
-        <BrowserViewPanel />
-        <LiveLogsPanel />
-      </div>
+      {/* ── Section 1.5: Live browser view ──────────────────────── */}
+      <BrowserViewPanel />
 
       {/* ── Section 2: Group Selection ──────────────────────────── */}
       {status === 'connected' && (

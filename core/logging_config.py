@@ -15,6 +15,22 @@ from core.config import settings
 _CONFIGURED = False
 
 
+class _FlushStreamHandler(logging.StreamHandler):
+    """StreamHandler that explicitly flushes stdout after every log record.
+
+    On Windows, Python's ``sys.stdout`` is block-buffered when the process
+    is launched from PowerShell / cmd rather than an interactive REPL.
+    Without an explicit ``flush()`` call the API-call middleware logs (and
+    other INFO lines) sit in the user-mode buffer and never reach the
+    terminal until the process exits — giving the impression that logging
+    is broken.
+    """
+
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+
 def is_development() -> bool:
     """Check if running in development environment."""
     return settings.ENVIRONMENT.lower() == "development" or settings.DEBUG
@@ -41,7 +57,7 @@ def _configure_root() -> None:
     # If something else (e.g. uvicorn) already configured logging, respect it
     # and just make sure the level matches our environment.
     if not root.handlers:
-        handler = logging.StreamHandler(sys.stdout)
+        handler = _FlushStreamHandler(sys.stdout)
         handler.setFormatter(
             logging.Formatter(
                 "%(asctime)s - %(levelname)-7s - %(name)s - %(message)s"
