@@ -111,6 +111,29 @@ export const feedScrollApi = {
       params: { owner_email: ownerEmail },
       timeout: 60_000,
     }),
+  // Mark a post as applied so it is permanently tracked and excluded from future duplicate scans
+  markApplied: (jobId, resultId, ownerEmail) =>
+    api.post(`/feed-scroll/jobs/${jobId}/results/${resultId}/apply`, null, {
+      params: { owner_email: ownerEmail },
+    }),
+  createAppliedPost: (jobId, ownerEmail, payload) =>
+    api.post(`/feed-scroll/jobs/${jobId}/applied-posts`, payload, {
+      params: { owner_email: ownerEmail },
+    }),
+  listAppliedPosts: (jobId, ownerEmail) =>
+    api.get(`/feed-scroll/jobs/${jobId}/applied-posts`, {
+      params: { owner_email: ownerEmail },
+    }),
+  deleteAppliedPost: (jobId, appliedId, ownerEmail) =>
+    api.delete(`/feed-scroll/jobs/${jobId}/applied-posts/${appliedId}`, {
+      params: { owner_email: ownerEmail },
+    }),
+  bulkDeleteAppliedPosts: (jobId, ownerEmail, postIds) =>
+    api.post(
+      `/feed-scroll/jobs/${jobId}/applied-posts/bulk-delete`,
+      { post_ids: postIds },
+      { params: { owner_email: ownerEmail } }
+    ),
 };
 
 /* --------------------------------- leads --------------------------------- */

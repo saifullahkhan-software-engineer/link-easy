@@ -33,6 +33,7 @@ from models.feed_scroll_job import (
     FeedScrollJobStatus,
 )
 from models.feed_scroll_result import FeedScrollResult
+from models.feed_scroll_applied_post import FeedScrollAppliedPost
 
 # Force diagnostic screenshots during feed scroll scans (very helpful for debugging)
 FORCE_FEED_SCREENSHOTS = True
@@ -196,8 +197,26 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             for row in existing_rows
         }
 
+        # Crossmatch against posts permanently marked as applied by the user
+        # so applied posts are never duplicated or resurfaced on subsequent scans.
+        applied_rows = (
+            db.query(
+                FeedScrollAppliedPost.post_urn,
+                FeedScrollAppliedPost.post_url,
+                FeedScrollAppliedPost.author_profile_url,
+            )
+            .filter(
+                (FeedScrollAppliedPost.feed_scroll_job_id == job.id)
+                | (FeedScrollAppliedPost.owner_email == job.owner_email)
+            )
+            .all()
+        )
+        applied_urns = {row.post_urn for row in applied_rows if row.post_urn}
+        applied_urls = {row.post_url for row in applied_rows if row.post_url}
+
         top_posts = []
         skipped_existing = 0
+        skipped_applied = 0
         skipped_missing_urls = 0
         for post_data in unique_relevant_posts:
             # Every stored result must include both outbound LinkedIn links.
@@ -220,6 +239,17 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             post_data["post_url"] = post_url
             post_data["author_profile_url"] = author_profile_url
 
+            # Skip if already marked as applied by the user
+            if (post_data.get("post_urn") and post_data.get("post_urn") in applied_urns) or post_url in applied_urls:
+                skipped_applied += 1
+                if should_log_debug():
+                    logger.debug(
+                        "Skipping already applied post: %s (%s)",
+                        post_data.get("post_urn"),
+                        post_url,
+                    )
+                continue
+
             key = _post_identity_key(
                 post_data.get("post_urn"), post_url,
                 post_data.get("author_name"), post_data.get("post_text")
@@ -236,7 +266,8 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             f"(from {len(raw_posts)} raw, {len(scored_posts)} scored, "
             f"{len(relevant_posts)} with score > 1, "
             f"{len(unique_relevant_posts)} unique, {skipped_missing_urls} without "
-            f"both post/profile links, {skipped_existing} already stored). "
+            f"both post/profile links, {skipped_existing} already stored, "
+            f"{skipped_applied} already applied). "
             f"Highest score: {top_posts[0]['score'] if top_posts else 0}"
         )
 

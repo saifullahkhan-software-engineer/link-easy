@@ -44,11 +44,14 @@ from api.dependencies import get_db  # noqa: E402
 from api.v1.feed_scroll import router as feed_scroll_router  # noqa: E402
 from database import Base  # noqa: E402
 from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus, FeedScrollMode  # noqa: E402
+from models.feed_scroll_result import FeedScrollResult  # noqa: E402
+from models.feed_scroll_applied_post import FeedScrollAppliedPost  # noqa: E402
 from schemas.feed_scroll import FeedScrollJobResponse  # noqa: E402
 
 OWNER = "owner@test.dev"
 JOB_ID_1 = "job-pause-resume"
 JOB_ID_2 = "job-overdue"
+RESULT_ID_1 = "res-for-apply-1"
 
 
 class FeedScrollSchedulingTests(unittest.TestCase):
@@ -98,6 +101,7 @@ class FeedScrollSchedulingTests(unittest.TestCase):
                 next_scan_at=now + timedelta(seconds=1800),
             ))
             # Active job whose next scan is overdue (yesterday at 8pm)
+            # Active job whose next scan is overdue (yesterday at 8pm)
             session.add(FeedScrollJob(
                 id=JOB_ID_2,
                 account_email="li@test.dev",
@@ -110,6 +114,22 @@ class FeedScrollSchedulingTests(unittest.TestCase):
                 job_titles=["Python Developer"],
                 last_scanned_at=now - timedelta(hours=16),
                 next_scan_at=now - timedelta(hours=12),
+            ))
+            # Scored post result for testing mark-as-applied
+            session.add(FeedScrollResult(
+                id=RESULT_ID_1,
+                feed_scroll_job_id=JOB_ID_1,
+                post_urn="urn:li:activity:7999888777666555444",
+                post_url="https://www.linkedin.com/feed/update/urn:li:activity:7999888777666555444/",
+                author_name="Alice Recruiter",
+                author_first_name="Alice",
+                author_last_name="Recruiter",
+                author_profile_url="https://www.linkedin.com/in/alicerecruiter",
+                post_text="We have a great Backend Engineer role available!",
+                score=9.5,
+                matched_terms=["Backend Engineer"],
+                scan_batch_id="batch-test-1",
+                scanned_at=now,
             ))
             await session.commit()
 
@@ -254,6 +274,102 @@ class FeedScrollSchedulingTests(unittest.TestCase):
                 result = dispatch_due_feed_scans()
                 self.assertEqual(result["scans_dispatched"], 1)
                 mock_send_task.assert_called_once_with("tasks.run_feed_scroll", args=["overdue-1"])
+
+    def test_mark_post_as_applied_and_list_applied_posts(self):
+        """Marking a post as applied creates a permanent applied post record and list endpoint returns it."""
+        async def scenario(client):
+            # 1. Mark as applied
+            res = await client.post(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/results/{RESULT_ID_1}/apply",
+                params={"owner_email": OWNER},
+            )
+            self.assertEqual(res.status_code, 200, res.text)
+            data = res.json()
+            self.assertEqual(data["feed_scroll_job_id"], JOB_ID_1)
+            self.assertEqual(data["post_url"], "https://www.linkedin.com/feed/update/urn:li:activity:7999888777666555444/")
+            self.assertEqual(data["author_name"], "Alice Recruiter")
+
+            # 2. List applied posts for the job
+            list_res = await client.get(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/applied-posts",
+                params={"owner_email": OWNER},
+            )
+            self.assertEqual(list_res.status_code, 200)
+            applied_list = list_res.json()
+            self.assertEqual(len(applied_list), 1)
+            self.assertEqual(applied_list[0]["id"], data["id"])
+            self.assertEqual(applied_list[0]["author_profile_url"], "https://www.linkedin.com/in/alicerecruiter")
+
+            # 3. Check that results view now annotates is_applied = True
+            results_res = await client.get(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/results",
+                params={"owner_email": OWNER},
+            )
+            self.assertEqual(results_res.status_code, 200)
+            results = results_res.json()
+            matched_res = next((r for r in results if r["id"] == RESULT_ID_1), None)
+            self.assertIsNotNone(matched_res)
+            self.assertTrue(matched_res["is_applied"])
+            self.assertIsNotNone(matched_res["applied_at"])
+
+            # 4. Delete single applied post
+            del_res = await client.delete(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/applied-posts/{data['id']}",
+                params={"owner_email": OWNER},
+            )
+            self.assertEqual(del_res.status_code, 200)
+
+            # 5. List is now empty
+            list_after = await client.get(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/applied-posts",
+                params={"owner_email": OWNER},
+            )
+            self.assertEqual(len(list_after.json()), 0)
+
+        self.run_async(scenario)
+
+    def test_bulk_delete_applied_posts(self):
+        """Bulk delete endpoint removes multiple applied posts by ID."""
+        async def scenario(client):
+            # Create two applied posts
+            p1 = await client.post(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/applied-posts",
+                params={"owner_email": OWNER},
+                json={
+                    "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:111/",
+                    "author_profile_url": "https://www.linkedin.com/in/user1",
+                    "author_name": "User One",
+                },
+            )
+            p2 = await client.post(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/applied-posts",
+                params={"owner_email": OWNER},
+                json={
+                    "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:222/",
+                    "author_profile_url": "https://www.linkedin.com/in/user2",
+                    "author_name": "User Two",
+                },
+            )
+            id1 = p1.json()["id"]
+            id2 = p2.json()["id"]
+
+            # Bulk delete both
+            del_res = await client.post(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/applied-posts/bulk-delete",
+                params={"owner_email": OWNER},
+                json={"post_ids": [id1, id2]},
+            )
+            self.assertEqual(del_res.status_code, 200)
+            self.assertEqual(del_res.json()["deleted_count"], 2)
+
+            # Verify list is empty
+            list_after = await client.get(
+                f"/api/v1/feed-scroll/jobs/{JOB_ID_1}/applied-posts",
+                params={"owner_email": OWNER},
+            )
+            self.assertEqual(len(list_after.json()), 0)
+
+        self.run_async(scenario)
 
 
 if __name__ == "__main__":

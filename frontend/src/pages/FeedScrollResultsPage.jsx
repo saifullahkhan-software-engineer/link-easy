@@ -26,6 +26,7 @@ export default function FeedScrollResultsPage() {
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [sortBy, setSortBy] = useState('score'); // 'score' | 'latest'
   const [now, setNow] = useState(Date.now());
+  const [appliedMap, setAppliedMap] = useState({});
   const tickRef = useRef(null);
 
   // Feed Leads state: which lists exist (for the save popover) and which
@@ -154,6 +155,23 @@ export default function FeedScrollResultsPage() {
     }
   };
 
+  const handleMarkApplied = async (post) => {
+    try {
+      await feedScrollApi.markApplied(jobId, post.id, ownerEmail);
+      setAppliedMap((prev) => ({ ...prev, [post.id]: true }));
+      toast.success('Post marked as applied! Duplicate scans will skip it.', {
+        id: `apply-${post.id}`,
+        duration: 5000,
+        action: {
+          label: 'View Applied',
+          onClick: () => navigate(`/app/feed-scroll/jobs/${jobId}/applied`),
+        },
+      });
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to mark post as applied'));
+    }
+  };
+
   // Soft-dismiss a single scanned post: hide it from the local list now and
   // let the API flag it so the scanner's de-dup never brings it back.  The
   // toast offers an Undo that restores the row and the card.
@@ -251,6 +269,16 @@ export default function FeedScrollResultsPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to={`/app/feed-scroll/jobs/${job.id}/applied`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-500/15 hover:text-emerald-200"
+              title="View all posts marked as applied"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+              </svg>
+              Applied Posts
+            </Link>
             <Link
               to={`/app/feed-scroll/jobs/${job.id}/edit`}
               className="inline-flex items-center gap-1.5 rounded-lg border border-surface-700 bg-surface-800 px-3 py-2 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 hover:text-zinc-100"
@@ -436,6 +464,8 @@ export default function FeedScrollResultsPage() {
               currentPoolId={jobId}
               ownerEmail={ownerEmail}
               savedState={savedStateFor(post)}
+              isApplied={appliedMap[post.id] || post.is_applied}
+              onMarkApplied={handleMarkApplied}
               onSavedToFeedLeads={loadFeedLeads}
               onDismiss={handleDismiss}
             />
