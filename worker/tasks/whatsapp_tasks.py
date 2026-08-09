@@ -83,16 +83,26 @@ def connect_whatsapp(self):
 
 
 async def _connect_whatsapp_async() -> dict:
-    """Async implementation of WhatsApp connection flow."""
+    """Async implementation of WhatsApp connection flow.
+
+    Uses the durable WhatsApp profile so the QR login here is the SAME
+    session the API browser view, group fetch and scan task reuse later.
+    """
     from services.whatsapp_browser import (
-        launch_whatsapp_browser,
+        launch_whatsapp_persistent,
         navigate_to_whatsapp,
         wait_for_qr_scan,
         get_storage_state,
         safe_close,
     )
+    from worker.profile_lock import acquire_profile_lock, release_profile_lock
 
-    pw, context, page = await launch_whatsapp_browser(headless=False)
+    profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=10)
+    try:
+        pw, context, page = await launch_whatsapp_persistent(headless=False)
+    except Exception:
+        release_profile_lock(profile_lock)
+        raise
 
     try:
         await navigate_to_whatsapp(page)
@@ -149,6 +159,7 @@ async def _connect_whatsapp_async() -> dict:
 
     finally:
         await safe_close(pw, context)
+        release_profile_lock(profile_lock)
 
 
 # ── Task: Periodic Message Check ─────────────────────────────────────────────
@@ -180,8 +191,9 @@ def check_whatsapp_messages(self) -> dict:
 async def _check_whatsapp_messages_async() -> dict:
     """Async implementation of the periodic message check."""
     from services.whatsapp_browser import (
-        launch_whatsapp_browser,
-        is_logged_in,
+        launch_whatsapp_persistent,
+        is_showing_qr,
+        wait_for_login,
         navigate_to_whatsapp,
         navigate_to_group,
         scrape_messages_from_current_chat,
@@ -190,6 +202,11 @@ async def _check_whatsapp_messages_async() -> dict:
     )
     from services.whatsapp_ocr import extract_text_from_image
     from services.whatsapp_matcher import compute_match_score
+    from worker.profile_lock import (
+        ProfileInUseError,
+        acquire_profile_lock,
+        release_profile_lock,
+    )
 
     # Load the current session and filters from DB
     with get_sync_db() as db:
@@ -211,7 +228,7 @@ async def _check_whatsapp_messages_async() -> dict:
             logger.warning("⚠️  No active WhatsApp session — skipping check")
             return {"status": "skipped", "reason": "No active session"}
 
-        storage_state = session_row.storage_state_json
+        session_id = session_row.id
 
         monitored_groups = db.query(WhatsAppMonitoredGroup).all()
         if not monitored_groups:
@@ -221,9 +238,22 @@ async def _check_whatsapp_messages_async() -> dict:
         forward_group = db.query(WhatsAppForwardGroup).first()
         filters = db.query(WhatsAppScanFilter).first()
 
-    if not storage_state:
-        logger.error("❌ Session has no stored state — needs re-login")
-        return {"status": "error", "reason": "No stored session state"}
+    # The WhatsApp browser lives in a durable shared profile. Only one process
+    # may open it at a time — if the API's browser view or a group fetch holds
+    # it, skip this cycle WITHOUT touching the session status (a skipped check
+    # is not a disconnected account).
+    try:
+        profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=5)
+    except ProfileInUseError:
+        logger.info("🔒 WhatsApp profile in use by another browser — skipping this check")
+        return {"status": "skipped", "reason": "WhatsApp profile in use"}
+
+    try:
+        pw, context, page = await launch_whatsapp_persistent(headless=True)
+    except Exception as exc:
+        release_profile_lock(profile_lock)
+        logger.warning("⚠️  Could not open the WhatsApp profile (%s) — skipping check", exc)
+        return {"status": "skipped", "reason": f"Browser unavailable: {exc}"}
 
     match_threshold = 60.0
     filter_keywords = None
@@ -238,30 +268,35 @@ async def _check_whatsapp_messages_async() -> dict:
         filter_job_title = filters.job_title
         filter_experience = filters.experience_level
 
-    pw, context, page = await launch_whatsapp_browser(
-        headless=True, storage_state=storage_state
-    )
-
     stats = {"scraped": 0, "matched": 0, "rejected": 0, "forwarded": 0, "ocr_failed": 0}
 
     try:
         await navigate_to_whatsapp(page)
 
-        if not await is_logged_in(page):
-            # Session expired — update DB
-            with get_sync_db() as db:
-                from models.whatsapp import WhatsAppSession
+        # Give WhatsApp Web up to 30s to finish loading. A single early check
+        # used to misread a slow load as "session expired" and disconnect a
+        # perfectly healthy account.
+        if not await wait_for_login(page, timeout_seconds=30):
+            if await is_showing_qr(page):
+                # QR landing screen confirmed → genuinely logged out.
+                with get_sync_db() as db:
+                    from models.whatsapp import WhatsAppSession
 
-                expired = (
-                    db.query(WhatsAppSession)
-                    .filter(WhatsAppSession.id == session_row.id)
-                    .first()
-                )
-                if expired:
-                    expired.status = "disconnected"
-                    expired.is_active = False
-            logger.warning("⚠️  WhatsApp session expired")
-            return {"status": "error", "reason": "Session expired"}
+                    expired = (
+                        db.query(WhatsAppSession)
+                        .filter(WhatsAppSession.id == session_id)
+                        .first()
+                    )
+                    if expired:
+                        expired.status = "disconnected"
+                        expired.is_active = False
+                logger.warning("⚠️  WhatsApp session expired (QR screen confirmed)")
+                return {"status": "error", "reason": "Session expired"}
+            # Still loading / transient state — leave the session untouched.
+            logger.warning(
+                "⚠️  WhatsApp Web did not finish loading — skipping check, session left connected"
+            )
+            return {"status": "skipped", "reason": "WhatsApp Web slow to load"}
 
         # Process each monitored group
         for group in monitored_groups:
@@ -414,6 +449,7 @@ async def _check_whatsapp_messages_async() -> dict:
 
     finally:
         await safe_close(pw, context)
+        release_profile_lock(profile_lock)
 
     logger.info(
         f"📱 WhatsApp check complete: scraped={stats['scraped']} "
