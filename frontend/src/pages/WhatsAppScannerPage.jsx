@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { whatsappApi } from '../api/endpoints';
@@ -66,8 +66,6 @@ export default function WhatsAppScannerPage() {
   // ── Poll status when connecting ──
   useEffect(() => {
     if (status === 'connected') {
-      // Move straight into the configured flow after QR/2FA completes. The
-      // user should not have to discover and click Refresh Groups manually.
       loadGroups();
       loadFilters();
       loadStats();
@@ -103,18 +101,53 @@ export default function WhatsAppScannerPage() {
       else setGroupsLoading(true);
       const { data } = await whatsappApi.getGroups(search);
       const loadedGroups = data.groups || [];
-      // Search results are merged so selected/saved items never disappear.
-      setGroups((current) => search
-        ? [...loadedGroups, ...current.filter((g) => !loadedGroups.some((found) => found.group_name === g.group_name))]
-        : loadedGroups);
-      setSelectedGroups((current) => {
-        const available = search ? [...loadedGroups, ...current] : loadedGroups;
-        const savedNames = new Set(data.monitored_group_names || []);
-        return available.filter((g) => savedNames.has(g.group_name) || current.some((x) => x.group_name === g.group_name));
+      const savedMonitored = data.monitored_group_names || [];
+      const savedForward = data.forward_group_name || '';
+
+      // Merge search results with existing groups so selected items never disappear
+      setGroups((current) => {
+        if (!search) return loadedGroups;
+        const map = new Map();
+        for (const g of [...current, ...loadedGroups]) {
+          if (!map.has(g.group_name)) map.set(g.group_name, g);
+        }
+        return Array.from(map.values());
       });
-      // Restore the saved flow so reconnecting does not reset the user's
-      // monitored groups or forwarding destination.
-      if (data.forward_group_name) setForwardGroup(data.forward_group_name);
+
+      // Build selectedGroups from saved names + current selection, ensuring objects exist
+      setSelectedGroups((current) => {
+        // All available group objects for lookup (loaded + current selected)
+        const allAvailable = new Map();
+        for (const g of loadedGroups) allAvailable.set(g.group_name, g);
+        for (const g of current) {
+          if (!allAvailable.has(g.group_name)) allAvailable.set(g.group_name, g);
+        }
+        // Also include groups for saved names that might not be in first page
+        // Create placeholder objects if needed (so UI can show them as selected)
+        for (const name of savedMonitored) {
+          if (!allAvailable.has(name)) {
+            allAvailable.set(name, { group_name: name, whatsapp_id: '' });
+          }
+        }
+
+        // Prefer saved names when they exist, otherwise keep current manual selection
+        const targetNames = savedMonitored.length > 0
+          ? savedMonitored
+          : current.map((g) => g.group_name);
+
+        const result = [];
+        for (const name of targetNames) {
+          const obj = allAvailable.get(name);
+          if (obj) result.push(obj);
+        }
+        // If no saved names yet, keep up to 3 manually selected that still exist in available
+        if (savedMonitored.length === 0) {
+          return current.slice(0, 3);
+        }
+        return result.slice(0, 3);
+      });
+
+      if (savedForward) setForwardGroup(savedForward);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to load groups'));
     } finally {
@@ -142,7 +175,8 @@ export default function WhatsAppScannerPage() {
       setMatchThreshold(data.match_threshold ?? 60);
       setIntervalHours(data.interval_hours ?? 1);
     } catch (err) {
-      // Silently ignore
+      // If filters endpoint fails, show error for debugging
+      console.error('Failed to load filters', err);
     } finally {
       setFiltersLoading(false);
     }
@@ -193,13 +227,29 @@ export default function WhatsAppScannerPage() {
     }
     try {
       setSavingGroups(true);
+      // Resolve whatsapp_ids for both monitored and forward from known groups list
+      const groupMap = new Map();
+      for (const g of groups) groupMap.set(g.group_name, g);
+      for (const g of selectedGroups) {
+        if (!groupMap.has(g.group_name)) groupMap.set(g.group_name, g);
+      }
+
+      const monitoredIds = selectedGroups.map((g) => {
+        const found = groupMap.get(g.group_name);
+        return found?.whatsapp_id || g.whatsapp_id || '';
+      });
+
+      const forwardObj = groupMap.get(forwardGroup);
+      const forwardId = forwardObj?.whatsapp_id || '';
+
       await whatsappApi.selectGroups({
         monitored_group_names: selectedGroups.map((g) => g.group_name),
-        monitored_group_ids: selectedGroups.map((g) => g.whatsapp_id || ''),
+        monitored_group_ids: monitoredIds,
         forward_group_name: forwardGroup,
-        forward_group_id: '',
+        forward_group_id: forwardId,
       });
       toast.success('Groups saved successfully');
+      await loadGroups(); // reload to confirm persistence
       loadStats();
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to save groups'));
@@ -211,15 +261,31 @@ export default function WhatsAppScannerPage() {
   const handleSaveFilters = async () => {
     try {
       setSavingFilters(true);
+      // Flush pending keyword if user typed but didn't hit Enter/comma
+      let finalKeywords = [...keywords];
+      const pending = (pendingKeyword || '').trim();
+      if (pending) {
+        const parts = pending.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean);
+        for (const p of parts) {
+          if (!finalKeywords.some((t) => t.toLowerCase() === p.toLowerCase())) {
+            finalKeywords.push(p);
+          }
+        }
+      }
+
       await whatsappApi.saveFilters({
         role: role || null,
         job_title: jobTitle || null,
-        keywords: keywords.length > 0 ? keywords : null,
+        keywords: finalKeywords.length > 0 ? finalKeywords : null,
         experience_level: experienceLevel || null,
-        match_threshold: matchThreshold,
-        interval_hours: Number(intervalHours),
+        match_threshold: Number(matchThreshold),
+        interval_hours: Number(intervalHours) || 1,
       });
+      // update local state to reflect flushed pending keyword
+      if (finalKeywords.length !== keywords.length) setKeywords(finalKeywords);
+      if (pending) setPendingKeyword('');
       toast.success('Filters saved');
+      await loadFilters();
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to save filters'));
     } finally {
@@ -231,11 +297,16 @@ export default function WhatsAppScannerPage() {
     try {
       setScanning(true);
       await whatsappApi.triggerScan();
-      toast.success('Scan triggered!');
+      toast.success('Scan triggered! Results will appear in ~10-20s');
+      // Poll for results
       setTimeout(() => {
         loadMessages();
         loadStats();
-      }, 5000);
+      }, 4000);
+      setTimeout(() => {
+        loadMessages();
+        loadStats();
+      }, 12000);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to trigger scan'));
     } finally {
@@ -325,7 +396,7 @@ export default function WhatsAppScannerPage() {
 
           {groups.length === 0 && !groupsLoading && (
             <p className="mb-4 text-sm text-zinc-400">
-              No groups loaded yet. Click "Refresh Groups" above.
+              No groups loaded yet. Click Refresh Groups above.
             </p>
           )}
 
@@ -381,6 +452,15 @@ export default function WhatsAppScannerPage() {
               <p className="mt-1 text-xs text-zinc-500">
                 {selectedGroups.length}/3 groups selected
               </p>
+              {selectedGroups.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {selectedGroups.map((g) => (
+                    <span key={g.group_name} className="inline-flex items-center rounded-full bg-accent-500/10 px-2.5 py-1 text-xs text-accent-300 ring-1 ring-inset ring-accent-500/20">
+                      {g.group_name}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -401,6 +481,9 @@ export default function WhatsAppScannerPage() {
                     {g.group_name}
                   </option>
                 ))}
+                {forwardGroup && !groups.some((g) => g.group_name === forwardGroup) && (
+                  <option value={forwardGroup}>{forwardGroup} (saved)</option>
+                )}
               </select>
             </div>
           )}
@@ -463,6 +546,9 @@ export default function WhatsAppScannerPage() {
                   onPendingChange={setPendingKeyword}
                   placeholder="e.g., remote, python, hiring (comma-separated or Enter)..."
                 />
+                {pendingKeyword && (
+                  <p className="mt-1 text-xs text-zinc-500">Pending: {pendingKeyword} (will be saved)</p>
+                )}
               </div>
 
               <div className="grid grid-cols-3 gap-4">
@@ -485,11 +571,11 @@ export default function WhatsAppScannerPage() {
 
                 {/* Scan duration */}
                 <div>
-                  <label className="mb-1.5 block text-sm font-medium text-zinc-300">Job Duration</label>
+                  <label className="mb-1.5 block text-sm font-medium text-zinc-300">Scan Interval (hours)</label>
                   <input type="number" min="0.25" max="168" step="0.25" value={intervalHours}
                     onChange={(e) => setIntervalHours(e.target.value)}
                     className="w-full rounded-lg border border-surface-700 bg-surface-900 px-3 py-2 text-sm text-zinc-100 focus:border-accent-500 focus:outline-none" />
-                  <p className="mt-1 text-xs text-zinc-500">Hours between WhatsApp scans</p>
+                  <p className="mt-1 text-xs text-zinc-500">Hours between automatic scans</p>
                 </div>
 
                 {/* Match Threshold */}

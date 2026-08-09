@@ -535,27 +535,52 @@ async def select_whatsapp_groups(
             detail="Exactly 3 monitored groups must be selected.",
         )
 
+    # Normalise empty strings to None so DB stores NULL not '' — avoids
+    # unique/confusion issues and matches the model definition.
+    def _clean(v: str | None) -> str | None:
+        if v is None:
+            return None
+        s = v.strip()
+        return s if s else None
+
     # Clear existing monitored groups
     from sqlalchemy import delete as sa_delete
 
-    await db.execute(sa_delete(WhatsAppMonitoredGroup))
-    await db.execute(sa_delete(WhatsAppForwardGroup))
+    try:
+        await db.execute(sa_delete(WhatsAppMonitoredGroup))
+        await db.execute(sa_delete(WhatsAppForwardGroup))
+        await db.flush()
 
-    # Save monitored groups
-    for name, gid in zip(
-        payload.monitored_group_names, payload.monitored_group_ids
-    ):
-        group = WhatsAppMonitoredGroup(group_name=name, whatsapp_id=gid)
-        db.add(group)
+        # Save monitored groups
+        for name, gid in zip(
+            payload.monitored_group_names, payload.monitored_group_ids
+        ):
+            group = WhatsAppMonitoredGroup(
+                group_name=name.strip(),
+                whatsapp_id=_clean(gid),
+            )
+            db.add(group)
 
-    # Save forward group
-    forward = WhatsAppForwardGroup(
-        group_name=payload.forward_group_name,
-        whatsapp_id=payload.forward_group_id,
-    )
-    db.add(forward)
+        # Save forward group
+        forward = WhatsAppForwardGroup(
+            group_name=payload.forward_group_name.strip(),
+            whatsapp_id=_clean(payload.forward_group_id),
+        )
+        db.add(forward)
 
-    await db.commit()
+        await db.commit()
+        logger.info(
+            "💾 Saved monitored groups=%s forward=%s",
+            payload.monitored_group_names,
+            payload.forward_group_name,
+        )
+    except Exception as exc:
+        await db.rollback()
+        logger.error("Failed to save WhatsApp groups: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save groups: {exc}",
+        )
 
     return WhatsAppGroupSelectResponse(
         message="Groups saved successfully.",
@@ -579,7 +604,7 @@ async def get_whatsapp_filters(
     filters = result.scalars().first()
 
     if not filters:
-        # Return defaults
+        # Return defaults — must match the response schema (updated_at optional)
         return WhatsAppScanFilterResponse(
             id=0,
             role=None,
@@ -587,7 +612,9 @@ async def get_whatsapp_filters(
             keywords=None,
             experience_level=None,
             match_threshold=60.0,
+            interval_hours=1.0,
             updated_at=None,
+            last_scan_at=None,
         )
 
     return WhatsAppScanFilterResponse.model_validate(filters)
@@ -718,7 +745,25 @@ async def trigger_whatsapp_scan(
             detail="WhatsApp is not connected. Please connect first.",
         )
 
+    # Pre-flight: ensure groups are configured, otherwise the Celery task
+    # will immediately skip with "No monitored groups" and the user sees
+    # nothing happening.
+    mg_result = await db.execute(select(WhatsAppMonitoredGroup).limit(1))
+    if mg_result.scalars().first() is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No monitored groups configured. Please select and save 3 groups first.",
+        )
+
+    fg_result = await db.execute(select(WhatsAppForwardGroup).limit(1))
+    if fg_result.scalars().first() is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No forward group configured. Please select a forward group.",
+        )
+
     celery_app.send_task("tasks.check_whatsapp_messages", countdown=2)
+    logger.info("📱 Manual WhatsApp scan triggered by user %s", current_user.email)
 
     return {"message": "WhatsApp scan triggered. Results will be available shortly."}
 

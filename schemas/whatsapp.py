@@ -73,8 +73,10 @@ class WhatsAppScanFilterResponse(BaseModel):
     job_title: Optional[str] = None
     keywords: Optional[list[str]] = None
     experience_level: Optional[str] = None
-    match_threshold: float
-    updated_at: datetime
+    match_threshold: float = 60.0
+    interval_hours: float = 1.0
+    updated_at: Optional[datetime] = None
+    last_scan_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
