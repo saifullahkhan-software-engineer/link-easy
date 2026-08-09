@@ -194,7 +194,11 @@ MSG_TEXT_SELECTOR = (
 )
 
 # Image inside a message
-MSG_IMAGE_SELECTOR = 'img[data-testid="image-thumb"], div[data-testid="image-thumb"] img, img'
+MSG_IMAGE_SELECTOR = (
+    'img[data-testid="image-thumb"], div[data-testid="image-thumb"] img, '
+    'div[data-testid="media-caption"] img, img.selectable-img, div._amkd img, '
+    'img[src^="blob:"], div[role="button"] img[src^="blob:"]'
+)
 
 # Message input box
 MSG_INPUT_SELECTOR = 'div[contenteditable="true"][data-tab="10"], div[contenteditable="true"][role="textbox"]'
@@ -619,38 +623,96 @@ async def _extract_message_container(container) -> dict | None:
         is_image = False
         img_el = None
         try:
-            img_el = await container.query_selector(MSG_IMAGE_SELECTOR)
-            is_image = img_el is not None
+            img_candidates = await container.query_selector_all(MSG_IMAGE_SELECTOR)
+            for candidate in img_candidates:
+                try:
+                    is_valid_img = await candidate.evaluate("""(img) => {
+                        if (img.hasAttribute('data-plain-text')) return false;
+                        if (img.className && typeof img.className === 'string' && img.className.includes('emoji')) return false;
+                        if (img.alt && img.alt.toLowerCase().includes('emoji')) return false;
+                        const w = img.naturalWidth || img.clientWidth || img.width || 0;
+                        const h = img.naturalHeight || img.clientHeight || img.height || 0;
+                        if (w > 0 && h > 0 && w < 40 && h < 40) return false;
+                        return true;
+                    }""")
+                    if is_valid_img:
+                        img_el = candidate
+                        is_image = True
+                        break
+                except Exception:
+                    continue
+
+            if not is_image:
+                all_imgs = await container.query_selector_all('img')
+                for candidate in all_imgs:
+                    try:
+                        is_real = await candidate.evaluate("""(img) => {
+                            if (img.hasAttribute('data-plain-text')) return false;
+                            if (img.className && typeof img.className === 'string' && img.className.includes('emoji')) return false;
+                            if (img.alt && img.alt.toLowerCase().includes('emoji')) return false;
+                            const w = img.naturalWidth || img.clientWidth || img.width || 0;
+                            const h = img.naturalHeight || img.clientHeight || img.height || 0;
+                            return w >= 50 && h >= 50;
+                        }""")
+                        if is_real:
+                            img_el = candidate
+                            is_image = True
+                            break
+                    except Exception:
+                        continue
         except Exception:
             pass
 
         message_text = None
         raw_image_bytes = None
 
-        if is_image:
+        if is_image and img_el is not None:
             try:
-                img_src = await img_el.get_attribute("src")
-                if img_src and img_src.startswith("blob:"):
-                    raw_image_bytes = await img_el.evaluate("""async (img) => {
-                        const resp = await fetch(img.src);
-                        const blob = await resp.blob();
-                        return new Promise((resolve) => {
-                            const reader = new FileReader();
-                            reader.onloadend = () => resolve(reader.result);
-                            reader.readAsDataURL(blob);
-                        });
-                    }""")
-                elif img_src and img_src.startswith("data:"):
-                    raw_image_bytes = img_src
-                else:
-                    # Some WhatsApp builds expose a protected blob URL that
-                    # cannot be fetched directly. A screenshot still gives
-                    # OCR a usable image in that case.
+                raw_image_bytes = await img_el.evaluate("""async (img) => {
+                    try {
+                        if (img.src && img.src.startsWith('blob:')) {
+                            try {
+                                const resp = await fetch(img.src);
+                                if (resp.ok) {
+                                    const blob = await resp.blob();
+                                    return await new Promise((resolve) => {
+                                        const reader = new FileReader();
+                                        reader.onloadend = () => resolve(reader.result);
+                                        reader.readAsDataURL(blob);
+                                    });
+                                }
+                            } catch (e) {
+                                // blob fetch blocked by CSP or permissions — fall through to canvas
+                            }
+                        }
+                        if (img.src && img.src.startsWith('data:image')) {
+                            return img.src;
+                        }
+                        const w = img.naturalWidth || img.clientWidth || img.width || 0;
+                        const h = img.naturalHeight || img.clientHeight || img.height || 0;
+                        if (w > 0 && h > 0) {
+                            const canvas = document.createElement('canvas');
+                            canvas.width = w;
+                            canvas.height = h;
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, w, h);
+                            return canvas.toDataURL('image/png');
+                        }
+                    } catch (e) {
+                        return null;
+                    }
+                    return null;
+                }""")
+            except Exception as exc:
+                logger.debug("Image download evaluate failed: %s", exc)
+
+            if not raw_image_bytes:
+                try:
                     image_bytes = await img_el.screenshot()
                     if image_bytes:
                         raw_image_bytes = base64.b64encode(image_bytes).decode()
-            except Exception as exc:
-                logger.debug("Image download failed: %s", exc)
+                except Exception as exc:
+                    logger.debug("Image screenshot fallback failed: %s", exc)
 
             try:
                 text_el = await container.query_selector(MSG_TEXT_SELECTOR)
