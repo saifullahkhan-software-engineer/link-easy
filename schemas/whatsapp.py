@@ -5,7 +5,7 @@ FILE: schemas/whatsapp.py
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── Connection ────────────────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ class WhatsAppGroupItem(BaseModel):
 
 class WhatsAppGroupListResponse(BaseModel):
     groups: list[WhatsAppGroupItem]
-    monitored_group_names: list[str] = []
+    monitored_group_names: list[str] = Field(default_factory=list)
     forward_group_name: Optional[str] = None
 
 
@@ -39,16 +39,51 @@ class WhatsAppGroupSelectRequest(BaseModel):
     # Optional for the legacy singleton scanner. New filter jobs always send
     # their filter id so every job keeps an independent group configuration.
     filter_id: Optional[int] = None
-    monitored_group_names: list[str] = Field(..., min_length=3, max_length=3)
-    monitored_group_ids: list[str] = Field(..., min_length=3, max_length=3)
-    forward_group_name: str
+    monitored_group_names: list[str] = Field(..., min_length=1, max_length=3)
+    monitored_group_ids: list[str] = Field(..., min_length=1, max_length=3)
+    forward_group_name: str = Field(..., min_length=1)
     forward_group_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_group_lists(self):
+        if len(self.monitored_group_names) != len(self.monitored_group_ids):
+            raise ValueError("monitored group names and ids must have the same length")
+        normalized_names = [name.strip().casefold() for name in self.monitored_group_names]
+        if any(not name for name in normalized_names):
+            raise ValueError("monitored group names cannot be empty")
+        if len(set(normalized_names)) != len(normalized_names):
+            raise ValueError("monitored groups must be unique")
+        normalized_ids = [group_id.strip() for group_id in self.monitored_group_ids if group_id.strip()]
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise ValueError("monitored group ids must be unique")
+        return self
 
 
 class WhatsAppGroupSelectResponse(BaseModel):
     message: str
     monitored_groups: list[str]
     forward_group: str
+
+
+class WhatsAppSavedGroup(BaseModel):
+    """Saved group configuration and its durable incremental-scan cursor."""
+
+    id: int
+    group_name: str
+    whatsapp_id: Optional[str] = None
+    last_checked_at: Optional[datetime] = None
+    last_message_id: Optional[str] = None
+    last_message_timestamp: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class WhatsAppSavedForwardGroup(BaseModel):
+    id: int
+    group_name: str
+    whatsapp_id: Optional[str] = None
+
+    model_config = {"from_attributes": True}
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
@@ -61,6 +96,7 @@ class WhatsAppScanFilterRequest(BaseModel):
     experience_level: Optional[str] = None  # entry | mid | senior
     match_threshold: float = Field(60.0, ge=0.0, le=100.0)
     interval_hours: float = Field(1.0, ge=0.25, le=168.0)
+    latest_messages_limit: int = Field(20, ge=1, le=100)
 
     @field_validator("experience_level")
     @classmethod
@@ -73,8 +109,8 @@ class WhatsAppScanFilterRequest(BaseModel):
 class WhatsAppScanFilterCreate(WhatsAppScanFilterRequest):
     """Payload for a new filter job.
 
-    A filter is created as ``draft``. Groups can be configured on the detail
-    page before the user starts the scheduler.
+    A filter is created as ``draft``. Groups can be configured on the separate
+    edit page before the user starts the scheduler.
     """
     name: str = Field(..., min_length=1, max_length=255)
 
@@ -88,6 +124,7 @@ class WhatsAppScanFilterUpdate(BaseModel):
     experience_level: Optional[str] = None
     match_threshold: Optional[float] = Field(None, ge=0.0, le=100.0)
     interval_hours: Optional[float] = Field(None, ge=0.25, le=168.0)
+    latest_messages_limit: Optional[int] = Field(None, ge=1, le=100)
 
     @field_validator("experience_level")
     @classmethod
@@ -108,13 +145,16 @@ class WhatsAppScanFilterResponse(BaseModel):
     experience_level: Optional[str] = None
     match_threshold: float = 60.0
     interval_hours: float = 1.0
+    latest_messages_limit: int = 20
     remaining_seconds: Optional[int] = None
     next_scan_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     last_scan_at: Optional[datetime] = None
-    monitored_group_names: list[str] = []
+    monitored_group_names: list[str] = Field(default_factory=list)
+    monitored_groups: list[WhatsAppSavedGroup] = Field(default_factory=list)
     forward_group_name: Optional[str] = None
+    forward_group: Optional[WhatsAppSavedForwardGroup] = None
     total_count: int = 0
     matched_count: int = 0
     rejected_count: int = 0

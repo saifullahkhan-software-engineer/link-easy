@@ -31,6 +31,7 @@ export default function WhatsAppFilterCreatePage() {
   const [experienceLevel, setExperienceLevel] = useState('');
   const [matchThreshold, setMatchThreshold] = useState(60);
   const [intervalHours, setIntervalHours] = useState(1);
+  const [latestMessagesLimit, setLatestMessagesLimit] = useState(20);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -44,6 +45,11 @@ export default function WhatsAppFilterCreatePage() {
       toast.error('Add a role, job title, or keyword so the filter can match posts');
       return;
     }
+    const latestLimit = Number(latestMessagesLimit);
+    if (!Number.isInteger(latestLimit) || latestLimit < 1 || latestLimit > 100) {
+      toast.error('Latest messages per group must be between 1 and 100');
+      return;
+    }
 
     try {
       setSaving(true);
@@ -55,9 +61,10 @@ export default function WhatsAppFilterCreatePage() {
         experience_level: experienceLevel || null,
         match_threshold: Number(matchThreshold),
         interval_hours: Number(intervalHours) || 1,
+        latest_messages_limit: latestLimit,
       });
-      toast.success('WhatsApp filter created');
-      navigate(`/app/whatsapp-scanner/jobs/${data.id}`);
+      toast.success('WhatsApp filter created. Now choose its groups.');
+      navigate(`/app/whatsapp-scanner/jobs/${data.id}/edit`);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to create WhatsApp filter'));
     } finally {
@@ -74,7 +81,7 @@ export default function WhatsAppFilterCreatePage() {
         <div>
           <h1 className="text-2xl font-bold text-zinc-100">Create WhatsApp Filter</h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Configure what to look for in WhatsApp job groups. You can select groups and start the filter from its detail page.
+            Configure what to look for. After creating it, choose monitored groups on its separate edit page.
           </p>
         </div>
       </div>
@@ -93,7 +100,7 @@ export default function WhatsAppFilterCreatePage() {
         </div>
 
         <div className="rounded-lg border border-accent-500/20 bg-accent-500/5 p-4 text-sm text-zinc-300">
-          This filter will be created as a <span className="font-semibold text-accent-300">draft</span>. On the next page, select three monitored groups, choose a forwarding group, and press Start when you are ready.
+          This filter will be created as a <span className="font-semibold text-accent-300">draft</span>. On the next page, select one to three monitored groups, choose a forwarding group, and save the configuration.
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
@@ -130,7 +137,7 @@ export default function WhatsAppFilterCreatePage() {
           {pendingKeyword && <p className="mt-1 text-xs text-zinc-500">Pending: {pendingKeyword}</p>}
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div>
             <label className="mb-1.5 block text-sm font-medium text-zinc-300">Experience Level</label>
             <select
@@ -155,6 +162,19 @@ export default function WhatsAppFilterCreatePage() {
               onChange={(event) => setIntervalHours(event.target.value)}
               className="w-full rounded-lg border border-surface-700 bg-surface-900 px-3 py-2 text-sm text-zinc-100 focus:border-accent-500 focus:outline-none"
             />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-zinc-300">Latest Messages / Group</label>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              value={latestMessagesLimit}
+              onChange={(event) => setLatestMessagesLimit(event.target.value)}
+              className="w-full rounded-lg border border-surface-700 bg-surface-900 px-3 py-2 text-sm text-zinc-100 focus:border-accent-500 focus:outline-none"
+            />
+            <p className="mt-1 text-xs text-zinc-500">Maximum pulled per scan</p>
           </div>
           <div>
             <label className="mb-1.5 block text-sm font-medium text-zinc-300">Match Threshold ({matchThreshold})</label>

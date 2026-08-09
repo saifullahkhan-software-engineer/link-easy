@@ -114,6 +114,10 @@ class WhatsAppScanFilter(Base):
     match_threshold = Column(Float, nullable=False, default=60.0)
     # Minimum delay between automatic WhatsApp scans.
     interval_hours = Column(Float, nullable=False, default=1.0)
+    # Maximum number of newest messages inspected in each monitored group per
+    # scan. The cursor stored on each monitored-group row prevents later scans
+    # from walking back into messages that have already been processed.
+    latest_messages_limit = Column(Integer, nullable=False, default=20, server_default="20")
     last_scan_at = Column(DateTime(timezone=True), nullable=True)
     # Scheduling fields mirror FeedScrollJob so pause/resume survives reloads.
     remaining_seconds = Column(Integer, nullable=True)

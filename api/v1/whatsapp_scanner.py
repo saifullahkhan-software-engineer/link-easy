@@ -145,13 +145,16 @@ async def _filter_response(
         experience_level=filter_row.experience_level,
         match_threshold=filter_row.match_threshold,
         interval_hours=filter_row.interval_hours,
+        latest_messages_limit=filter_row.latest_messages_limit,
         remaining_seconds=filter_row.remaining_seconds,
         next_scan_at=filter_row.next_scan_at,
         updated_at=filter_row.updated_at,
         created_at=getattr(filter_row, "created_at", None),
         last_scan_at=filter_row.last_scan_at,
         monitored_group_names=[group.group_name for group in monitored],
+        monitored_groups=monitored,
         forward_group_name=forward.group_name if forward else None,
+        forward_group=forward,
         total_count=total,
         matched_count=await _count("matched"),
         rejected_count=await _count("rejected"),
@@ -631,29 +634,22 @@ async def select_whatsapp_groups(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppGroupSelectResponse:
-    """Save the 3 monitored groups and 1 forward group.
+    """Save one to three monitored groups and one forwarding group.
 
-    Enforces exactly 3 monitored groups.
+    Existing monitored-group rows are reconciled instead of deleted and
+    recreated.  This is important because each row stores the durable
+    ``last_message_id`` cursor used to prevent later scans from walking back
+    over messages that were already pulled.
     """
-    if len(payload.monitored_group_names) != 3:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Exactly 3 monitored groups must be selected.",
-        )
-
     if payload.filter_id is not None:
         await _load_owned_filter(payload.filter_id, current_user, db)
 
-    # Normalise empty strings to None so DB stores NULL not '' — avoids
-    # unique/confusion issues and matches the model definition.
-    def _clean(v: str | None) -> str | None:
-        if v is None:
+    # Normalise empty strings to None so DB stores NULL rather than ''.
+    def _clean(value: str | None) -> str | None:
+        if value is None:
             return None
-        s = v.strip()
-        return s if s else None
-
-    # Clear existing monitored groups
-    from sqlalchemy import delete as sa_delete
+        cleaned = value.strip()
+        return cleaned if cleaned else None
 
     try:
         group_scope = (
@@ -666,32 +662,80 @@ async def select_whatsapp_groups(
             if payload.filter_id is not None
             else WhatsAppForwardGroup.filter_id.is_(None)
         )
-        await db.execute(sa_delete(WhatsAppMonitoredGroup).where(group_scope))
-        await db.execute(sa_delete(WhatsAppForwardGroup).where(forward_scope))
-        await db.flush()
 
-        # Save monitored groups
-        for name, gid in zip(
+        existing_result = await db.execute(
+            select(WhatsAppMonitoredGroup)
+            .where(group_scope)
+            .order_by(WhatsAppMonitoredGroup.id)
+        )
+        existing_groups = list(existing_result.scalars().all())
+        unused_groups = list(existing_groups)
+
+        # Prefer a stable WhatsApp id, then fall back to the saved group name.
+        # Keeping the same ORM row keeps its last-message checkpoint intact.
+        for raw_name, raw_gid in zip(
             payload.monitored_group_names, payload.monitored_group_ids
         ):
-            group = WhatsAppMonitoredGroup(
-                filter_id=payload.filter_id,
-                group_name=name.strip(),
-                whatsapp_id=_clean(gid),
+            name = raw_name.strip()
+            gid = _clean(raw_gid)
+            matched = next(
+                (group for group in unused_groups if gid and group.whatsapp_id == gid),
+                None,
             )
-            db.add(group)
+            if matched is None:
+                matched = next(
+                    (
+                        group
+                        for group in unused_groups
+                        if group.group_name.casefold() == name.casefold()
+                    ),
+                    None,
+                )
 
-        # Save forward group
-        forward = WhatsAppForwardGroup(
-            filter_id=payload.filter_id,
-            group_name=payload.forward_group_name.strip(),
-            whatsapp_id=_clean(payload.forward_group_id),
+            if matched is None:
+                db.add(
+                    WhatsAppMonitoredGroup(
+                        filter_id=payload.filter_id,
+                        group_name=name,
+                        whatsapp_id=gid,
+                    )
+                )
+            else:
+                matched.group_name = name
+                # A placeholder selected while WhatsApp is disconnected has no
+                # id; do not erase the previously saved stable id in that case.
+                if gid is not None:
+                    matched.whatsapp_id = gid
+                unused_groups.remove(matched)
+
+        for removed_group in unused_groups:
+            await db.delete(removed_group)
+
+        forward_result = await db.execute(
+            select(WhatsAppForwardGroup)
+            .where(forward_scope)
+            .order_by(WhatsAppForwardGroup.id)
         )
-        db.add(forward)
+        existing_forward_groups = list(forward_result.scalars().all())
+        if existing_forward_groups:
+            forward = existing_forward_groups[0]
+            forward.group_name = payload.forward_group_name.strip()
+            cleaned_forward_id = _clean(payload.forward_group_id)
+            if cleaned_forward_id is not None:
+                forward.whatsapp_id = cleaned_forward_id
+            for duplicate_forward in existing_forward_groups[1:]:
+                await db.delete(duplicate_forward)
+        else:
+            forward = WhatsAppForwardGroup(
+                filter_id=payload.filter_id,
+                group_name=payload.forward_group_name.strip(),
+                whatsapp_id=_clean(payload.forward_group_id),
+            )
+            db.add(forward)
 
         await db.commit()
         logger.info(
-            "💾 Saved monitored groups=%s forward=%s",
+            "💾 Saved monitored groups=%s forward=%s (scan cursors preserved)",
             payload.monitored_group_names,
             payload.forward_group_name,
         )
@@ -788,6 +832,7 @@ async def create_whatsapp_filter_job(
         experience_level=payload.experience_level,
         match_threshold=payload.match_threshold,
         interval_hours=payload.interval_hours,
+        latest_messages_limit=payload.latest_messages_limit,
     )
     db.add(filter_row)
     await db.commit()
@@ -870,6 +915,28 @@ async def activate_whatsapp_filter_job(
     filter_row = await _load_owned_filter(filter_id, current_user, db)
     if filter_row.status == "active":
         raise HTTPException(status_code=409, detail="Filter is already active")
+
+    monitored_result = await db.execute(
+        select(WhatsAppMonitoredGroup.id)
+        .where(WhatsAppMonitoredGroup.filter_id == filter_id)
+        .limit(1)
+    )
+    if monitored_result.scalar() is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Select at least one monitored group before starting this filter.",
+        )
+
+    forward_result = await db.execute(
+        select(WhatsAppForwardGroup.id)
+        .where(WhatsAppForwardGroup.filter_id == filter_id)
+        .limit(1)
+    )
+    if forward_result.scalar() is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Select a forwarding group before starting this filter.",
+        )
 
     now = datetime.now(timezone.utc)
     filter_row.status = "active"
@@ -1000,6 +1067,7 @@ async def save_whatsapp_filters(
         filters.experience_level = payload.experience_level
         filters.match_threshold = payload.match_threshold
         filters.interval_hours = payload.interval_hours
+        filters.latest_messages_limit = payload.latest_messages_limit
         filters.updated_at = datetime.now(timezone.utc)
     else:
         # Create new
@@ -1013,6 +1081,7 @@ async def save_whatsapp_filters(
             experience_level=payload.experience_level,
             match_threshold=payload.match_threshold,
             interval_hours=payload.interval_hours,
+            latest_messages_limit=payload.latest_messages_limit,
         )
         db.add(filters)
 
@@ -1114,7 +1183,7 @@ async def trigger_whatsapp_scan(
     if mg_result.scalars().first() is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No monitored groups configured. Please select and save 3 groups first.",
+            detail="No monitored groups configured. Please select and save at least one group first.",
         )
 
     fg_result = await db.execute(forward_query)

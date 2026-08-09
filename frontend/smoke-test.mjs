@@ -140,7 +140,7 @@ const CASES = [
     mustContain: ['WhatsApp Filters', 'New Filter', 'No WhatsApp filters yet', 'Create Filter'],
   },
   {
-    name: 'whatsapp filter detail — groups, criteria, stats, and messages',
+    name: 'whatsapp filter detail — read-only summary, checkpoints, stats, and messages',
     path: '/app/whatsapp-scanner/jobs/1',
     storage: AUTH_TOKENS,
     api: {
@@ -148,21 +148,50 @@ const CASES = [
       'GET /api/v1/whatsapp/filters/jobs/1': (res) => json(res, 200, {
         id: 1, name: 'Dubai Engineering Jobs', status: 'active', role: 'Engineer',
         job_title: 'Backend Developer', keywords: ['python'], experience_level: 'senior',
-        match_threshold: 60, interval_hours: 1, monitored_group_names: [],
-        forward_group_name: null, total_count: 9, matched_count: 2,
-        rejected_count: 3, forwarded_count: 1,
-      }),
-      'GET /api/v1/whatsapp/groups': (res) => json(res, 200, {
-        groups: [{ group_name: 'Dubai Jobs', whatsapp_id: 'g1' }],
-        monitored_group_names: [],
-        forward_group_name: null,
+        match_threshold: 60, interval_hours: 1, latest_messages_limit: 25,
+        monitored_group_names: ['Dubai Jobs'],
+        monitored_groups: [{
+          id: 7, group_name: 'Dubai Jobs', whatsapp_id: 'g1',
+          last_checked_at: '2026-08-10T10:00:00Z', last_message_id: 'wamid.latest-123',
+          last_message_timestamp: '10:00',
+        }],
+        forward_group_name: 'Matched Jobs',
+        forward_group: { id: 8, group_name: 'Matched Jobs', whatsapp_id: 'g2' },
+        total_count: 9, matched_count: 2, rejected_count: 3, forwarded_count: 1,
       }),
       'GET /api/v1/whatsapp/stats': (res) => json(res, 200, {
         matched_count: 2, rejected_count: 3, forwarded_count: 1, pending_count: 4, total_count: 9,
       }),
       'GET /api/v1/whatsapp/messages': (res) => json(res, 200, { messages: [], total: 0, page: 1, page_size: 20 }),
     },
-    mustContain: ['Connected', 'Dubai Engineering Jobs', 'Select Groups to Monitor', 'Dubai Jobs', 'Search Filters', 'Trigger Manual Scan'],
+    mustContain: ['Connected', 'Dubai Engineering Jobs', 'Configuration Summary', 'Scan Checkpoints', 'wamid.latest-123', 'Edit Filter', 'Trigger Manual Scan'],
+    mustNotContain: ['Select Groups to Monitor', 'Search Filters'],
+  },
+  {
+    name: 'whatsapp filter edit — criteria, one-to-three groups, and latest-message limit',
+    path: '/app/whatsapp-scanner/jobs/1/edit',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true }),
+      'GET /api/v1/whatsapp/filters/jobs/1': (res) => json(res, 200, {
+        id: 1, name: 'Dubai Engineering Jobs', status: 'draft', role: 'Engineer',
+        job_title: 'Backend Developer', keywords: ['python'], experience_level: 'senior',
+        match_threshold: 60, interval_hours: 1, latest_messages_limit: 25,
+        monitored_group_names: ['Dubai Jobs'],
+        monitored_groups: [{ id: 7, group_name: 'Dubai Jobs', whatsapp_id: 'g1' }],
+        forward_group_name: 'Matched Jobs',
+        forward_group: { id: 8, group_name: 'Matched Jobs', whatsapp_id: 'g2' },
+      }),
+      'GET /api/v1/whatsapp/groups': (res) => json(res, 200, {
+        groups: [
+          { group_name: 'Dubai Jobs', whatsapp_id: 'g1' },
+          { group_name: 'Matched Jobs', whatsapp_id: 'g2' },
+        ],
+        monitored_group_names: ['Dubai Jobs'],
+        forward_group_name: 'Matched Jobs',
+      }),
+    },
+    mustContain: ['Edit WhatsApp Filter', 'Search Filters', 'Select Groups to Monitor', 'Choose between 1 and 3 groups', 'Latest Messages / Group', 'Incremental scanning is enabled automatically'],
   },
   {
     name: 'linkedin account page — not connected shows connect form',
@@ -370,7 +399,7 @@ const CASES = [
 let failures = 0;
 
 for (const testCase of CASES) {
-  const { mustContain, storage = {}, api = {} } = testCase;
+  const { mustContain, mustNotContain = [], storage = {}, api = {} } = testCase;
   const label = testCase.name || testCase.path;
 
   // Per-case same-origin stub API so axios('/api/v1/...') resolves to it.
@@ -438,13 +467,15 @@ for (const testCase of CASES) {
 
     const html = window.document.getElementById('root')?.innerHTML || '';
     const missing = mustContain.filter((text) => !html.includes(text));
-    if (missing.length || errors.length) {
+    const unexpected = mustNotContain.filter((text) => html.includes(text));
+    if (missing.length || unexpected.length || errors.length) {
       failures++;
       console.log(`✗ ${label}`);
       if (missing.length) console.log(`   missing content: ${missing.join(' | ')}`);
+      if (unexpected.length) console.log(`   unexpected content: ${unexpected.join(' | ')}`);
       if (errors.length) console.log(`   errors: ${[...new Set(errors)].slice(0, 3).join(' ;; ')}`);
     } else {
-      console.log(`✓ ${label} — ${mustContain.length} assertions passed`);
+      console.log(`✓ ${label} — ${mustContain.length + mustNotContain.length} assertions passed`);
     }
   } catch (err) {
     failures++;
