@@ -17,15 +17,130 @@ rather than React hashed class names.
 import asyncio
 import base64
 import json
+import os
 import random
 import time
 from typing import Optional
 
 from patchright.async_api import async_playwright, BrowserContext, Page
 
+from core.config import settings
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# ── Persistent WhatsApp profile ──────────────────────────────────────────────
+# WhatsApp Web keeps its device/session keys in IndexedDB, which Playwright's
+# ``storage_state()`` does NOT capture (cookies + localStorage only). Restoring
+# a "session" from storage_state alone therefore opens a half-broken device,
+# and launching a second browser from it is exactly what used to kill a fresh
+# connection right after the QR scan.
+#
+# The fix mirrors the LinkedIn accounts rollout (docs/persistent_profiles_rollout.md):
+# one durable Chromium user-data-dir for WhatsApp, opened via
+# ``launch_persistent_context``. Cookies, localStorage, IndexedDB and service
+# workers all persist to disk continuously — the profile directory itself is
+# the session. Every WhatsApp browser (QR view, group scraping, scan task)
+# reuses this ONE profile, serialized by the redis profile lock, so there is
+# never more than one browser on the account at a time.
+
+WHATSAPP_PROFILE_SUBDIR = "whatsapp"
+
+LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-extensions",
+    "--no-first-run",
+]
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+"""
+
+
+def whatsapp_profile_dir() -> str:
+    """Path of the durable WhatsApp Chromium profile directory."""
+    return os.path.join(settings.PROFILE_STORAGE_DIR, WHATSAPP_PROFILE_SUBDIR)
+
+
+def ensure_whatsapp_profile_dir() -> str:
+    """Create the WhatsApp profile dir with restrictive 0o700 permissions.
+
+    The profile contains live session material on disk (cookies, IndexedDB),
+    so it is treated as secret — same policy as the per-account LinkedIn
+    profiles in automation/browser.py. Idempotent.
+    """
+    path = whatsapp_profile_dir()
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
+async def launch_whatsapp_persistent(headless: bool = True) -> tuple:
+    """Launch Chromium on the durable WhatsApp profile.
+
+    The QR login happens inside this profile and every later launch
+    (group scraping, periodic scans) restores the same device session from
+    disk — no storage_state round-trip, and never two browsers racing on the
+    same account.
+
+    Callers MUST hold the ``profile_lock:whatsapp`` redis lock (see
+    worker/profile_lock.py): Chromium allows only one process per
+    user-data-dir.
+
+    Returns:
+        (playwright_instance, context, page) — a persistent context has no
+        separate Browser object; clean up with ``safe_close(pw, context)``.
+    """
+    profile_dir = ensure_whatsapp_profile_dir()
+
+    pw = await async_playwright().start()
+    try:
+        context: BrowserContext = await pw.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=headless,
+            viewport={"width": 1280, "height": 900},
+            locale="en-US",
+            timezone_id="America/New_York",
+            permissions=["notifications"],
+            user_agent=USER_AGENT,
+            args=LAUNCH_ARGS,
+        )
+    except Exception:
+        # Don't leak the driver subprocess if the context launch fails
+        # (e.g. the profile dir is SingletonLocked by another process).
+        try:
+            await pw.stop()
+        except Exception:
+            pass
+        raise
+
+    # A restored profile may reopen previous tabs; use the first page if one
+    # exists, otherwise create one, and close any extras.
+    page: Page = context.pages[0] if context.pages else await context.new_page()
+    for extra in [p for p in context.pages if p is not page]:
+        try:
+            await extra.close()
+        except Exception:
+            pass
+
+    await context.add_init_script(STEALTH_SCRIPT)
+
+    return pw, context, page
 
 # ── WhatsApp Web selectors (stable attributes, no CSS classes) ──────────────
 
@@ -97,6 +212,13 @@ async def launch_whatsapp_browser(
 ) -> tuple:
     """Launch a Playwright Chromium browser for WhatsApp Web.
 
+    .. deprecated::
+        Kept only for legacy/CLI flows. All real callers now use
+        :func:`launch_whatsapp_persistent` — ``storage_state`` alone cannot
+        restore a WhatsApp Web session (device keys live in IndexedDB), and
+        launching a second stateless browser on the account is what used to
+        break fresh connections.
+
     Args:
         headless: False for QR login flow (user needs to see QR), True for background tasks.
         storage_state: Optional saved browser state (cookies, localStorage) to restore.
@@ -108,14 +230,7 @@ async def launch_whatsapp_browser(
 
     launch_options = {
         "headless": headless,
-        "args": [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-extensions",
-            "--no-first-run",
-        ],
+        "args": LAUNCH_ARGS,
     }
 
     browser = await pw.chromium.launch(**launch_options)
@@ -125,11 +240,7 @@ async def launch_whatsapp_browser(
         "locale": "en-US",
         "timezone_id": "America/New_York",
         "permissions": ["notifications"],
-        "user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
+        "user_agent": USER_AGENT,
     }
 
     if storage_state:
@@ -139,14 +250,7 @@ async def launch_whatsapp_browser(
     page: Page = await context.new_page()
 
     # Basic stealth patches for WhatsApp Web
-    await context.add_init_script(
-        """
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-        window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
-        """
-    )
+    await context.add_init_script(STEALTH_SCRIPT)
 
     return pw, context, page
 
@@ -174,6 +278,59 @@ async def is_logged_in(page: Page) -> bool:
                 return True
         except Exception:  # page may be mid-navigation
             continue
+    return False
+
+
+async def wait_for_login(page: Page, timeout_seconds: float = 30.0) -> bool:
+    """Poll for the logged-in UI for up to ``timeout_seconds``.
+
+    WhatsApp Web routinely takes 5–15 seconds after ``domcontentloaded``
+    before the chat list mounts. Callers used to make a single
+    ``is_logged_in`` check after ~3 seconds and misread slow loads as
+    "session expired", which then flipped a perfectly good connection to
+    disconnected. Always wait instead.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            if await is_logged_in(page):
+                return True
+        except Exception:  # page may be mid-navigation
+            pass
+        await asyncio.sleep(1.5)
+    return False
+
+
+async def is_showing_qr(page: Page) -> bool:
+    """True when WhatsApp Web is on the QR / login landing screen.
+
+    Used to distinguish a genuinely logged-out session (→ safe to mark
+    disconnected) from a page that is still loading (→ leave the session
+    untouched and retry later).
+    """
+    for selector in (
+        'canvas[aria-label="Scan me!"]',
+        'div[data-testid="qrcode"]',
+        'img[alt*="QR" i]',
+    ):
+        try:
+            el = await page.query_selector(selector)
+            if el is not None and await el.is_visible():
+                return True
+        except Exception:
+            continue
+
+    # Fallback: a visible generic QR canvas with no logged-in markers at all.
+    try:
+        canvas = await page.query_selector("canvas")
+        if canvas is not None and await canvas.is_visible():
+            for selector in LOGGED_IN_SELECTORS:
+                el = await page.query_selector(selector)
+                if el is not None:
+                    return False
+            return True
+    except Exception:
+        pass
     return False
 
 

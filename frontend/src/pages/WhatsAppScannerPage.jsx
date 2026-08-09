@@ -1,28 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import TagInput from '../components/feed/TagInput';
 import { Spinner } from '../components/Spinner';
-import BrowserViewPanel from '../components/live/BrowserViewPanel';
+import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-function StatusBadge({ status }) {
-  const map = {
-    disconnected: { bg: 'bg-red-500/10', text: 'text-red-300', ring: 'ring-red-500/20', label: 'Disconnected' },
-    waiting_qr: { bg: 'bg-yellow-500/10', text: 'text-yellow-300', ring: 'ring-yellow-500/20', label: 'Waiting for QR' },
-    connected: { bg: 'bg-green-500/10', text: 'text-green-300', ring: 'ring-green-500/20', label: 'Connected' },
-    error: { bg: 'bg-red-500/10', text: 'text-red-300', ring: 'ring-red-500/20', label: 'Error' },
-  };
-  const s = map[status] || map.disconnected;
-  return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${s.bg} ${s.text} ${s.ring}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${status === 'connected' ? 'bg-green-400 animate-pulse' : 'bg-current'}`} />
-      {s.label}
-    </span>
-  );
-}
 
 function ScoreBadge({ score }) {
   if (score == null) return <span className="text-xs text-zinc-500">—</span>;
@@ -35,9 +20,8 @@ function ScoreBadge({ score }) {
 }
 
 export default function WhatsAppScannerPage() {
-  // ── Connection state ──
+  // ── Connection state (status only — connecting happens on the Accounts page) ──
   const [status, setStatus] = useState('disconnected');
-  const [connecting, setConnecting] = useState(false);
   const [statusPolling, setStatusPolling] = useState(null);
 
   // ── Groups ──
@@ -170,19 +154,6 @@ export default function WhatsAppScannerPage() {
 
   // ── Actions ──
 
-  const handleConnect = async () => {
-    try {
-      setConnecting(true);
-      const { data } = await whatsappApi.connect();
-      toast.success(data?.message || 'WhatsApp connection started — scan the QR code');
-      setStatus(data?.status || 'waiting_qr');
-    } catch (err) {
-      toast.error(getErrorMessage(err, 'Failed to start connection'));
-    } finally {
-      setConnecting(false);
-    }
-  };
-
   const handleRefreshGroups = () => {
     if (status !== 'connected') {
       toast.error('WhatsApp is not connected');
@@ -277,12 +248,12 @@ export default function WhatsAppScannerPage() {
         </p>
       </div>
 
-      {/* ── Section 1: Connection ───────────────────────────────── */}
+      {/* ── Section 1: Connection status (read-only) ─────────────── */}
       <div className="rounded-xl border border-surface-700 bg-surface-800 p-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold text-zinc-100">WhatsApp Connection</h2>
-            <StatusBadge status={status} />
+            <WhatsAppStatusBadge status={status} />
           </div>
           <div className="flex items-center gap-3">
             {status === 'connected' && (
@@ -295,32 +266,36 @@ export default function WhatsAppScannerPage() {
               </button>
             )}
             <button
-              onClick={handleConnect}
-              disabled={connecting}
-              title={status === 'waiting_qr' ? 'Already scanned but nothing happened? Restart to get a fresh QR code and a fresh watcher.' : undefined}
-              className="inline-flex items-center gap-2 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
+              onClick={loadStatus}
+              className="rounded-lg border border-surface-600 bg-surface-700 px-4 py-2 text-sm font-medium text-zinc-300 transition hover:bg-surface-600"
             >
-              {connecting ? <Spinner /> : null}
-              {status === 'connected'
-                ? 'Reconnect'
-                : status === 'waiting_qr'
-                  ? 'Restart connection'
-                  : 'Connect WhatsApp'}
+              Refresh status
             </button>
           </div>
         </div>
-        {status === 'waiting_qr' && (
+        {status === 'connected' ? (
+          <p className="mt-3 text-sm text-zinc-400">
+            Connected account is active — configure monitored groups, filters, and
+            scans below.
+          </p>
+        ) : status === 'waiting_qr' ? (
           <p className="mt-3 text-sm text-yellow-400">
-            The browser is open below — scan the WhatsApp Web QR code with your phone to connect.
-            (It streams live from the server; if it isn't showing yet, wait a moment or press Start in
-            the Live Browser View.) If you already scanned and the status didn't change, press
-            "Restart connection" to get a fresh QR code.
+            A WhatsApp connection is in progress — finish scanning the QR code on the{' '}
+            <Link to="/app/account/whatsapp" className="text-accent-300 hover:text-accent-200">
+              Accounts page
+            </Link>
+            .
+          </p>
+        ) : (
+          <p className="mt-3 text-sm text-zinc-400">
+            WhatsApp is not connected. Link it from the{' '}
+            <Link to="/app/account/whatsapp" className="text-accent-300 hover:text-accent-200">
+              Accounts page
+            </Link>{' '}
+            to use the scanner.
           </p>
         )}
       </div>
-
-      {/* ── Section 1.5: Live browser view ──────────────────────── */}
-      {status !== 'connected' && <BrowserViewPanel />}
 
       {/* ── Section 2: Group Selection ──────────────────────────── */}
       {status === 'connected' && (
@@ -581,7 +556,7 @@ export default function WhatsAppScannerPage() {
             </div>
           ) : messages.length === 0 ? (
             <p className="py-8 text-center text-sm text-zinc-500">
-              No messages yet. Connect WhatsApp and trigger a scan.
+              No messages yet. Trigger a scan to pull the latest group messages.
             </p>
           ) : (
             <>

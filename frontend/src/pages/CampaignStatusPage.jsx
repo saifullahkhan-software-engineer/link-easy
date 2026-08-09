@@ -422,7 +422,7 @@ export default function CampaignStatusPage() {
             Campaigns run through your LinkedIn session. Connect an account, then come back here to
             monitor your campaigns.
           </p>
-          <Link to="/app/account" className="btn-primary mt-4">
+          <Link to="/app/account/linkedin" className="btn-primary mt-4">
             Go to LinkedIn Account →
           </Link>
         </div>

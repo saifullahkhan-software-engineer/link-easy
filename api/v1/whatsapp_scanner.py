@@ -71,6 +71,12 @@ router = APIRouter(prefix="/api/v1/whatsapp", tags=["whatsapp-scanner"])
 # stop) — stale rows used to leave the UI stuck on the QR screen forever.
 _active_watchers: set[int] = set()
 
+# Serializes WhatsApp browser operations inside the API process. Two browsers
+# on the same WhatsApp account at once (the live browser view + a group-fetch
+# browser) is exactly what used to break freshly-scanned connections; the
+# redis profile lock additionally coordinates with the Celery worker.
+_whatsapp_op_lock = asyncio.Lock()
+
 
 def _watcher_running(session_id: int) -> bool:
     return session_id in _active_watchers
@@ -384,12 +390,16 @@ async def list_whatsapp_groups(
 ) -> WhatsAppGroupListResponse:
     """Get the list of WhatsApp groups from the sidebar.
 
-    This triggers a one-shot Playwright scrape to fetch group names.
-    For a faster response, it returns cached groups from the DB if available,
-    otherwise scrapes fresh data.
-    """
-    import asyncio
+    Runs against the durable WhatsApp profile. If the live browser view is
+    already open it is REUSED — launching a second browser on the same
+    account while one is running is exactly what used to break freshly
+    scanned connections. Otherwise a headless persistent-context browser is
+    launched under the profile lock.
 
+    A slow-loading page is never treated as an expired session: we wait up to
+    30s for the chat list and only mark the session disconnected when the QR
+    landing screen is actually confirmed.
+    """
     # Check if we have an active session
     result = await db.execute(
         select(WhatsAppSession)
@@ -405,39 +415,86 @@ async def list_whatsapp_groups(
             detail="WhatsApp is not connected. Please connect first.",
         )
 
-    storage_state = session.storage_state_json
-    if not storage_state:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No stored session found. Please reconnect WhatsApp.",
-        )
+    from services.browser_view import browser_view
+    from services.whatsapp_browser import (
+        fetch_group_list,
+        is_showing_qr,
+        launch_whatsapp_persistent,
+        navigate_to_whatsapp,
+        safe_close,
+        wait_for_login,
+    )
+    from worker.profile_lock import (
+        ProfileInUseError,
+        acquire_profile_lock,
+        release_profile_lock,
+    )
 
-    # Scrape groups via Playwright
-    try:
-        from services.whatsapp_browser import (
-            launch_whatsapp_browser,
-            navigate_to_whatsapp,
-            is_logged_in,
-            fetch_group_list,
-            safe_close,
-        )
-
-        pw, context, page = await launch_whatsapp_browser(
-            headless=True, storage_state=storage_state
-        )
+    async with _whatsapp_op_lock:
+        pw = None
+        context = None
+        page = None
+        profile_lock = None
         try:
-            await navigate_to_whatsapp(page)
+            # 1) Reuse the live browser view when it is already running on
+            #    WhatsApp — no second browser, no session conflict.
+            if browser_view.status == "running" and browser_view.page is not None:
+                try:
+                    live_page = browser_view.page
+                    if "web.whatsapp.com" not in (live_page.url or ""):
+                        await navigate_to_whatsapp(live_page)
+                    page = live_page
+                except Exception as exc:
+                    logger.warning("Live browser view page unusable (%s) — launching a fresh browser", exc)
+                    page = None
 
-            if not await is_logged_in(page):
+            # 2) Otherwise launch the persistent-profile browser ourselves.
+            if page is None:
+                try:
+                    profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=20)
+                except ProfileInUseError:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            "The WhatsApp browser is busy with another operation "
+                            "(e.g. a scan). Please try again in a few seconds."
+                        ),
+                    )
+                try:
+                    pw, context, page = await launch_whatsapp_persistent(headless=True)
+                except Exception as exc:
+                    logger.error("Failed to launch WhatsApp browser: %s", exc)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Could not open the WhatsApp browser: {exc}",
+                    )
+                await navigate_to_whatsapp(page)
+
+            # Give WhatsApp Web real time to finish loading before deciding
+            # anything about the session.
+            if not await wait_for_login(page, timeout_seconds=30):
+                if await is_showing_qr(page):
+                    session.status = "disconnected"
+                    session.is_active = False
+                    await db.commit()
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="WhatsApp session expired. Please reconnect.",
+                    )
                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="WhatsApp session expired. Please reconnect.",
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="WhatsApp Web did not finish loading in time. Please try again.",
                 )
 
             groups = await fetch_group_list(page)
         finally:
-            await safe_close(pw, context)
+            # Only close browsers we launched ourselves — never the live view.
+            if context is not None:
+                await safe_close(pw, context)
+            if profile_lock is not None:
+                release_profile_lock(profile_lock)
 
+    try:
         monitored_result = await db.execute(
             select(WhatsAppMonitoredGroup).order_by(WhatsAppMonitoredGroup.id)
         )
@@ -450,9 +507,6 @@ async def list_whatsapp_groups(
             monitored_group_names=[g.group_name for g in monitored_result.scalars().all()],
             forward_group_name=saved_forward.group_name if saved_forward else None,
         )
-
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Failed to fetch groups: {e}")
         raise HTTPException(

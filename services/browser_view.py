@@ -90,6 +90,7 @@ class BrowserViewManager:
         self._context = None
         self._page = None
         self._cdp = None
+        self._profile_lock = None
 
         self._lock = asyncio.Lock()
         self._frame_task: Optional[asyncio.Task] = None
@@ -135,7 +136,15 @@ class BrowserViewManager:
         return await self.start(url=url)
 
     async def start(self, url: str = WHATSAPP_URL, headless: bool = True) -> dict:
-        """Launch the headless browser, navigate to ``url``, start streaming."""
+        """Launch the headless browser, navigate to ``url``, start streaming.
+
+        Runs on the durable WhatsApp profile (``launch_persistent_context``):
+        the QR login and the connected session live in the same user-data-dir
+        that the group scraping and the periodic scan task reuse, so a fresh
+        connection is never broken by a second stateless browser. The redis
+        ``profile_lock:whatsapp`` serializes access across processes —
+        Chromium allows only one process per user-data-dir.
+        """
         async with self._lock:
             if self._page is not None and self.status in ("running", "starting"):
                 # Already up — (re)navigate if a different URL was requested.
@@ -149,30 +158,73 @@ class BrowserViewManager:
                 return self.snapshot()
             await self._shutdown_locked()
 
+        # Reserve the shared WhatsApp profile before launching. If the scan
+        # task or a group fetch currently holds it, fail fast with a clear
+        # message instead of corrupting the profile on Chromium's SingletonLock.
+        from worker.profile_lock import ProfileInUseError, acquire_profile_lock
+
+        try:
+            profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=15)
+        except ProfileInUseError as exc:
+            self.last_error = str(exc)
+            self._set_status(
+                "error",
+                "The WhatsApp browser is busy with another operation (e.g. a "
+                "scan or group refresh). Try again in a few seconds.",
+            )
+            return self.snapshot()
+
         self._set_status("starting", "Launching headless browser…")
 
         try:
             from patchright.async_api import async_playwright
 
-            pw = await async_playwright().start()
-            browser = await pw.chromium.launch(headless=headless, args=BROWSER_ARGS)
-            context = await browser.new_context(
-                viewport=dict(VIEWPORT),
-                locale="en-US",
-                timezone_id="America/New_York",
-                permissions=["notifications"],
-                user_agent=USER_AGENT,
+            from services.whatsapp_browser import (
+                LAUNCH_ARGS,
+                STEALTH_SCRIPT,
+                USER_AGENT,
+                ensure_whatsapp_profile_dir,
             )
-            await context.add_init_script(_STEALTH_SCRIPT)
-            page = await context.new_page()
+
+            pw = await async_playwright().start()
+            try:
+                context = await pw.chromium.launch_persistent_context(
+                    user_data_dir=ensure_whatsapp_profile_dir(),
+                    headless=headless,
+                    viewport=dict(VIEWPORT),
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    permissions=["notifications"],
+                    user_agent=USER_AGENT,
+                    args=LAUNCH_ARGS,
+                )
+            except Exception:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+                raise
+
+            # A restored profile may reopen previous tabs; reuse the first
+            # page if present and drop any extras.
+            page = context.pages[0] if context.pages else await context.new_page()
+            for extra in [p for p in context.pages if p is not page]:
+                try:
+                    await extra.close()
+                except Exception:
+                    pass
+
             cdp = await context.new_cdp_session(page)
             await cdp.send("Page.enable")
 
+            await context.add_init_script(STEALTH_SCRIPT)
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
             async with self._lock:
-                self._pw, self._browser = pw, browser
+                self._pw = pw
+                self._browser = None  # persistent context has no Browser object
                 self._context, self._page, self._cdp = context, page, cdp
+                self._profile_lock = profile_lock
 
             # Seed one frame immediately so clients see something right away.
             try:
@@ -204,6 +256,14 @@ class BrowserViewManager:
             try:
                 async with self._lock:
                     await self._shutdown_locked()
+            except Exception:
+                pass
+            # _shutdown_locked() only releases a lock it owns; the launch
+            # never finished, so release the freshly-acquired lock here.
+            try:
+                from worker.profile_lock import release_profile_lock
+
+                release_profile_lock(profile_lock)
             except Exception:
                 pass
             return self.snapshot()
@@ -255,6 +315,16 @@ class BrowserViewManager:
         self._page = None
         self._latest_frame = None
         self._screencast_mode = None
+
+        # Free the WhatsApp profile so the group fetch / scan task can open it.
+        if self._profile_lock is not None:
+            try:
+                from worker.profile_lock import release_profile_lock
+
+                release_profile_lock(self._profile_lock)
+            except Exception:
+                pass
+            self._profile_lock = None
 
     # ── Status / event helpers ─────────────────────────────────────────────
 

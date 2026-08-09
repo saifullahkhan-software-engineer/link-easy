@@ -303,11 +303,9 @@ export default function LinkedInAccountPage() {
             on our side, so it can take a moment.
           </p>
         </div>
-        {!hasAccount && (
-          <Link to="/" className="btn-secondary text-xs">
-            ← Back to home
-          </Link>
-        )}
+        <Link to="/app/account" className="btn-secondary text-xs">
+          ← Accounts
+        </Link>
       </div>
 
       {loadError && (

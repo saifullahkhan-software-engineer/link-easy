@@ -104,15 +104,73 @@ const CASES = [
   { path: '/forgot-password', mustContain: ['Reset your password'] },
   { path: '/app', mustContain: ['Log in'] }, // unauthenticated → redirected to /login
   {
-    name: 'account page — not connected shows connect form',
+    name: 'accounts hub — two cards (LinkedIn + WhatsApp) with connect actions',
     path: '/app/account',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }),
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
+    },
+    mustContain: ['Accounts', 'LinkedIn', 'WhatsApp', 'Connect LinkedIn account', 'Connect WhatsApp', 'Not connected'],
+  },
+  {
+    name: 'accounts hub — connected statuses render manage actions',
+    path: '/app/account',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT),
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true }),
+    },
+    mustContain: ['li@test.dev', 'Manage LinkedIn account', 'Manage WhatsApp connection', 'Open scanner'],
+  },
+  {
+    name: 'whatsapp connect page — disconnected shows connect flow + browser view',
+    path: '/app/account/whatsapp',
+    storage: AUTH_TOKENS,
+    api: { 'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }) },
+    mustContain: ['WhatsApp Connection', 'Connection status', 'Connect WhatsApp', 'Live Browser View'],
+  },
+  {
+    name: 'whatsapp scanner — status-only when disconnected',
+    path: '/app/whatsapp-scanner',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
+    },
+    mustContain: ['WhatsApp Job Scanner', 'Disconnected', 'Refresh status', 'Accounts page'],
+  },
+  {
+    name: 'whatsapp scanner — connected shows groups/filters/stats, no connect button',
+    path: '/app/whatsapp-scanner',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true }),
+      'GET /api/v1/whatsapp/groups': (res) => json(res, 200, {
+        groups: [{ group_name: 'Dubai Jobs', whatsapp_id: 'g1' }],
+        monitored_group_names: [],
+        forward_group_name: null,
+      }),
+      'GET /api/v1/whatsapp/filters': (res) => json(res, 200, {
+        id: 1, role: null, job_title: null, keywords: null, experience_level: null,
+        match_threshold: 60, updated_at: '2026-08-01T10:00:00Z',
+      }),
+      'GET /api/v1/whatsapp/stats': (res) => json(res, 200, {
+        matched_count: 2, rejected_count: 3, forwarded_count: 1, pending_count: 4, total_count: 9,
+      }),
+      'GET /api/v1/whatsapp/messages': (res) => json(res, 200, { messages: [], total: 0, page: 1, page_size: 20 }),
+    },
+    mustContain: ['Connected', 'Select Groups to Monitor', 'Dubai Jobs', 'Search Filters', 'Trigger Manual Scan'],
+  },
+  {
+    name: 'linkedin account page — not connected shows connect form',
+    path: '/app/account/linkedin',
     storage: AUTH_TOKENS,
     api: { 'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }) },
     mustContain: ['Connect your LinkedIn account', 'Connect LinkedIn account', 'LinkedIn password'],
   },
   {
-    name: 'account page — active account renders card + actions',
-    path: '/app/account',
+    name: 'linkedin account page — active account renders card + actions',
+    path: '/app/account/linkedin',
     storage: AUTH_TOKENS,
     api: { 'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT) },
     mustContain: ['li@test.dev', 'Connected', 'Refresh session', 'Disconnect', 'Work account'],
@@ -339,12 +397,22 @@ for (const testCase of CASES) {
     addEventListener() {},
     removeEventListener() {},
   });
+  // jsdom has no EventSource — the live browser view panel needs one.
+  window.EventSource = class EventSource {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0;
+    }
+    addEventListener() {}
+    removeEventListener() {}
+    close() {}
+  };
   for (const [k, v] of Object.entries(storage)) window.localStorage.setItem(k, v);
 
   const globals = ['window', 'document', 'localStorage', 'sessionStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'customElements', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame', 'MutationObserver', 'self',
     // Browsers make axios use its XHR adapter — mirror that here so relative
     // /api/v1 URLs resolve against the jsdom origin (the stub server).
-    'XMLHttpRequest', 'FormData', 'Blob', 'FileReader'];
+    'XMLHttpRequest', 'FormData', 'Blob', 'FileReader', 'EventSource', 'matchMedia'];
   const saved = {};
   const setGlobal = (key, value) =>
     Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });

@@ -9,7 +9,9 @@ import Signup from './pages/Signup';
 import VerifyEmail from './pages/VerifyEmail';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
+import AccountsPage from './pages/AccountsPage';
 import LinkedInAccountPage from './pages/LinkedInAccountPage';
+import WhatsAppConnectPage from './pages/WhatsAppConnectPage';
 import CampaignCreatePage from './pages/CampaignCreatePage';
 import CampaignStatusPage from './pages/CampaignStatusPage';
 import FeedScrollJobsPage from './pages/FeedScrollJobsPage';
@@ -56,7 +58,9 @@ export default function App() {
             }
           >
             <Route index element={<Navigate to="/app/account" replace />} />
-            <Route path="account" element={<LinkedInAccountPage />} />
+            <Route path="account" element={<AccountsPage />} />
+            <Route path="account/linkedin" element={<LinkedInAccountPage />} />
+            <Route path="account/whatsapp" element={<WhatsAppConnectPage />} />
             <Route path="campaigns" element={<CampaignStatusPage />} />
             <Route path="campaigns/create" element={<CampaignCreatePage />} />
             <Route path="feed-scroll" element={<FeedScrollJobsPage />} />
