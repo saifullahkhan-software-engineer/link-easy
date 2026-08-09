@@ -7,7 +7,6 @@ Tasks:
   check_whatsapp_messages — Periodic: scrape groups, OCR images, score, forward.
 """
 import asyncio
-import json
 from datetime import datetime, timezone
 from contextlib import contextmanager
 
@@ -21,9 +20,22 @@ from worker.celery_app import celery_app
 logger = get_logger(__name__)
 
 # ── Sync DB session for Celery ──────────────────────────────────────────────
-_sync_url = settings.DATABASE_URL.replace(
-    "postgresql+asyncpg://", "postgresql+psycopg2://"
-)
+def _make_sync_url(async_url: str) -> str:
+    """Convert async DATABASE_URL to sync psycopg2 URL for Celery tasks."""
+    url = async_url
+    for prefix in (
+        "postgresql+asyncpg://",
+        "postgres+asyncpg://",
+    ):
+        if url.startswith(prefix):
+            url = url.replace(prefix, "postgresql+psycopg2://", 1)
+            return url
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return url
+
+
+_sync_url = _make_sync_url(settings.DATABASE_URL)
 _engine = create_engine(_sync_url, pool_pre_ping=True)
 SyncSession = sessionmaker(bind=_engine, expire_on_commit=False)
 
@@ -47,18 +59,6 @@ def get_sync_db():
 
 @celery_app.task(bind=True, name="tasks.connect_whatsapp", max_retries=0)
 def connect_whatsapp(self):
-    """Launch a non-headless Playwright browser for WhatsApp QR login.
-
-    Waits for the user to scan the QR code, then saves the session
-    (cookies + storage state) to PostgreSQL.
-
-    NOTE: the API endpoint ``POST /api/v1/whatsapp/connect`` no longer
-    queues this task — it runs the browser in-process via
-    ``services.browser_view`` and streams it into the WhatsApp Scanner page
-    (``/api/v1/live/browser/stream``), so the QR code is visible to the user
-    even on servers without a display.  This task remains as a fallback for
-    manual/CLI use on machines with a real desktop session.
-    """
     logger.info("🚀 Starting WhatsApp connection task...")
 
     try:
@@ -69,7 +69,6 @@ def connect_whatsapp(self):
         return result
     except Exception as e:
         logger.error(f"WhatsApp connect task failed: {e}")
-        # Update session status to error
         with get_sync_db() as db:
             from models.whatsapp import WhatsAppSession
 
@@ -83,11 +82,6 @@ def connect_whatsapp(self):
 
 
 async def _connect_whatsapp_async() -> dict:
-    """Async implementation of WhatsApp connection flow.
-
-    Uses the durable WhatsApp profile so the QR login here is the SAME
-    session the API browser view, group fetch and scan task reuse later.
-    """
     from services.whatsapp_browser import (
         launch_whatsapp_persistent,
         navigate_to_whatsapp,
@@ -107,7 +101,6 @@ async def _connect_whatsapp_async() -> dict:
     try:
         await navigate_to_whatsapp(page)
 
-        # Update DB status: waiting for QR
         with get_sync_db() as db:
             from models.whatsapp import WhatsAppSession
 
@@ -122,7 +115,6 @@ async def _connect_whatsapp_async() -> dict:
                 session_row.status = "waiting_qr"
                 session_row.is_active = True
 
-        # Wait for QR scan (this blocks the Celery task until user scans)
         logged_in = await wait_for_qr_scan(page, max_wait_seconds=180)
 
         if not logged_in:
@@ -137,7 +129,6 @@ async def _connect_whatsapp_async() -> dict:
                     session_row.is_active = False
             return {"status": "timeout", "message": "QR scan timed out"}
 
-        # Extract and save session state
         storage_state = await get_storage_state(context)
         cookies = storage_state.get("cookies", [])
 
@@ -167,14 +158,6 @@ async def _connect_whatsapp_async() -> dict:
 
 @celery_app.task(bind=True, name="tasks.check_whatsapp_messages", max_retries=2)
 def check_whatsapp_messages(self) -> dict:
-    """Celery Beat periodic task: check monitored groups for new messages.
-
-    Runs every 2 minutes. Scrapes new messages, runs OCR on images,
-    scores against filters, and forwards matches.
-
-    Returns:
-        Dict with summary counts.
-    """
     logger.info("📱 Starting WhatsApp message check...")
 
     try:
@@ -184,12 +167,11 @@ def check_whatsapp_messages(self) -> dict:
         loop.close()
         return result
     except Exception as e:
-        logger.error(f"WhatsApp message check failed: {e}")
+        logger.error(f"WhatsApp message check failed: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 
 async def _check_whatsapp_messages_async() -> dict:
-    """Async implementation of the periodic message check."""
     from services.whatsapp_browser import (
         launch_whatsapp_persistent,
         is_showing_qr,
@@ -214,7 +196,6 @@ async def _check_whatsapp_messages_async() -> dict:
             WhatsAppSession,
             WhatsAppMonitoredGroup,
             WhatsAppForwardGroup,
-            WhatsAppRawMessage,
             WhatsAppScanFilter,
         )
 
@@ -230,18 +211,75 @@ async def _check_whatsapp_messages_async() -> dict:
 
         session_id = session_row.id
 
-        monitored_groups = db.query(WhatsAppMonitoredGroup).all()
-        if not monitored_groups:
-            logger.warning("⚠️  No monitored groups configured — skipping check")
+        monitored_groups_raw = db.query(WhatsAppMonitoredGroup).all()
+        logger.info("📋 Loaded %s monitored groups from DB", len(monitored_groups_raw))
+        if not monitored_groups_raw:
+            all_groups = db.query(WhatsAppMonitoredGroup).count()
+            all_sessions = db.query(WhatsAppSession).count()
+            logger.warning(
+                "⚠️  No monitored groups configured — skipping check (total groups in DB=%s, sessions=%s)",
+                all_groups,
+                all_sessions,
+            )
             return {"status": "skipped", "reason": "No monitored groups"}
 
-        forward_group = db.query(WhatsAppForwardGroup).first()
-        filters = db.query(WhatsAppScanFilter).first()
+        monitored_groups = [
+            {
+                "id": g.id,
+                "group_name": g.group_name,
+                "whatsapp_id": g.whatsapp_id,
+                "last_message_id": g.last_message_id,
+                "last_message_timestamp": g.last_message_timestamp,
+            }
+            for g in monitored_groups_raw
+        ]
 
-    # The WhatsApp browser lives in a durable shared profile. Only one process
-    # may open it at a time — if the API's browser view or a group fetch holds
-    # it, skip this cycle WITHOUT touching the session status (a skipped check
-    # is not a disconnected account).
+        forward_group_row = db.query(WhatsAppForwardGroup).first()
+        forward_group = (
+            {
+                "id": forward_group_row.id,
+                "group_name": forward_group_row.group_name,
+                "whatsapp_id": forward_group_row.whatsapp_id,
+            }
+            if forward_group_row
+            else None
+        )
+
+        filters_row = db.query(WhatsAppScanFilter).order_by(WhatsAppScanFilter.id.desc()).first()
+
+        if filters_row:
+            filter_data = {
+                "match_threshold": filters_row.match_threshold,
+                "keywords": filters_row.keywords,
+                "role": filters_row.role,
+                "job_title": filters_row.job_title,
+                "experience_level": filters_row.experience_level,
+            }
+        else:
+            filter_data = None
+
+    if filter_data:
+        match_threshold = filter_data["match_threshold"]
+        filter_keywords = filter_data["keywords"]
+        filter_role = filter_data["role"]
+        filter_job_title = filter_data["job_title"]
+        filter_experience = filter_data["experience_level"]
+    else:
+        match_threshold = 60.0
+        filter_keywords = None
+        filter_role = None
+        filter_job_title = None
+        filter_experience = None
+
+    logger.info(
+        "🔧 Filters: threshold=%s keywords=%s role=%s title=%s exp=%s",
+        match_threshold,
+        filter_keywords,
+        filter_role,
+        filter_job_title,
+        filter_experience,
+    )
+
     try:
         profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=5)
     except ProfileInUseError:
@@ -255,30 +293,13 @@ async def _check_whatsapp_messages_async() -> dict:
         logger.warning("⚠️  Could not open the WhatsApp profile (%s) — skipping check", exc)
         return {"status": "skipped", "reason": f"Browser unavailable: {exc}"}
 
-    match_threshold = 60.0
-    filter_keywords = None
-    filter_role = None
-    filter_job_title = None
-    filter_experience = None
-
-    if filters:
-        match_threshold = filters.match_threshold
-        filter_keywords = filters.keywords
-        filter_role = filters.role
-        filter_job_title = filters.job_title
-        filter_experience = filters.experience_level
-
     stats = {"scraped": 0, "matched": 0, "rejected": 0, "forwarded": 0, "ocr_failed": 0}
 
     try:
         await navigate_to_whatsapp(page)
 
-        # Give WhatsApp Web up to 30s to finish loading. A single early check
-        # used to misread a slow load as "session expired" and disconnect a
-        # perfectly healthy account.
         if not await wait_for_login(page, timeout_seconds=30):
             if await is_showing_qr(page):
-                # QR landing screen confirmed → genuinely logged out.
                 with get_sync_db() as db:
                     from models.whatsapp import WhatsAppSession
 
@@ -292,51 +313,53 @@ async def _check_whatsapp_messages_async() -> dict:
                         expired.is_active = False
                 logger.warning("⚠️  WhatsApp session expired (QR screen confirmed)")
                 return {"status": "error", "reason": "Session expired"}
-            # Still loading / transient state — leave the session untouched.
-            logger.warning(
-                "⚠️  WhatsApp Web did not finish loading — skipping check, session left connected"
-            )
+            logger.warning("⚠️  WhatsApp Web did not finish loading — skipping check")
             return {"status": "skipped", "reason": "WhatsApp Web slow to load"}
 
-        # Process each monitored group
         for group in monitored_groups:
-            logger.info(f"📋 Checking group: {group.group_name}")
+            group_name = group["group_name"]
+            logger.info(f"📋 Checking group: {group_name}")
 
-            opened = await navigate_to_group(page, group.group_name)
+            opened = await navigate_to_group(page, group_name)
             if not opened:
-                logger.warning(f"⚠️  Could not open group: {group.group_name}")
+                logger.warning(f"⚠️  Could not open group: {group_name}")
                 continue
 
-            # Scrape new messages since last check
             new_messages = await scrape_messages_from_current_chat(
                 page,
-                last_message_id=group.last_message_id,
-                last_timestamp=group.last_message_timestamp,
+                last_message_id=group.get("last_message_id"),
+                last_timestamp=group.get("last_message_timestamp"),
             )
 
             if not new_messages:
-                logger.info(f"📋 No new messages in group: {group.group_name}")
+                logger.info(f"📋 No new messages in group: {group_name}")
+                with get_sync_db() as db_upd:
+                    from models.whatsapp import WhatsAppMonitoredGroup
+                    g_row = db_upd.query(WhatsAppMonitoredGroup).filter(
+                        WhatsAppMonitoredGroup.id == group["id"]
+                    ).first()
+                    if g_row:
+                        g_row.last_checked_at = datetime.now(timezone.utc)
                 continue
 
-            logger.info(
-                f"📋 Found {len(new_messages)} new messages in {group.group_name}"
-            )
+            logger.info(f"📋 Found {len(new_messages)} new messages in {group_name}")
             stats["scraped"] += len(new_messages)
 
-            # Update last_message_id for the group
-            if new_messages:
-                latest_msg = new_messages[0]  # Most recent (top of chat)
-                group.last_message_id = latest_msg.get("whatsapp_message_id")
-                group.last_message_timestamp = latest_msg.get("timestamp")
-                group.last_checked_at = datetime.now(timezone.utc)
-
-            # Save raw messages to DB
             with get_sync_db() as db_save:
-                from models.whatsapp import WhatsAppRawMessage
+                from models.whatsapp import WhatsAppRawMessage, WhatsAppMonitoredGroup
+
+                g_row = db_save.query(WhatsAppMonitoredGroup).filter(
+                    WhatsAppMonitoredGroup.id == group["id"]
+                ).first()
+                if g_row and new_messages:
+                    latest_msg = new_messages[0]
+                    g_row.last_message_id = latest_msg.get("whatsapp_message_id")
+                    g_row.last_message_timestamp = latest_msg.get("timestamp")
+                    g_row.last_checked_at = datetime.now(timezone.utc)
 
                 for msg in new_messages:
                     raw_msg = WhatsAppRawMessage(
-                        group_id=group.id,
+                        group_id=group["id"],
                         sender_name=msg.get("sender_name"),
                         message_text=msg.get("message_text"),
                         message_type=msg.get("message_type", "text"),
@@ -345,11 +368,10 @@ async def _check_whatsapp_messages_async() -> dict:
                         whatsapp_message_id=msg.get("whatsapp_message_id"),
                     )
                     db_save.add(raw_msg)
-                db_save.commit()
 
         # ── OCR + Scoring + Forwarding Pass ──────────────────────────────
         with get_sync_db() as db_proc:
-            from models.whatsapp import WhatsAppRawMessage
+            from models.whatsapp import WhatsAppRawMessage, WhatsAppMonitoredGroup
 
             pending_messages = (
                 db_proc.query(WhatsAppRawMessage)
@@ -358,7 +380,6 @@ async def _check_whatsapp_messages_async() -> dict:
             )
 
             for msg in pending_messages:
-                # ── Step 1: OCR for image messages ──
                 if msg.message_type == "image" and msg.raw_image_bytes:
                     ocr_text, ocr_failed = extract_text_from_image(msg.raw_image_bytes)
                     msg.ocr_text = ocr_text
@@ -368,7 +389,6 @@ async def _check_whatsapp_messages_async() -> dict:
                         stats["ocr_failed"] += 1
                         continue
 
-                # ── Step 2: Combine text ──
                 combined = " ".join(
                     part for part in [msg.message_text or "", msg.ocr_text or ""] if part
                 ).strip()
@@ -378,7 +398,6 @@ async def _check_whatsapp_messages_async() -> dict:
                     stats["rejected"] += 1
                     continue
 
-                # ── Step 3: Score ──
                 score = compute_match_score(
                     combined,
                     keywords=filter_keywords,
@@ -397,8 +416,8 @@ async def _check_whatsapp_messages_async() -> dict:
 
             db_proc.commit()
 
-            # ── Step 4: Forward matched messages ──
             if forward_group:
+                fwd_name = forward_group["group_name"]
                 to_forward = (
                     db_proc.query(WhatsAppRawMessage)
                     .filter(
@@ -415,7 +434,6 @@ async def _check_whatsapp_messages_async() -> dict:
                         if part
                     ).strip()
 
-                    # Get group name
                     group_obj = (
                         db_proc.query(WhatsAppMonitoredGroup)
                         .filter(WhatsAppMonitoredGroup.id == msg.group_id)
@@ -432,20 +450,28 @@ async def _check_whatsapp_messages_async() -> dict:
                         f"{combined_text[:500]}"
                     )
 
-                    success = await forward_message_to_group(
-                        page, forward_group.group_name, formatted
-                    )
+                    success = await forward_message_to_group(page, fwd_name, formatted)
                     if success:
                         msg.forwarded = True
                         msg.forwarded_at = datetime.now(timezone.utc)
                         stats["forwarded"] += 1
-                        logger.info(
-                            f"📤 Forwarded message {msg.id} to {forward_group.group_name}"
-                        )
+                        logger.info(f"📤 Forwarded message {msg.id} to {fwd_name}")
                     else:
                         logger.error(f"❌ Failed to forward message {msg.id}")
 
                 db_proc.commit()
+
+                try:
+                    from models.whatsapp import WhatsAppScanFilter
+                    filt = (
+                        db_proc.query(WhatsAppScanFilter)
+                        .order_by(WhatsAppScanFilter.id.desc())
+                        .first()
+                    )
+                    if filt:
+                        filt.last_scan_at = datetime.now(timezone.utc)
+                except Exception as exc:
+                    logger.debug("Could not update last_scan_at: %s", exc)
 
     finally:
         await safe_close(pw, context)
