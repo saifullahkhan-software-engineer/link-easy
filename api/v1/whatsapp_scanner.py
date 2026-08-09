@@ -369,8 +369,17 @@ async def list_whatsapp_groups(
         finally:
             await safe_close(pw, context)
 
+        monitored_result = await db.execute(
+            select(WhatsAppMonitoredGroup).order_by(WhatsAppMonitoredGroup.id)
+        )
+        forward_result = await db.execute(
+            select(WhatsAppForwardGroup).order_by(WhatsAppForwardGroup.id).limit(1)
+        )
+        saved_forward = forward_result.scalars().first()
         return WhatsAppGroupListResponse(
-            groups=[WhatsAppGroupItem(**g) for g in groups]
+            groups=[WhatsAppGroupItem(**g) for g in groups],
+            monitored_group_names=[g.group_name for g in monitored_result.scalars().all()],
+            forward_group_name=saved_forward.group_name if saved_forward else None,
         )
 
     except HTTPException:

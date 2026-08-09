@@ -31,6 +31,8 @@ class WhatsAppGroupItem(BaseModel):
 
 class WhatsAppGroupListResponse(BaseModel):
     groups: list[WhatsAppGroupItem]
+    monitored_group_names: list[str] = []
+    forward_group_name: Optional[str] = None
 
 
 class WhatsAppGroupSelectRequest(BaseModel):

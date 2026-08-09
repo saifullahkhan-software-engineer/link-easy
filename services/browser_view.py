@@ -44,15 +44,15 @@ VIEWPORT = {"width": 1280, "height": 900}
 # Screencast encoding — kept small so SSE frames stay cheap.
 SCREENCAST_PARAMS = {
     "format": "jpeg",
-    "quality": 55,
-    "maxWidth": 960,
-    "maxHeight": 540,
-    "everyNthFrame": 3,
+    "quality": 42,
+    "maxWidth": 800,
+    "maxHeight": 450,
+    "everyNthFrame": 5,
 }
 
-# Minimum gap between published frames (~3 fps max) — the screencast can emit
+# Minimum gap between published frames (~2 fps max) — the screencast can emit
 # frames far faster than a web page needs.
-MIN_FRAME_INTERVAL = 0.3
+MIN_FRAME_INTERVAL = 0.5
 
 BROWSER_ARGS = [
     "--no-sandbox",
