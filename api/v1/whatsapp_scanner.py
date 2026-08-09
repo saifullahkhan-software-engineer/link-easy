@@ -63,10 +63,32 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/whatsapp", tags=["whatsapp-scanner"])
 
 
+# ── QR watcher bookkeeping ───────────────────────────────────────────────────
+
+# Session ids that currently have a live ``_watch_qr_scan`` task.  Used by
+# ``/connect`` to tell a truly in-progress connection apart from a stale
+# ``waiting_qr`` row whose watcher died (timeout / server restart / browser
+# stop) — stale rows used to leave the UI stuck on the QR screen forever.
+_active_watchers: set[int] = set()
+
+
+def _watcher_running(session_id: int) -> bool:
+    return session_id in _active_watchers
+
+
+def _spawn_qr_watcher(session_id: int, max_wait_seconds: int = 300) -> None:
+    """Create the background QR-watch task (idempotent per session)."""
+    if session_id in _active_watchers:
+        return
+    _active_watchers.add(session_id)
+    task = asyncio.create_task(_watch_qr_scan(session_id, max_wait_seconds))
+    task.add_done_callback(lambda _t: _active_watchers.discard(session_id))
+
+
 # ── POST /connect ────────────────────────────────────────────────────────────
 
 
-async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 180) -> None:
+async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
     """Background task: wait for the QR code in the embedded browser view.
 
     Polls the live browser page until WhatsApp Web shows the chat list
@@ -87,19 +109,27 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 180) -> None:
     logged_in = False
     encountered_2fa = False
     two_fa_completed = False
+    browser_aborted = False
     while time.monotonic() < deadline:
         page = browser_view.page
         if page is None or browser_view.status not in ("running", "starting"):
             logger.warning("Browser view stopped while waiting for QR — aborting watch")
+            browser_aborted = True
             break
         try:
             if await is_logged_in(page):
-                logged_in = True
-                if encountered_2fa:
-                    two_fa_completed = True
-                    logger.info("✅ 2FA completed — WhatsApp logged in successfully")
-                break
-            
+                # Give WhatsApp a moment to finish syncing and flush the
+                # session keys before we snapshot the storage state, then
+                # re-verify so a transient frame can't trigger a save.
+                await asyncio.sleep(3)
+                if await is_logged_in(page):
+                    logged_in = True
+                    if encountered_2fa:
+                        two_fa_completed = True
+                        logger.info("✅ 2FA completed — WhatsApp logged in successfully")
+                    break
+                continue
+
             # Check for 2FA page
             if await _check_2fa_page(page):
                 if not encountered_2fa:
@@ -149,9 +179,10 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 180) -> None:
 
     logger.info(message)
 
-    # Stop the browser after successful login
-    # - If no 2FA was needed: stop immediately after QR scan
-    # - If 2FA was needed: stop after 2FA is completed
+    # Stop the browser when the flow is over:
+    # - After successful login (with or without 2FA)
+    # - On QR timeout (fresh QR on next Connect) or if the browser died
+    # Only the 2FA-awaiting-PIN case keeps the browser open.
     if logged_in:
         if two_fa_completed:
             logger.info("🛑 Stopping browser view after 2FA completion")
@@ -161,10 +192,20 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 180) -> None:
             await browser_view.stop()
         except Exception as exc:
             logger.warning("Error stopping browser view: %s", exc)
-    elif encountered_2fa and not logged_in:
+    elif encountered_2fa:
         # 2FA was needed but we timed out waiting for completion
         logger.warning("⏰ 2FA code entry timed out — browser will remain open")
         logger.info("💡 User can manually stop the browser via the UI or API")
+    elif not browser_aborted:
+        # Timed out waiting for the scan — leave a clean slate so the next
+        # Connect starts a fresh QR with a fresh watcher (previously the
+        # browser stayed open on a live QR nobody was watching, so further
+        # scans never completed and the screen looked "stuck").
+        logger.info("🛑 Stopping browser view after QR timeout — press Connect for a fresh QR")
+        try:
+            await browser_view.stop()
+        except Exception as exc:
+            logger.warning("Error stopping browser view: %s", exc)
 
 
 async def _check_2fa_page(page) -> bool:
@@ -176,11 +217,16 @@ async def _check_2fa_page(page) -> bool:
         # Check for 2FA input field - WhatsApp Web shows a screen to enter the 6-digit code
         content = await page.content()
         
-        # Look for 2FA indicators
+        # Look for 2FA indicators — WhatsApp's actual two-step verification
+        # screen says "Two-Step Verification" / "Enter your PIN", so include
+        # the real copy (the old list only matched generic phrases and
+        # silently missed real 2FA screens, leaving scans stuck).
         two_fa_indicators = [
-            "Two-factor authentication",
-            "Enter the code",
+            "two-step verification",
+            "two-factor authentication",
+            "enter your pin",
             "enter the 6-digit",
+            "enter the code",
             "authentication code",
             "enter-manual-code",
         ]
@@ -232,9 +278,32 @@ async def connect_whatsapp(
     existing = result.scalars().first()
 
     if existing and existing.status == "waiting_qr":
-        logger.info("📱 WhatsApp connection already in progress (session id=%s)", existing.id)
+        if _watcher_running(existing.id):
+            logger.info("📱 WhatsApp connection already in progress (session id=%s)", existing.id)
+            return WhatsAppConnectResponse(
+                message="A WhatsApp connection is already in progress — scan the QR code in the Live Browser view.",
+                status="waiting_qr",
+            )
+        # Stale "waiting_qr" row: the record exists but nothing is watching
+        # (previous watcher timed out, server restarted, or the browser was
+        # stopped).  Restart the browser view + watcher for the SAME session
+        # so the user always has a way out of the "stuck on QR" state.
+        logger.info(
+            "📱 Restarting stale WhatsApp connection (session id=%s) — no live watcher",
+            existing.id,
+        )
+        start_result = await browser_view.ensure_started(WHATSAPP_URL)
+        if start_result.get("status") == "error":
+            existing.status = "error"
+            existing.is_active = False
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not open the browser view: {start_result.get('error')}",
+            )
+        _spawn_qr_watcher(existing.id)
         return WhatsAppConnectResponse(
-            message="A WhatsApp connection is already in progress — scan the QR code in the Live Browser view.",
+            message="Restarted the WhatsApp connection — scan the new QR code in the Live Browser view.",
             status="waiting_qr",
         )
 
@@ -271,7 +340,7 @@ async def connect_whatsapp(
         )
 
     # Watch for the QR scan in the background (no Celery needed).
-    asyncio.create_task(_watch_qr_scan(new_session.id))
+    _spawn_qr_watcher(new_session.id)
 
     logger.info("📱 WhatsApp connect started — scan QR code in browser view (session id=%s)", new_session.id)
     return WhatsAppConnectResponse(

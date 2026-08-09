@@ -32,8 +32,17 @@ logger = get_logger(__name__)
 # QR code canvas — appears when not logged in
 QR_CANVAS_SELECTOR = 'canvas[aria-label="Scan me!"], canvas, div[data-testid="qrcode"]'
 
+# The sidebar pane that holds the chat list.  ``#pane-side`` has survived every
+# WhatsApp Web redesign — the old ``data-testid`` attributes were phased out
+# years ago and aria-label copy varies with locale, so it is the primary
+# "you are logged in" indicator.
+PANE_SIDE_SELECTOR = '#pane-side'
+
 # The main chat list sidebar
-CHAT_LIST_SELECTOR = 'div[aria-label="Chat list"], div[data-testid="chat-list"]'
+CHAT_LIST_SELECTOR = (
+    '#pane-side, div[aria-label="Chat list"], div[role="grid"][aria-label], '
+    'div[data-testid="chat-list"]'
+)
 
 # Individual chat rows inside the sidebar
 CHAT_ROW_SELECTOR = 'div[role="row"], div[data-testid="cell-frame-container"]'
@@ -68,8 +77,18 @@ LOADING_SELECTOR = 'div[data-testid="progress-bar"], span[data-testid="loading"]
 # Main pane (conversation area)
 MAIN_PANE_SELECTOR = 'div[data-testid="conversation-panel-wrapper"], div[data-testid="conversation-panel"]'
 
-# Pane that indicates "you are logged in" (the main interface)
-LOGGED_IN_SELECTOR = 'div[data-testid="chat-list"], header[data-testid="chatlist-header"]'
+# Candidate selectors that indicate "you are logged in" (the main interface).
+# Ordered from most- to least-reliable; the first match wins.  Old data-testid
+# entries are kept as fallbacks for older web builds.
+LOGGED_IN_SELECTORS = (
+    PANE_SIDE_SELECTOR,
+    'div[aria-label="Chat list"]',
+    'div[data-testid="chat-list"]',
+    'header[data-testid="chatlist-header"]',
+)
+
+# Comma-joined version for single query_selector calls.
+LOGGED_IN_SELECTOR = ', '.join(LOGGED_IN_SELECTORS)
 
 
 async def launch_whatsapp_browser(
@@ -140,6 +159,24 @@ async def navigate_to_whatsapp(page: Page) -> None:
     logger.info(f"📍 WhatsApp Web URL: {page.url}")
 
 
+async def is_logged_in(page: Page) -> bool:
+    """Check if the page is currently logged into WhatsApp Web.
+
+    Tries each candidate selector and requires the element to be *visible* —
+    ``query_selector`` alone also matches elements that are mounted but
+    hidden while the loading/progress screen is up, which caused false
+    negatives/positives in the QR-watch loop.
+    """
+    for selector in LOGGED_IN_SELECTORS:
+        try:
+            el = await page.query_selector(selector)
+            if el is not None and await el.is_visible():
+                return True
+        except Exception:  # page may be mid-navigation
+            continue
+    return False
+
+
 async def wait_for_qr_scan(page: Page, max_wait_seconds: int = 120) -> bool:
     """Wait for the user to scan the QR code and WhatsApp Web to fully load.
 
@@ -150,9 +187,7 @@ async def wait_for_qr_scan(page: Page, max_wait_seconds: int = 120) -> bool:
 
     while time.monotonic() < deadline:
         try:
-            # Check if chat list is visible (means logged in)
-            chat_list = await page.query_selector(CHAT_LIST_SELECTOR)
-            if chat_list:
+            if await is_logged_in(page):
                 logger.info("✅ WhatsApp Web logged in — chat list detected")
                 await asyncio.sleep(2)  # let the UI fully settle
                 return True
@@ -169,21 +204,6 @@ async def wait_for_qr_scan(page: Page, max_wait_seconds: int = 120) -> bool:
         await asyncio.sleep(2)
 
     logger.error("❌ QR scan timed out")
-    return False
-
-
-async def is_logged_in(page: Page) -> bool:
-    """Check if the page is currently logged into WhatsApp Web."""
-    try:
-        chat_list = await page.query_selector(CHAT_LIST_SELECTOR)
-        if chat_list:
-            return True
-        # Also check for the main logged-in interface
-        logged_in = await page.query_selector(LOGGED_IN_SELECTOR)
-        if logged_in:
-            return True
-    except Exception:
-        pass
     return False
 
 

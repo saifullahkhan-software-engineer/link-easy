@@ -173,9 +173,9 @@ export default function WhatsAppScannerPage() {
   const handleConnect = async () => {
     try {
       setConnecting(true);
-      await whatsappApi.connect();
-      toast.success('WhatsApp connection started — scan the QR code');
-      setStatus('waiting_qr');
+      const { data } = await whatsappApi.connect();
+      toast.success(data?.message || 'WhatsApp connection started — scan the QR code');
+      setStatus(data?.status || 'waiting_qr');
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to start connection'));
     } finally {
@@ -296,11 +296,16 @@ export default function WhatsAppScannerPage() {
             )}
             <button
               onClick={handleConnect}
-              disabled={connecting || status === 'waiting_qr'}
+              disabled={connecting}
+              title={status === 'waiting_qr' ? 'Already scanned but nothing happened? Restart to get a fresh QR code and a fresh watcher.' : undefined}
               className="inline-flex items-center gap-2 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
             >
               {connecting ? <Spinner /> : null}
-              {status === 'connected' ? 'Reconnect' : 'Connect WhatsApp'}
+              {status === 'connected'
+                ? 'Reconnect'
+                : status === 'waiting_qr'
+                  ? 'Restart connection'
+                  : 'Connect WhatsApp'}
             </button>
           </div>
         </div>
@@ -308,7 +313,8 @@ export default function WhatsAppScannerPage() {
           <p className="mt-3 text-sm text-yellow-400">
             The browser is open below — scan the WhatsApp Web QR code with your phone to connect.
             (It streams live from the server; if it isn't showing yet, wait a moment or press Start in
-            the Live Browser View.)
+            the Live Browser View.) If you already scanned and the status didn't change, press
+            "Restart connection" to get a fresh QR code.
           </p>
         )}
       </div>
