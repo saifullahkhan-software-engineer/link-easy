@@ -36,6 +36,9 @@ class WhatsAppGroupListResponse(BaseModel):
 
 
 class WhatsAppGroupSelectRequest(BaseModel):
+    # Optional for the legacy singleton scanner. New filter jobs always send
+    # their filter id so every job keeps an independent group configuration.
+    filter_id: Optional[int] = None
     monitored_group_names: list[str] = Field(..., min_length=3, max_length=3)
     monitored_group_ids: list[str] = Field(..., min_length=3, max_length=3)
     forward_group_name: str
@@ -67,16 +70,55 @@ class WhatsAppScanFilterRequest(BaseModel):
         return v
 
 
+class WhatsAppScanFilterCreate(WhatsAppScanFilterRequest):
+    """Payload for a new filter job.
+
+    A filter is created as ``draft``. Groups can be configured on the detail
+    page before the user starts the scheduler.
+    """
+    name: str = Field(..., min_length=1, max_length=255)
+
+
+class WhatsAppScanFilterUpdate(BaseModel):
+    """Partial update for an existing filter job."""
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    role: Optional[str] = None
+    job_title: Optional[str] = None
+    keywords: Optional[list[str]] = None
+    experience_level: Optional[str] = None
+    match_threshold: Optional[float] = Field(None, ge=0.0, le=100.0)
+    interval_hours: Optional[float] = Field(None, ge=0.25, le=168.0)
+
+    @field_validator("experience_level")
+    @classmethod
+    def validate_experience_level(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("entry", "mid", "senior"):
+            raise ValueError("experience_level must be one of: entry, mid, senior")
+        return v
+
+
 class WhatsAppScanFilterResponse(BaseModel):
     id: int
+    name: str = "WhatsApp Filter"
+    owner_email: Optional[str] = None
+    status: str = "draft"  # draft | active | paused
     role: Optional[str] = None
     job_title: Optional[str] = None
     keywords: Optional[list[str]] = None
     experience_level: Optional[str] = None
     match_threshold: float = 60.0
     interval_hours: float = 1.0
+    remaining_seconds: Optional[int] = None
+    next_scan_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
     last_scan_at: Optional[datetime] = None
+    monitored_group_names: list[str] = []
+    forward_group_name: Optional[str] = None
+    total_count: int = 0
+    matched_count: int = 0
+    rejected_count: int = 0
+    forwarded_count: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -86,6 +128,7 @@ class WhatsAppScanFilterResponse(BaseModel):
 
 class WhatsAppMessageResponse(BaseModel):
     id: int
+    filter_id: Optional[int] = None
     group_id: int
     sender_name: Optional[str] = None
     message_text: Optional[str] = None

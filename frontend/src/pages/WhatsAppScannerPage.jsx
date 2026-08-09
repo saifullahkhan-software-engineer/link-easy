@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
@@ -20,6 +20,9 @@ function ScoreBadge({ score }) {
 }
 
 export default function WhatsAppScannerPage() {
+  const { filterId } = useParams();
+  const [filterJob, setFilterJob] = useState(null);
+
   // ── Connection state (status only — connecting happens on the Accounts page) ──
   const [status, setStatus] = useState('disconnected');
   const [statusPolling, setStatusPolling] = useState(null);
@@ -57,17 +60,18 @@ export default function WhatsAppScannerPage() {
 
   // ── Load initial data ──
   useEffect(() => {
+    if (!filterId) return;
     loadStatus();
-    loadFilters();
+    loadFilterJob();
     loadStats();
     loadMessages();
-  }, []);
+  }, [filterId]);
 
   // ── Poll status when connecting ──
   useEffect(() => {
-    if (status === 'connected') {
+    if (status === 'connected' && filterId) {
       loadGroups();
-      loadFilters();
+      loadFilterJob();
       loadStats();
     }
   }, [status]);
@@ -95,11 +99,30 @@ export default function WhatsAppScannerPage() {
     }
   };
 
+  const loadFilterJob = async () => {
+    if (!filterId) return;
+    try {
+      setFiltersLoading(true);
+      const { data } = await whatsappApi.getFilterJob(filterId);
+      setFilterJob(data);
+      setRole(data.role || '');
+      setJobTitle(data.job_title || '');
+      setKeywords(data.keywords || []);
+      setExperienceLevel(data.experience_level || '');
+      setMatchThreshold(data.match_threshold ?? 60);
+      setIntervalHours(data.interval_hours ?? 1);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to load WhatsApp filter'));
+    } finally {
+      setFiltersLoading(false);
+    }
+  };
+
   const loadGroups = async (search = '') => {
     try {
       if (search) setGroupSearchLoading(true);
       else setGroupsLoading(true);
-      const { data } = await whatsappApi.getGroups(search);
+      const { data } = await whatsappApi.getGroups(search, filterId);
       const loadedGroups = data.groups || [];
       const savedMonitored = data.monitored_group_names || [];
       const savedForward = data.forward_group_name || '';
@@ -164,30 +187,12 @@ export default function WhatsAppScannerPage() {
     loadGroups(query);
   };
 
-  const loadFilters = async () => {
-    try {
-      setFiltersLoading(true);
-      const { data } = await whatsappApi.getFilters();
-      setRole(data.role || '');
-      setJobTitle(data.job_title || '');
-      setKeywords(data.keywords || []);
-      setExperienceLevel(data.experience_level || '');
-      setMatchThreshold(data.match_threshold ?? 60);
-      setIntervalHours(data.interval_hours ?? 1);
-    } catch (err) {
-      // If filters endpoint fails, show error for debugging
-      console.error('Failed to load filters', err);
-    } finally {
-      setFiltersLoading(false);
-    }
-  };
-
   const loadMessages = async (p = messagePage, statusFilter = messageStatusFilter) => {
     try {
       setMessagesLoading(true);
       const params = { page: p, page_size: pageSize };
       if (statusFilter) params.status = statusFilter;
-      const { data } = await whatsappApi.getMessages(params);
+      const { data } = await whatsappApi.getMessages(params, filterId);
       setMessages(data.messages || []);
       setMessageTotal(data.total || 0);
     } catch (err) {
@@ -199,7 +204,7 @@ export default function WhatsAppScannerPage() {
 
   const loadStats = async () => {
     try {
-      const { data } = await whatsappApi.getStats();
+      const { data } = await whatsappApi.getStats(filterId);
       setStats(data);
     } catch (err) {
       // Silently ignore
@@ -243,6 +248,7 @@ export default function WhatsAppScannerPage() {
       const forwardId = forwardObj?.whatsapp_id || '';
 
       await whatsappApi.selectGroups({
+        filter_id: filterId ? Number(filterId) : null,
         monitored_group_names: selectedGroups.map((g) => g.group_name),
         monitored_group_ids: monitoredIds,
         forward_group_name: forwardGroup,
@@ -273,7 +279,7 @@ export default function WhatsAppScannerPage() {
         }
       }
 
-      await whatsappApi.saveFilters({
+      await whatsappApi.updateFilterJob(Number(filterId), {
         role: role || null,
         job_title: jobTitle || null,
         keywords: finalKeywords.length > 0 ? finalKeywords : null,
@@ -285,7 +291,7 @@ export default function WhatsAppScannerPage() {
       if (finalKeywords.length !== keywords.length) setKeywords(finalKeywords);
       if (pending) setPendingKeyword('');
       toast.success('Filters saved');
-      await loadFilters();
+      await loadFilterJob();
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to save filters'));
     } finally {
@@ -296,7 +302,7 @@ export default function WhatsAppScannerPage() {
   const handleTriggerScan = async () => {
     try {
       setScanning(true);
-      await whatsappApi.triggerScan();
+      await whatsappApi.triggerScan(Number(filterId));
       toast.success('Scan triggered! Results will appear in ~10-20s');
       // Poll for results
       setTimeout(() => {
@@ -311,6 +317,26 @@ export default function WhatsAppScannerPage() {
       toast.error(getErrorMessage(err, 'Failed to trigger scan'));
     } finally {
       setScanning(false);
+    }
+  };
+
+  const handleActivateFilter = async () => {
+    try {
+      await whatsappApi.activateFilterJob(Number(filterId));
+      toast.success('Filter started');
+      await loadFilterJob();
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to start filter'));
+    }
+  };
+
+  const handlePauseFilter = async () => {
+    try {
+      await whatsappApi.pauseFilterJob(Number(filterId));
+      toast.success('Filter paused');
+      await loadFilterJob();
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to pause filter'));
     }
   };
 
@@ -333,11 +359,57 @@ export default function WhatsAppScannerPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-8">
       {/* ── Header ─────────────────────────────────────────────── */}
-      <div>
-        <h1 className="text-2xl font-bold text-zinc-100">WhatsApp Job Scanner</h1>
-        <p className="mt-1 text-sm text-zinc-400">
-          Monitor WhatsApp groups for job posts, score them, and forward matches automatically
-        </p>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-3">
+          <Link to="/app/whatsapp-scanner" className="mt-1 text-zinc-500 transition hover:text-zinc-200" aria-label="Back to WhatsApp filters">
+            ←
+          </Link>
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-2xl font-bold text-zinc-100">{filterJob?.name || 'WhatsApp Filter'}</h1>
+              {filterJob && (
+                <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${
+                  filterJob.status === 'active'
+                    ? 'bg-green-500/10 text-green-300 ring-green-500/25'
+                    : filterJob.status === 'paused'
+                      ? 'bg-yellow-500/10 text-yellow-300 ring-yellow-500/25'
+                      : 'bg-zinc-500/10 text-zinc-300 ring-zinc-500/25'
+                }`}>
+                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                  {filterJob.status}
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-sm text-zinc-400">
+              Configure groups, review filter details, and inspect matching WhatsApp messages.
+            </p>
+          </div>
+        </div>
+        {filterJob && (
+          <div className="flex shrink-0 items-center gap-2">
+            {filterJob.status === 'active' ? (
+              <button
+                onClick={handlePauseFilter}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-3 py-2 text-sm font-medium text-yellow-300 transition hover:bg-yellow-500/15"
+              >
+                <span aria-hidden="true">Ⅱ</span> Pause
+              </button>
+            ) : (
+              <button
+                onClick={handleActivateFilter}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-green-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-green-500"
+              >
+                <span aria-hidden="true">▶</span> {filterJob.status === 'paused' ? 'Resume' : 'Start'}
+              </button>
+            )}
+            <Link
+              to="/app/whatsapp-scanner"
+              className="rounded-lg border border-surface-700 px-3 py-2 text-sm font-medium text-zinc-300 transition hover:bg-surface-700"
+            >
+              All Filters
+            </Link>
+          </div>
+        )}
       </div>
 
       {/* ── Section 1: Connection status (read-only) ─────────────── */}
@@ -501,7 +573,7 @@ export default function WhatsAppScannerPage() {
       )}
 
       {/* ── Section 3: Search Filters ───────────────────────────── */}
-      {status === 'connected' && (
+      {filterJob && (
         <div className="rounded-xl border border-surface-700 bg-surface-800 p-6">
           <h2 className="mb-4 text-lg font-semibold text-zinc-100">Search Filters</h2>
 

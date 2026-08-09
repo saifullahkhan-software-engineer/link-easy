@@ -61,9 +61,12 @@ celery_app.conf.update(
             'task': 'tasks.reconcile_stalled_leads',
             'schedule': 900.0,  # Every 15 minutes (900 seconds)
         },
-        'check-whatsapp-messages': {
-            'task': 'tasks.check_whatsapp_messages',
-            'schedule': 120.0,  # Every 2 minutes
+        # Filter jobs are dispatched from their database-backed next_scan_at,
+        # just like Feed Scroll jobs.  The task itself re-checks status before
+        # touching the WhatsApp profile, so pause/resume is safe across restarts.
+        'dispatch-due-whatsapp-scans': {
+            'task': 'tasks.dispatch_due_whatsapp_scans',
+            'schedule': 60.0,  # Every minute
         },
     },
 )

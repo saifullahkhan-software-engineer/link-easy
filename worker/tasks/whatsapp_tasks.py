@@ -7,7 +7,7 @@ Tasks:
   check_whatsapp_messages — Periodic: scrape groups, OCR images, score, forward.
 """
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine
@@ -156,14 +156,55 @@ async def _connect_whatsapp_async() -> dict:
 # ── Task: Periodic Message Check ─────────────────────────────────────────────
 
 
+@celery_app.task(name="tasks.dispatch_due_whatsapp_scans")
+def dispatch_due_whatsapp_scans() -> dict:
+    """Queue active filter jobs whose next scan is due.
+
+    The database timestamp is the source of truth, so pausing a job survives
+    worker restarts and a queued task simply exits after checking its status.
+    ``next_scan_at`` is advanced before dispatch to avoid duplicate queueing
+    while a browser scan is still running.
+    """
+    now = datetime.now(timezone.utc)
+    due_ids = []
+    with get_sync_db() as db:
+        from models.whatsapp import WhatsAppScanFilter
+
+        due_filters = (
+            db.query(WhatsAppScanFilter)
+            .filter(
+                WhatsAppScanFilter.status == "active",
+                (
+                    (WhatsAppScanFilter.next_scan_at == None)
+                    | (WhatsAppScanFilter.next_scan_at <= now)
+                ),
+            )
+            .all()
+        )
+        for filter_row in due_filters:
+            # Reserve the next interval before putting work on the queue. The
+            # worker writes the precise completion time when it finishes.
+            filter_row.next_scan_at = now + timedelta(
+                hours=float(filter_row.interval_hours or 1.0)
+            )
+            due_ids.append(filter_row.id)
+
+    for filter_id in due_ids:
+        celery_app.send_task("tasks.check_whatsapp_messages", args=[filter_id])
+
+    if due_ids:
+        logger.info("📅 Dispatched %s due WhatsApp filter scan(s)", len(due_ids))
+    return {"scans_dispatched": len(due_ids), "filter_ids": due_ids}
+
+
 @celery_app.task(bind=True, name="tasks.check_whatsapp_messages", max_retries=2)
-def check_whatsapp_messages(self) -> dict:
-    logger.info("📱 Starting WhatsApp message check...")
+def check_whatsapp_messages(self, filter_id: int | None = None) -> dict:
+    logger.info("📱 Starting WhatsApp message check for filter=%s...", filter_id)
 
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_check_whatsapp_messages_async())
+        result = loop.run_until_complete(_check_whatsapp_messages_async(filter_id))
         loop.close()
         return result
     except Exception as e:
@@ -171,7 +212,7 @@ def check_whatsapp_messages(self) -> dict:
         return {"status": "error", "message": str(e)}
 
 
-async def _check_whatsapp_messages_async() -> dict:
+async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
     from services.whatsapp_browser import (
         launch_whatsapp_persistent,
         is_showing_qr,
@@ -190,7 +231,9 @@ async def _check_whatsapp_messages_async() -> dict:
         release_profile_lock,
     )
 
-    # Load the current session and filters from DB
+    # Load the current session, one filter job, and that job's groups from DB.
+    # A NULL filter_id intentionally selects the legacy singleton rows so old
+    # manual tasks continue to work while the new scheduler passes an id.
     with get_sync_db() as db:
         from models.whatsapp import (
             WhatsAppSession,
@@ -211,16 +254,46 @@ async def _check_whatsapp_messages_async() -> dict:
 
         session_id = session_row.id
 
-        monitored_groups_raw = db.query(WhatsAppMonitoredGroup).all()
-        logger.info("📋 Loaded %s monitored groups from DB", len(monitored_groups_raw))
-        if not monitored_groups_raw:
-            all_groups = db.query(WhatsAppMonitoredGroup).count()
-            all_sessions = db.query(WhatsAppSession).count()
-            logger.warning(
-                "⚠️  No monitored groups configured — skipping check (total groups in DB=%s, sessions=%s)",
-                all_groups,
-                all_sessions,
+        filter_query = db.query(WhatsAppScanFilter)
+        if filter_id is not None:
+            filters_row = filter_query.filter(WhatsAppScanFilter.id == filter_id).first()
+            if not filters_row:
+                logger.warning("⚠️  WhatsApp filter %s no longer exists", filter_id)
+                return {"status": "skipped", "reason": "Filter not found"}
+            if filters_row.status != "active":
+                logger.info(
+                    "⏸️ WhatsApp filter %s is not active (status=%s)",
+                    filter_id,
+                    filters_row.status,
+                )
+                return {"status": "skipped", "reason": "Filter is not active"}
+        else:
+            # Legacy/manual invocation: prefer an active row but retain the
+            # original fallback for databases created before filter jobs.
+            filters_row = (
+                filter_query.filter(WhatsAppScanFilter.status == "active")
+                .order_by(WhatsAppScanFilter.id.desc())
+                .first()
+                or filter_query.order_by(WhatsAppScanFilter.id.desc()).first()
             )
+
+        group_query = db.query(WhatsAppMonitoredGroup)
+        forward_query = db.query(WhatsAppForwardGroup)
+        if filter_id is not None:
+            group_query = group_query.filter(WhatsAppMonitoredGroup.filter_id == filter_id)
+            forward_query = forward_query.filter(WhatsAppForwardGroup.filter_id == filter_id)
+        else:
+            group_query = group_query.filter(WhatsAppMonitoredGroup.filter_id.is_(None))
+            forward_query = forward_query.filter(WhatsAppForwardGroup.filter_id.is_(None))
+
+        monitored_groups_raw = group_query.all()
+        logger.info(
+            "📋 Loaded %s monitored groups for WhatsApp filter=%s",
+            len(monitored_groups_raw),
+            filter_id,
+        )
+        if not monitored_groups_raw:
+            logger.warning("⚠️  No monitored groups configured — skipping check")
             return {"status": "skipped", "reason": "No monitored groups"}
 
         monitored_groups = [
@@ -234,7 +307,7 @@ async def _check_whatsapp_messages_async() -> dict:
             for g in monitored_groups_raw
         ]
 
-        forward_group_row = db.query(WhatsAppForwardGroup).first()
+        forward_group_row = forward_query.first()
         forward_group = (
             {
                 "id": forward_group_row.id,
@@ -245,8 +318,6 @@ async def _check_whatsapp_messages_async() -> dict:
             else None
         )
 
-        filters_row = db.query(WhatsAppScanFilter).order_by(WhatsAppScanFilter.id.desc()).first()
-
         if filters_row:
             filter_data = {
                 "match_threshold": filters_row.match_threshold,
@@ -255,8 +326,10 @@ async def _check_whatsapp_messages_async() -> dict:
                 "job_title": filters_row.job_title,
                 "experience_level": filters_row.experience_level,
             }
+            effective_filter_id = filters_row.id if filter_id is not None else None
         else:
             filter_data = None
+            effective_filter_id = None
 
     if filter_data:
         match_threshold = filter_data["match_threshold"]
@@ -359,6 +432,7 @@ async def _check_whatsapp_messages_async() -> dict:
 
                 for msg in new_messages:
                     raw_msg = WhatsAppRawMessage(
+                        filter_id=effective_filter_id,
                         group_id=group["id"],
                         sender_name=msg.get("sender_name"),
                         message_text=msg.get("message_text"),
@@ -373,11 +447,16 @@ async def _check_whatsapp_messages_async() -> dict:
         with get_sync_db() as db_proc:
             from models.whatsapp import WhatsAppRawMessage, WhatsAppMonitoredGroup
 
-            pending_messages = (
-                db_proc.query(WhatsAppRawMessage)
-                .filter(WhatsAppRawMessage.status == "pending")
-                .all()
+            pending_query = db_proc.query(WhatsAppRawMessage).filter(
+                WhatsAppRawMessage.status == "pending"
             )
+            if effective_filter_id is not None:
+                pending_query = pending_query.filter(
+                    WhatsAppRawMessage.filter_id == effective_filter_id
+                )
+            else:
+                pending_query = pending_query.filter(WhatsAppRawMessage.filter_id.is_(None))
+            pending_messages = pending_query.all()
 
             for msg in pending_messages:
                 if msg.message_type == "image" and msg.raw_image_bytes:
@@ -418,14 +497,19 @@ async def _check_whatsapp_messages_async() -> dict:
 
             if forward_group:
                 fwd_name = forward_group["group_name"]
-                to_forward = (
-                    db_proc.query(WhatsAppRawMessage)
-                    .filter(
-                        WhatsAppRawMessage.status == "matched",
-                        WhatsAppRawMessage.forwarded == False,
-                    )
-                    .all()
+                forward_query_db = db_proc.query(WhatsAppRawMessage).filter(
+                    WhatsAppRawMessage.status == "matched",
+                    WhatsAppRawMessage.forwarded == False,
                 )
+                if effective_filter_id is not None:
+                    forward_query_db = forward_query_db.filter(
+                        WhatsAppRawMessage.filter_id == effective_filter_id
+                    )
+                else:
+                    forward_query_db = forward_query_db.filter(
+                        WhatsAppRawMessage.filter_id.is_(None)
+                    )
+                to_forward = forward_query_db.all()
 
                 for msg in to_forward:
                     combined_text = " ".join(
@@ -461,17 +545,24 @@ async def _check_whatsapp_messages_async() -> dict:
 
                 db_proc.commit()
 
-                try:
-                    from models.whatsapp import WhatsAppScanFilter
-                    filt = (
-                        db_proc.query(WhatsAppScanFilter)
-                        .order_by(WhatsAppScanFilter.id.desc())
-                        .first()
-                    )
-                    if filt:
-                        filt.last_scan_at = datetime.now(timezone.utc)
-                except Exception as exc:
-                    logger.debug("Could not update last_scan_at: %s", exc)
+            # Record the completed scan for this job even when no forward group
+            # is configured.  The dispatcher uses next_scan_at, so a paused
+            # filter is never scheduled again until the user resumes it.
+            from models.whatsapp import WhatsAppScanFilter
+            filt_query = db_proc.query(WhatsAppScanFilter)
+            if effective_filter_id is not None:
+                filt_query = filt_query.filter(WhatsAppScanFilter.id == effective_filter_id)
+            else:
+                filt_query = filt_query.filter(WhatsAppScanFilter.status == "active")
+            filt = filt_query.order_by(WhatsAppScanFilter.id.desc()).first()
+            if filt and filt.status == "active":
+                scan_time = datetime.now(timezone.utc)
+                filt.last_scan_at = scan_time
+                filt.next_scan_at = scan_time + timedelta(
+                    hours=float(filt.interval_hours or 1.0)
+                )
+                filt.remaining_seconds = None
+            db_proc.commit()
 
     finally:
         await safe_close(pw, context)

@@ -131,35 +131,38 @@ const CASES = [
     mustContain: ['WhatsApp Connection', 'Connection status', 'Connect WhatsApp', 'Live Browser View'],
   },
   {
-    name: 'whatsapp scanner — status-only when disconnected',
+    name: 'whatsapp filters — list page replaces the scanner landing page',
     path: '/app/whatsapp-scanner',
     storage: AUTH_TOKENS,
     api: {
-      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
+      'GET /api/v1/whatsapp/filters/jobs': (res) => json(res, 200, []),
     },
-    mustContain: ['WhatsApp Job Scanner', 'Disconnected', 'Refresh status', 'Accounts page'],
+    mustContain: ['WhatsApp Filters', 'New Filter', 'No WhatsApp filters yet', 'Create Filter'],
   },
   {
-    name: 'whatsapp scanner — connected shows groups/filters/stats, no connect button',
-    path: '/app/whatsapp-scanner',
+    name: 'whatsapp filter detail — groups, criteria, stats, and messages',
+    path: '/app/whatsapp-scanner/jobs/1',
     storage: AUTH_TOKENS,
     api: {
       'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true }),
+      'GET /api/v1/whatsapp/filters/jobs/1': (res) => json(res, 200, {
+        id: 1, name: 'Dubai Engineering Jobs', status: 'active', role: 'Engineer',
+        job_title: 'Backend Developer', keywords: ['python'], experience_level: 'senior',
+        match_threshold: 60, interval_hours: 1, monitored_group_names: [],
+        forward_group_name: null, total_count: 9, matched_count: 2,
+        rejected_count: 3, forwarded_count: 1,
+      }),
       'GET /api/v1/whatsapp/groups': (res) => json(res, 200, {
         groups: [{ group_name: 'Dubai Jobs', whatsapp_id: 'g1' }],
         monitored_group_names: [],
         forward_group_name: null,
-      }),
-      'GET /api/v1/whatsapp/filters': (res) => json(res, 200, {
-        id: 1, role: null, job_title: null, keywords: null, experience_level: null,
-        match_threshold: 60, updated_at: '2026-08-01T10:00:00Z',
       }),
       'GET /api/v1/whatsapp/stats': (res) => json(res, 200, {
         matched_count: 2, rejected_count: 3, forwarded_count: 1, pending_count: 4, total_count: 9,
       }),
       'GET /api/v1/whatsapp/messages': (res) => json(res, 200, { messages: [], total: 0, page: 1, page_size: 20 }),
     },
-    mustContain: ['Connected', 'Select Groups to Monitor', 'Dubai Jobs', 'Search Filters', 'Trigger Manual Scan'],
+    mustContain: ['Connected', 'Dubai Engineering Jobs', 'Select Groups to Monitor', 'Dubai Jobs', 'Search Filters', 'Trigger Manual Scan'],
   },
   {
     name: 'linkedin account page — not connected shows connect form',
