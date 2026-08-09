@@ -94,6 +94,9 @@ class WhatsAppScanFilter(Base):
     keywords = Column(JSON, nullable=True)  # ["python", "react", "remote"]
     experience_level = Column(String, nullable=True)  # entry | mid | senior
     match_threshold = Column(Float, nullable=False, default=60.0)
+    # Minimum delay between automatic WhatsApp scans.
+    interval_hours = Column(Float, nullable=False, default=1.0)
+    last_scan_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),

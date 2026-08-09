@@ -57,6 +57,7 @@ class WhatsAppScanFilterRequest(BaseModel):
     keywords: Optional[list[str]] = None
     experience_level: Optional[str] = None  # entry | mid | senior
     match_threshold: float = Field(60.0, ge=0.0, le=100.0)
+    interval_hours: float = Field(1.0, ge=0.25, le=168.0)
 
     @field_validator("experience_level")
     @classmethod

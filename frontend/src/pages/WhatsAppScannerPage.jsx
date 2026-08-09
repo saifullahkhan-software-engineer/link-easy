@@ -30,6 +30,8 @@ export default function WhatsAppScannerPage() {
   const [selectedGroups, setSelectedGroups] = useState([]);
   const [forwardGroup, setForwardGroup] = useState('');
   const [savingGroups, setSavingGroups] = useState(false);
+  const [groupSearch, setGroupSearch] = useState('');
+  const [groupSearchLoading, setGroupSearchLoading] = useState(false);
 
   // ── Filters ──
   const [role, setRole] = useState('');
@@ -38,6 +40,7 @@ export default function WhatsAppScannerPage() {
   const [pendingKeyword, setPendingKeyword] = useState('');
   const [experienceLevel, setExperienceLevel] = useState('');
   const [matchThreshold, setMatchThreshold] = useState(60);
+  const [intervalHours, setIntervalHours] = useState(1);
   const [filtersLoading, setFiltersLoading] = useState(false);
   const [savingFilters, setSavingFilters] = useState(false);
 
@@ -94,22 +97,38 @@ export default function WhatsAppScannerPage() {
     }
   };
 
-  const loadGroups = async () => {
+  const loadGroups = async (search = '') => {
     try {
-      setGroupsLoading(true);
-      const { data } = await whatsappApi.getGroups();
+      if (search) setGroupSearchLoading(true);
+      else setGroupsLoading(true);
+      const { data } = await whatsappApi.getGroups(search);
       const loadedGroups = data.groups || [];
-      setGroups(loadedGroups);
+      // Search results are merged so selected/saved items never disappear.
+      setGroups((current) => search
+        ? [...loadedGroups, ...current.filter((g) => !loadedGroups.some((found) => found.group_name === g.group_name))]
+        : loadedGroups);
+      setSelectedGroups((current) => {
+        const available = search ? [...loadedGroups, ...current] : loadedGroups;
+        const savedNames = new Set(data.monitored_group_names || []);
+        return available.filter((g) => savedNames.has(g.group_name) || current.some((x) => x.group_name === g.group_name));
+      });
       // Restore the saved flow so reconnecting does not reset the user's
       // monitored groups or forwarding destination.
-      const savedNames = new Set(data.monitored_group_names || []);
-      setSelectedGroups(loadedGroups.filter((g) => savedNames.has(g.group_name)));
-      setForwardGroup(data.forward_group_name || '');
+      if (data.forward_group_name) setForwardGroup(data.forward_group_name);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to load groups'));
     } finally {
       setGroupsLoading(false);
+      setGroupSearchLoading(false);
     }
+  };
+
+  const handleFindGroup = (event) => {
+    event.preventDefault();
+    const query = groupSearch.trim();
+    if (!query) return loadGroups();
+    if (status !== 'connected') return toast.error('WhatsApp is not connected');
+    loadGroups(query);
   };
 
   const loadFilters = async () => {
@@ -121,6 +140,7 @@ export default function WhatsAppScannerPage() {
       setKeywords(data.keywords || []);
       setExperienceLevel(data.experience_level || '');
       setMatchThreshold(data.match_threshold ?? 60);
+      setIntervalHours(data.interval_hours ?? 1);
     } catch (err) {
       // Silently ignore
     } finally {
@@ -197,6 +217,7 @@ export default function WhatsAppScannerPage() {
         keywords: keywords.length > 0 ? keywords : null,
         experience_level: experienceLevel || null,
         match_threshold: matchThreshold,
+        interval_hours: Number(intervalHours),
       });
       toast.success('Filters saved');
     } catch (err) {
@@ -318,6 +339,20 @@ export default function WhatsAppScannerPage() {
           {groups.length > 0 && (
             <div className="mb-6">
               <p className="mb-2 text-sm font-medium text-zinc-400">
+                Chats and groups (latest 10):
+              </p>
+              <form onSubmit={handleFindGroup} className="mb-3 flex gap-2">
+                <input
+                  value={groupSearch}
+                  onChange={(e) => setGroupSearch(e.target.value)}
+                  placeholder="Find an older chat or group"
+                  className="min-w-0 flex-1 rounded-lg border border-surface-700 bg-surface-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-accent-500 focus:outline-none"
+                />
+                <button type="submit" disabled={groupSearchLoading} className="rounded-lg border border-surface-600 px-3 py-2 text-sm text-zinc-200 hover:bg-surface-700 disabled:opacity-50">
+                  {groupSearchLoading ? <Spinner /> : 'Find'}
+                </button>
+              </form>
+              <p className="mb-2 text-sm font-medium text-zinc-400">
                 Monitored Groups (select exactly 3):
               </p>
               <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-surface-700 bg-surface-900 p-2">
@@ -430,7 +465,7 @@ export default function WhatsAppScannerPage() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-4">
                 {/* Experience Level */}
                 <div>
                   <label className="mb-1.5 block text-sm font-medium text-zinc-300">
@@ -446,6 +481,15 @@ export default function WhatsAppScannerPage() {
                     <option value="mid">Mid</option>
                     <option value="senior">Senior</option>
                   </select>
+                </div>
+
+                {/* Scan duration */}
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-zinc-300">Job Duration</label>
+                  <input type="number" min="0.25" max="168" step="0.25" value={intervalHours}
+                    onChange={(e) => setIntervalHours(e.target.value)}
+                    className="w-full rounded-lg border border-surface-700 bg-surface-900 px-3 py-2 text-sm text-zinc-100 focus:border-accent-500 focus:outline-none" />
+                  <p className="mt-1 text-xs text-zinc-500">Hours between WhatsApp scans</p>
                 </div>
 
                 {/* Match Threshold */}
