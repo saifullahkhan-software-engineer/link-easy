@@ -507,18 +507,18 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                     ocr_text, ocr_failed = extract_text_from_image(msg.raw_image_bytes)
                     msg.ocr_text = ocr_text
                     msg.ocr_failed = ocr_failed
-                    if ocr_failed:
-                        msg.status = "ocr_failed"
-                        stats["ocr_failed"] += 1
-                        continue
 
                 combined = " ".join(
                     part for part in [msg.message_text or "", msg.ocr_text or ""] if part
                 ).strip()
 
                 if not combined:
-                    msg.status = "rejected"
-                    stats["rejected"] += 1
+                    if msg.message_type == "image" and msg.ocr_failed:
+                        msg.status = "ocr_failed"
+                        stats["ocr_failed"] += 1
+                    else:
+                        msg.status = "rejected"
+                        stats["rejected"] += 1
                     continue
 
                 score = compute_match_score(

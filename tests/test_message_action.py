@@ -28,8 +28,12 @@ if "automation.human" not in sys.modules:
         return None
 
     human.human_click = _unused_async
+    human.human_type = _unused_async
     human.human_scroll = _unused_async
     human.random_idle_pause = _unused_async
+    human.human_mouse_move = _unused_async
+    human.find_and_type_resilient = _unused_async
+    human.find_and_click_resilient = _unused_async
     sys.modules["automation.human"] = human
 
 if "core.logging_config" not in sys.modules:

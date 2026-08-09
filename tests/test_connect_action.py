@@ -36,6 +36,9 @@ def _install_human_stub() -> None:
     human.human_type = _unused
     human.human_scroll = _unused
     human.random_idle_pause = _unused
+    human.human_mouse_move = _unused
+    human.find_and_type_resilient = _unused
+    human.find_and_click_resilient = _unused
     sys.modules["automation.human"] = human
 
 
