@@ -28,9 +28,12 @@ Every `whatsapp_monitored_groups` row stores `last_message_id`,
 `last_message_timestamp`, and `last_checked_at`. The scanner returns messages
 newest-first and persists the newest observed WhatsApp message id as that
 group's high-water mark. Later scans inspect only messages after a visible
-checkpoint. If WhatsApp has moved the checkpoint outside its rendered window,
-the scanner considers only the configured newest bounded window and checks
-persisted raw-message ids to discard overlap.
+checkpoint. Because WhatsApp virtualizes the conversation DOM, the scraper
+reads the current window and scrolls upward in bounded overlapping steps until
+it has the configured number of messages or can see the checkpoint. If
+WhatsApp has moved the checkpoint outside the available history, the scanner
+uses only the configured newest bounded window and checks persisted raw-message
+ids to discard overlap.
 
 Editing a filter reconciles unchanged monitored-group rows instead of deleting
 and recreating them, so their checkpoint ids survive configuration saves. This

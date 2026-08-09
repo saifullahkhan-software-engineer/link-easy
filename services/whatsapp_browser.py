@@ -168,11 +168,30 @@ CHAT_NAME_SELECTOR = 'span[data-testid="cell-frame-title"], span[dir="auto"]'
 # Search box for finding groups
 SEARCH_BOX_SELECTOR = 'div[data-testid="chat-list-search"], div[contenteditable="true"][data-tab="3"]'
 
-# Message container in conversation pane
-MSG_CONTAINER_SELECTOR = 'div[data-testid="msg-container"], div[role="row"][data-id]'
+# Message containers in the conversation pane. WhatsApp has used both the
+# data-testid and role/data-id shapes over time. The tabindex/data-id fallback
+# also handles newer builds where the role is mounted only on the outer list
+# item.
+MSG_CONTAINER_SELECTOR = (
+    'div[data-testid="msg-container"], '
+    'div[role="row"][data-id], '
+    'div[data-id][tabindex="-1"]'
+)
+# Last-resort selector used when a WhatsApp build wraps the visible messages
+# without either of the stable attributes above. It is only used when the
+# primary selector returns one (or zero) item, then records are filtered by
+# actual message text/image content.
+MSG_CONTAINER_FALLBACK_SELECTOR = (
+    '#main div[data-id], '
+    'div[data-testid="conversation-panel-wrapper"] div[data-id], '
+    'div[data-testid="conversation-panel-messages"] div[data-id]'
+)
 
 # Message text content
-MSG_TEXT_SELECTOR = 'span.selectable-text, span[data-testid="msg-text"]'
+MSG_TEXT_SELECTOR = (
+    'span.selectable-text, span[data-testid="msg-text"], '
+    'span[data-lexical-text="true"]'
+)
 
 # Image inside a message
 MSG_IMAGE_SELECTOR = 'img[data-testid="image-thumb"], div[data-testid="image-thumb"] img, img'
@@ -566,24 +585,226 @@ async def navigate_to_group(page: Page, group_name: str) -> bool:
     return False
 
 
+async def _message_id(container) -> str | None:
+    """Read the WhatsApp id from a rendered message element."""
+    try:
+        msg_id = await container.get_attribute("data-id")
+        if not msg_id:
+            msg_id = await container.get_attribute("id")
+        return msg_id
+    except Exception:
+        return None
+
+
+async def _extract_message_container(container) -> dict | None:
+    """Extract one rendered WhatsApp message.
+
+    This is deliberately separate from the scrolling loop. WhatsApp virtualizes
+    the conversation and can detach older elements as the list is scrolled, so
+    every element is read while it is still rendered.
+    """
+    try:
+        msg_id = await _message_id(container)
+
+        sender_name = None
+        try:
+            sender_el = await container.query_selector(
+                'span[data-testid="msg-sender"], span[aria-label]'
+            )
+            if sender_el:
+                sender_name = (await sender_el.inner_text()).strip()
+        except Exception:
+            pass
+
+        is_image = False
+        img_el = None
+        try:
+            img_el = await container.query_selector(MSG_IMAGE_SELECTOR)
+            is_image = img_el is not None
+        except Exception:
+            pass
+
+        message_text = None
+        raw_image_bytes = None
+
+        if is_image:
+            try:
+                img_src = await img_el.get_attribute("src")
+                if img_src and img_src.startswith("blob:"):
+                    raw_image_bytes = await img_el.evaluate("""async (img) => {
+                        const resp = await fetch(img.src);
+                        const blob = await resp.blob();
+                        return new Promise((resolve) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                        });
+                    }""")
+                elif img_src and img_src.startswith("data:"):
+                    raw_image_bytes = img_src
+                else:
+                    # Some WhatsApp builds expose a protected blob URL that
+                    # cannot be fetched directly. A screenshot still gives
+                    # OCR a usable image in that case.
+                    image_bytes = await img_el.screenshot()
+                    if image_bytes:
+                        raw_image_bytes = base64.b64encode(image_bytes).decode()
+            except Exception as exc:
+                logger.debug("Image download failed: %s", exc)
+
+            try:
+                text_el = await container.query_selector(MSG_TEXT_SELECTOR)
+                if text_el:
+                    message_text = (await text_el.inner_text()).strip()
+            except Exception:
+                pass
+            message_type = "image"
+        else:
+            try:
+                text_el = await container.query_selector(MSG_TEXT_SELECTOR)
+                if text_el:
+                    message_text = (await text_el.inner_text()).strip()
+            except Exception:
+                pass
+            message_type = "text"
+
+        timestamp = None
+        try:
+            time_el = await container.query_selector(
+                'span[data-testid="msg-time"], div[data-testid="msg-meta"] span, span[dir="auto"]'
+            )
+            if time_el:
+                timestamp = (await time_el.inner_text()).strip()
+        except Exception:
+            pass
+
+        if not message_text and not raw_image_bytes:
+            return None
+
+        return {
+            "whatsapp_message_id": msg_id,
+            "sender_name": sender_name,
+            "message_text": message_text,
+            "message_type": message_type,
+            "timestamp": timestamp,
+            "raw_image_bytes": raw_image_bytes,
+        }
+    except Exception as exc:
+        logger.debug("Error extracting message: %s", exc)
+        return None
+
+
+async def _query_message_containers(page: Page) -> list:
+    """Return message elements, including the current-build fallback shape.
+
+    A few WhatsApp Web builds render one outer ``msg-container`` and put the
+    individual messages below it as plain ``div[data-id]`` elements. Querying
+    only the outer element makes every scan look as if the group has one
+    message. Prefer the stable selector, but use the fallback when it exposes
+    more candidates; extraction filters out non-message data-id elements.
+    """
+    try:
+        primary = await page.query_selector_all(MSG_CONTAINER_SELECTOR)
+    except Exception:
+        primary = []
+
+    if len(primary) > 1:
+        return primary
+
+    try:
+        fallback = await page.query_selector_all(MSG_CONTAINER_FALLBACK_SELECTOR)
+        if len(fallback) > len(primary):
+            logger.debug(
+                "📨 Primary WhatsApp message selector returned %s item(s); "
+                "using %s data-id fallback item(s)",
+                len(primary),
+                len(fallback),
+            )
+            return fallback
+    except Exception:
+        pass
+
+    return primary
+
+
+async def _scroll_message_history_up(page: Page) -> bool:
+    """Scroll the conversation upward by a bounded amount.
+
+    WhatsApp virtualizes its message list. Merely asking for the DOM children
+    therefore often returns only the newest visible message, even when the
+    filter asks for 20 or 50. Find the scrollable ancestor of a message and
+    move less than one viewport at a time so adjacent windows overlap.
+    """
+    scroll_result = None
+    try:
+        scroll_result = await page.evaluate(
+            """(selector) => {
+                const message = document.querySelector(selector);
+                if (!message) return {moved: false, atTop: true};
+
+                let scrollable = null;
+                for (let node = message; node && node !== document.body; node = node.parentElement) {
+                    const style = window.getComputedStyle(node);
+                    const canScroll = node.scrollHeight > node.clientHeight + 4;
+                    const scrollStyle = style.overflowY === 'auto' || style.overflowY === 'scroll';
+                    if (canScroll && scrollStyle) {
+                        scrollable = node;
+                        break;
+                    }
+                }
+
+                if (!scrollable) return {moved: false, atTop: true};
+
+                const before = scrollable.scrollTop;
+                const distance = Math.max(300, Math.floor((scrollable.clientHeight || 600) * 0.65));
+                scrollable.scrollTop = Math.max(0, before - distance);
+                const after = scrollable.scrollTop;
+
+                return {
+                    moved: after < before - 1,
+                    atTop: after <= 1,
+                };
+            }""",
+            f"{MSG_CONTAINER_SELECTOR}, {MSG_CONTAINER_FALLBACK_SELECTOR}",
+        )
+    except Exception as exc:
+        logger.debug("Could not scroll WhatsApp message pane with DOM API: %s", exc)
+
+    if isinstance(scroll_result, dict):
+        if scroll_result.get("moved"):
+            return True
+        if scroll_result.get("atTop"):
+            return False
+
+    # A fallback for builds that use a non-standard scroll container. The
+    # coordinates are inside the normal conversation pane, not the sidebar.
+    try:
+        await page.mouse.move(850, 500)
+        await page.mouse.wheel(0, -900)
+        return True
+    except Exception:
+        return False
+
+
 async def scrape_messages_from_current_chat(
     page: Page,
     last_message_id: Optional[str] = None,
     last_timestamp: Optional[str] = None,
     message_limit: int = 20,
 ) -> list[dict]:
-    """Scrape only the newest, not-yet-checkpointed chat messages.
+    """Scrape the newest bounded set of not-yet-checkpointed messages.
 
-    ``last_message_id`` is a durable per-group cursor.  When it is visible, we
-    inspect only containers after it.  When WhatsApp no longer has the cursor
-    in the rendered window, we inspect only the latest bounded window and let
-    the worker's persisted-id check discard any overlap.  We never scroll back
-    on an incremental scan, so old messages cannot become candidates again.
+    WhatsApp renders only a window of a conversation. The old implementation
+    read that window once, so a group with one visible message always produced
+    one candidate regardless of ``latest_messages_limit``. This routine reads
+    the current window, scrolls upward in small overlapping steps until the
+    requested bound (or the durable cursor) is reached, and extracts each
+    element before virtualization can detach it.
 
-    The conversation stays at its normal newest-message position even on the
-    first scan; the scanner never scrolls upward into history. It returns at
-    most ``message_limit`` rendered messages, newest first, and the worker
-    persists item zero as the next checkpoint.
+    Results are returned newest-first. ``last_message_id`` remains a high-water
+    mark: when it becomes visible, only records after it are returned. If the
+    cursor is outside the available rendered history, the newest bounded window
+    is returned and the worker's persisted-id deduplication handles overlap.
     """
     del last_timestamp  # Kept in the signature for legacy callers/checkpoints.
     message_limit = max(1, min(int(message_limit or 20), 100))
@@ -591,27 +812,98 @@ async def scrape_messages_from_current_chat(
     try:
         await page.wait_for_selector(MSG_CONTAINER_SELECTOR, timeout=10000)
     except Exception:
-        logger.warning("⚠️  No message containers found in current chat")
-        return []
+        # Keep a fallback wait for WhatsApp builds that do not expose the
+        # primary role/test-id attributes at all.
+        try:
+            await page.wait_for_selector(MSG_CONTAINER_FALLBACK_SELECTOR, timeout=10000)
+        except Exception:
+            logger.warning("⚠️  No message containers found in current chat")
+            return []
 
     await asyncio.sleep(1)
 
-    # Do not scroll upward. WhatsApp opens a conversation at its newest
-    # messages, which is the only window an incremental scanner should inspect.
-    msg_containers = await page.query_selector_all(MSG_CONTAINER_SELECTOR)
-    logger.info("📨 Found %s rendered message containers", len(msg_containers))
+    # WhatsApp's DOM order is oldest -> newest. Keep that order while merging
+    # overlapping windows; scrolling upward adds older records at the front.
+    ordered_records: list[dict] = []
+    seen_ids: set[str] = set()
 
-    cursor_index = None
+    async def collect(containers: list, prepend: bool = False) -> int:
+        extracted: list[dict] = []
+        for container in containers:
+            record = await _extract_message_container(container)
+            if record is None:
+                continue
+            msg_id = record.get("whatsapp_message_id")
+            if msg_id:
+                if msg_id in seen_ids:
+                    continue
+                seen_ids.add(msg_id)
+            extracted.append(record)
+
+        if prepend:
+            ordered_records[0:0] = extracted
+        else:
+            ordered_records.extend(extracted)
+        return len(extracted)
+
+    async def visible_ids(containers: list) -> set[str]:
+        ids = set()
+        for container in containers:
+            msg_id = await _message_id(container)
+            if msg_id:
+                ids.add(msg_id)
+        return ids
+
+    msg_containers = await _query_message_containers(page)
+    logger.info("📨 Found %s rendered message containers", len(msg_containers))
+    await collect(msg_containers)
+
+    # At most this many DOM reads are needed for a 100-message cap in normal
+    # virtualized windows. The top-of-history and no-progress checks terminate
+    # earlier, preventing an accidental unbounded history scrape.
+    max_scroll_rounds = min(40, max(4, message_limit + 2))
+    for _ in range(max_scroll_rounds):
+        current_ids = await visible_ids(msg_containers)
+        cursor_visible = bool(last_message_id and last_message_id in current_ids)
+
+        # Once the cursor is visible, all newer messages are in the current
+        # window/overlap. Without a cursor, the requested number is enough.
+        if cursor_visible or len(ordered_records) >= message_limit:
+            break
+
+        moved = await _scroll_message_history_up(page)
+        if not moved:
+            break
+        await asyncio.sleep(0.7)
+
+        next_containers = await _query_message_containers(page)
+        if not next_containers:
+            break
+        added = await collect(next_containers, prepend=True)
+        msg_containers = next_containers
+
+        next_ids = await visible_ids(msg_containers)
+        if last_message_id and last_message_id in next_ids:
+            break
+        if added == 0:
+            # The pane moved but did not produce any new extractable message;
+            # another round cannot improve the result reliably.
+            break
+
     if last_message_id:
-        for index, container in enumerate(msg_containers):
-            msg_id = await container.get_attribute("data-id")
-            if not msg_id:
-                msg_id = await container.get_attribute("id")
-            if msg_id == last_message_id:
-                cursor_index = index
+        cursor_index = next(
+            (
+                index
+                for index, record in enumerate(ordered_records)
+                if record.get("whatsapp_message_id") == last_message_id
+            ),
+            None,
+        )
+    else:
+        cursor_index = None
 
     if cursor_index is not None:
-        candidate_containers = msg_containers[cursor_index + 1 :]
+        candidate_records = ordered_records[cursor_index + 1 :]
     else:
         if last_message_id:
             logger.info(
@@ -619,106 +911,15 @@ async def scrape_messages_from_current_chat(
                 last_message_id,
                 message_limit,
             )
-        candidate_containers = msg_containers[-message_limit:]
+        candidate_records = ordered_records
 
-    # Apply the cap after cursor slicing as well. If more than the configured
-    # number arrived between scans, only the newest configured amount is pulled.
-    candidate_containers = candidate_containers[-message_limit:]
-    messages = []
+    # The cap is applied after cursor slicing so a burst between scans cannot
+    # cause an unbounded OCR pass.
+    candidate_records = candidate_records[-message_limit:]
 
-    # WhatsApp renders oldest -> newest. Return newest -> oldest so item zero is
-    # always the durable high-water mark persisted by the worker.
-    for container in reversed(candidate_containers):
-        try:
-            msg_id = await container.get_attribute("data-id")
-            if not msg_id:
-                msg_id = await container.get_attribute("id")
-
-            sender_name = None
-            try:
-                sender_el = await container.query_selector(
-                    'span[data-testid="msg-sender"], span[aria-label]'
-                )
-                if sender_el:
-                    sender_name = (await sender_el.inner_text()).strip()
-            except Exception:
-                pass
-
-            is_image = False
-            img_el = None
-            try:
-                img_el = await container.query_selector(MSG_IMAGE_SELECTOR)
-                is_image = img_el is not None
-            except Exception:
-                pass
-
-            message_text = None
-            raw_image_bytes = None
-
-            if is_image:
-                try:
-                    img_src = await img_el.get_attribute("src")
-                    if img_src and img_src.startswith("blob:"):
-                        raw_image_bytes = await img_el.evaluate("""async (img) => {
-                            const resp = await fetch(img.src);
-                            const blob = await resp.blob();
-                            return new Promise((resolve) => {
-                                const reader = new FileReader();
-                                reader.onloadend = () => resolve(reader.result);
-                                reader.readAsDataURL(blob);
-                            });
-                        }""")
-                    elif img_src and img_src.startswith("data:"):
-                        raw_image_bytes = img_src
-                    else:
-                        image_bytes = await img_el.screenshot()
-                        if image_bytes:
-                            raw_image_bytes = base64.b64encode(image_bytes).decode()
-                except Exception as exc:
-                    logger.debug("Image download failed: %s", exc)
-
-                try:
-                    text_el = await container.query_selector(MSG_TEXT_SELECTOR)
-                    if text_el:
-                        message_text = (await text_el.inner_text()).strip()
-                except Exception:
-                    pass
-                message_type = "image"
-            else:
-                try:
-                    text_el = await container.query_selector(MSG_TEXT_SELECTOR)
-                    if text_el:
-                        message_text = (await text_el.inner_text()).strip()
-                except Exception:
-                    pass
-                message_type = "text"
-
-            timestamp = None
-            try:
-                time_el = await container.query_selector(
-                    'span[data-testid="msg-time"], div[data-testid="msg-meta"] span, span[dir="auto"]'
-                )
-                if time_el:
-                    timestamp = (await time_el.inner_text()).strip()
-            except Exception:
-                pass
-
-            if not message_text and not raw_image_bytes:
-                continue
-
-            messages.append(
-                {
-                    "whatsapp_message_id": msg_id,
-                    "sender_name": sender_name,
-                    "message_text": message_text,
-                    "message_type": message_type,
-                    "timestamp": timestamp,
-                    "raw_image_bytes": raw_image_bytes,
-                }
-            )
-        except Exception as exc:
-            logger.debug("Error extracting message: %s", exc)
-
+    # ``ordered_records`` is oldest -> newest; item zero must remain the newest
+    # high-water mark persisted by the worker.
+    messages = list(reversed(candidate_records))
     logger.info("📨 Extracted %s candidate new messages", len(messages))
     return messages
 
