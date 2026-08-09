@@ -210,7 +210,12 @@ def _preprocess_image(image):
                 new_w = int(new_w * ratio)
                 new_h = int(new_h * ratio)
 
-            image = image.resize((new_w, new_h), Image.LANCZOS)
+            # Pillow >=10 uses Image.Resampling.LANCZOS; older uses Image.LANCZOS
+            try:
+                resample_filter = Image.Resampling.LANCZOS
+            except AttributeError:
+                resample_filter = Image.LANCZOS
+            image = image.resize((new_w, new_h), resample_filter)
 
         # Convert to grayscale
         gray = image.convert("L")
