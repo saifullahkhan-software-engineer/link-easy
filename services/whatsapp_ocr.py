@@ -10,8 +10,10 @@ Requirements:
 """
 import base64
 import io
+import os
 import re
 import shutil
+from pathlib import Path
 
 from core.logging_config import get_logger
 
@@ -25,9 +27,64 @@ TESSERACT_CONFIG_PRIMARY = "--oem 3 --psm 6 -l eng -c preserve_interword_spaces=
 TESSERACT_CONFIG_FALLBACK = "--oem 3 --psm 3 -l eng"
 
 
+def _resolve_tesseract_cmd() -> str | None:
+    """Return the Tesseract executable that the current process can use.
+
+    ``pytesseract`` is only a Python wrapper; it launches the native
+    ``tesseract`` executable in the same environment as the Celery worker.
+    Linux installations normally put it on ``PATH``.  Windows installers
+    commonly put it at ``C:\\Program Files\\Tesseract-OCR\\tesseract.exe``
+    without updating the PATH, so also support the usual install locations and
+    an explicit ``TESSERACT_CMD`` override.
+    """
+    configured = os.getenv("TESSERACT_CMD") or os.getenv("TESSERACT_PATH")
+    if configured:
+        configured = os.path.expandvars(configured.strip().strip('"'))
+        # Accept either an absolute path or a command name in PATH.
+        resolved = shutil.which(configured) or configured
+        if Path(resolved).is_file():
+            return resolved
+        logger.warning("TESSERACT_CMD does not point to a file: %s", configured)
+
+    discovered = shutil.which("tesseract")
+    if discovered:
+        return discovered
+
+    if os.name == "nt":
+        program_files = [
+            os.getenv("ProgramFiles"),
+            os.getenv("ProgramW6432"),
+            os.getenv("ProgramFiles(x86)"),
+        ]
+        for root in filter(None, program_files):
+            candidate = Path(root) / "Tesseract-OCR" / "tesseract.exe"
+            if candidate.is_file():
+                return str(candidate)
+
+    return None
+
+
+def _configure_tesseract() -> str | None:
+    """Configure pytesseract and return the executable path, if available."""
+    command = _resolve_tesseract_cmd()
+    if not command:
+        return None
+
+    try:
+        import pytesseract
+
+        # Setting this is important when Tesseract was installed on Windows
+        # but its directory was not added to the worker's PATH.
+        pytesseract.pytesseract.tesseract_cmd = command
+    except ImportError:
+        # The caller will produce the more specific dependency error below.
+        pass
+    return command
+
+
 def _is_tesseract_available() -> bool:
-    """Check if the tesseract binary exists on PATH."""
-    return shutil.which("tesseract") is not None
+    """Check whether a usable Tesseract executable is available."""
+    return _configure_tesseract() is not None
 
 
 def _decode_image(raw_image_bytes: str | None):
@@ -203,12 +260,17 @@ def extract_text_from_image(raw_image_bytes: str | None) -> tuple[str, bool]:
         logger.warning("OCR: No image data provided")
         return "", True
 
-    if not _is_tesseract_available():
+    tesseract_cmd = _configure_tesseract()
+    if not tesseract_cmd:
         logger.error(
-            "OCR failed: tesseract binary not found on PATH. "
-            "Install with: apt-get install tesseract-ocr tesseract-ocr-eng"
+            "OCR failed: Tesseract executable was not found. "
+            "Install it in the same environment as the Celery worker or set "
+            "TESSERACT_CMD to the full path of tesseract.exe. "
+            "Linux/Debian: apt-get install tesseract-ocr tesseract-ocr-eng"
         )
         return "", True
+
+    logger.debug("Using Tesseract executable: %s", tesseract_cmd)
 
     image = _decode_image(raw_image_bytes)
     if image is None:
