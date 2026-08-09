@@ -567,70 +567,73 @@ async def navigate_to_group(page: Page, group_name: str) -> bool:
 
 
 async def scrape_messages_from_current_chat(
-    page: Page, last_message_id: Optional[str] = None, last_timestamp: Optional[str] = None
+    page: Page,
+    last_message_id: Optional[str] = None,
+    last_timestamp: Optional[str] = None,
+    message_limit: int = 20,
 ) -> list[dict]:
-    """Scrape new messages from the currently open chat.
+    """Scrape only the newest, not-yet-checkpointed chat messages.
 
-    Args:
-        page: Playwright page with a group conversation open.
-        last_message_id: The ID of the last message we processed (for incremental scraping).
-        last_timestamp: The timestamp of the last message we processed.
+    ``last_message_id`` is a durable per-group cursor.  When it is visible, we
+    inspect only containers after it.  When WhatsApp no longer has the cursor
+    in the rendered window, we inspect only the latest bounded window and let
+    the worker's persisted-id check discard any overlap.  We never scroll back
+    on an incremental scan, so old messages cannot become candidates again.
 
-    Returns:
-        List of message dicts with keys:
-            whatsapp_message_id, sender_name, message_text, message_type,
-            timestamp, raw_image_bytes
+    The conversation stays at its normal newest-message position even on the
+    first scan; the scanner never scrolls upward into history. It returns at
+    most ``message_limit`` rendered messages, newest first, and the worker
+    persists item zero as the next checkpoint.
     """
-    messages = []
+    del last_timestamp  # Kept in the signature for legacy callers/checkpoints.
+    message_limit = max(1, min(int(message_limit or 20), 100))
 
-    # Wait for messages to be visible
     try:
         await page.wait_for_selector(MSG_CONTAINER_SELECTOR, timeout=10000)
     except Exception:
         logger.warning("⚠️  No message containers found in current chat")
-        return messages
+        return []
 
     await asyncio.sleep(1)
 
-    # Scroll up to load older messages (limited scrolls)
-    for _ in range(5):
-        try:
-            main_pane = await page.query_selector(MAIN_PANE_SELECTOR)
-            if main_pane:
-                await main_pane.evaluate("el => el.scrollTop = 0")
-            else:
-                # Fallback: scroll the whole conversation pane
-                await page.evaluate("""
-                    const pane = document.querySelector('[data-testid="conversation-panel-wrapper"]')
-                        || document.querySelector('[data-testid="conversation-panel"]');
-                    if (pane) pane.scrollTop = 0;
-                """)
-            await asyncio.sleep(1.5)
-        except Exception:
-            break
-
-    # Collect message containers
+    # Do not scroll upward. WhatsApp opens a conversation at its newest
+    # messages, which is the only window an incremental scanner should inspect.
     msg_containers = await page.query_selector_all(MSG_CONTAINER_SELECTOR)
-    logger.info(f"📨 Found {len(msg_containers)} message containers in current chat")
+    logger.info("📨 Found %s rendered message containers", len(msg_containers))
 
-    found_last = False
+    cursor_index = None
+    if last_message_id:
+        for index, container in enumerate(msg_containers):
+            msg_id = await container.get_attribute("data-id")
+            if not msg_id:
+                msg_id = await container.get_attribute("id")
+            if msg_id == last_message_id:
+                cursor_index = index
 
-    for container in msg_containers:
+    if cursor_index is not None:
+        candidate_containers = msg_containers[cursor_index + 1 :]
+    else:
+        if last_message_id:
+            logger.info(
+                "📍 Checkpoint %s is outside the rendered window; using only the latest %s messages",
+                last_message_id,
+                message_limit,
+            )
+        candidate_containers = msg_containers[-message_limit:]
+
+    # Apply the cap after cursor slicing as well. If more than the configured
+    # number arrived between scans, only the newest configured amount is pulled.
+    candidate_containers = candidate_containers[-message_limit:]
+    messages = []
+
+    # WhatsApp renders oldest -> newest. Return newest -> oldest so item zero is
+    # always the durable high-water mark persisted by the worker.
+    for container in reversed(candidate_containers):
         try:
-            # Extract message ID
             msg_id = await container.get_attribute("data-id")
             if not msg_id:
                 msg_id = await container.get_attribute("id")
 
-            # If we've already processed this message, skip
-            if last_message_id and msg_id == last_message_id:
-                found_last = True
-                continue
-
-            # If we found the last processed message earlier, this one is new
-            # (messages appear in chronological order from top to bottom)
-
-            # Extract sender name
             sender_name = None
             try:
                 sender_el = await container.query_selector(
@@ -641,12 +644,11 @@ async def scrape_messages_from_current_chat(
             except Exception:
                 pass
 
-            # Determine message type: text, image, or both
             is_image = False
+            img_el = None
             try:
                 img_el = await container.query_selector(MSG_IMAGE_SELECTOR)
-                if img_el:
-                    is_image = True
+                is_image = img_el is not None
             except Exception:
                 pass
 
@@ -654,48 +656,35 @@ async def scrape_messages_from_current_chat(
             raw_image_bytes = None
 
             if is_image:
-                # Download the image
                 try:
-                    img_el = await container.query_selector(MSG_IMAGE_SELECTOR)
-                    if img_el:
-                        img_src = await img_el.get_attribute("src")
-                        if img_src and img_src.startswith("blob:"):
-                            # Get blob data via JS
-                            raw_image_bytes = await page.evaluate(
-                                """async (selector) => {
-                                    const img = document.querySelector(selector);
-                                    if (!img || !img.src.startsWith('blob:')) return null;
-                                    const resp = await fetch(img.src);
-                                    const blob = await resp.blob();
-                                    return new Promise((resolve) => {
-                                        const reader = new FileReader();
-                                        reader.onloadend = () => resolve(reader.result);
-                                        reader.readAsDataURL(blob);
-                                    });
-                                }""",
-                                MSG_IMAGE_SELECTOR,
-                            )
-                        elif img_src and img_src.startswith("data:"):
-                            raw_image_bytes = img_src
-                        else:
-                            # Try screenshotting the image element
-                            raw_image_bytes = await img_el.screenshot()
-                            if raw_image_bytes:
-                                raw_image_bytes = base64.b64encode(raw_image_bytes).decode()
-                except Exception as e:
-                    logger.debug(f"Image download failed: {e}")
+                    img_src = await img_el.get_attribute("src")
+                    if img_src and img_src.startswith("blob:"):
+                        raw_image_bytes = await img_el.evaluate("""async (img) => {
+                            const resp = await fetch(img.src);
+                            const blob = await resp.blob();
+                            return new Promise((resolve) => {
+                                const reader = new FileReader();
+                                reader.onloadend = () => resolve(reader.result);
+                                reader.readAsDataURL(blob);
+                            });
+                        }""")
+                    elif img_src and img_src.startswith("data:"):
+                        raw_image_bytes = img_src
+                    else:
+                        image_bytes = await img_el.screenshot()
+                        if image_bytes:
+                            raw_image_bytes = base64.b64encode(image_bytes).decode()
+                except Exception as exc:
+                    logger.debug("Image download failed: %s", exc)
 
-                # Check for caption text alongside the image
                 try:
                     text_el = await container.query_selector(MSG_TEXT_SELECTOR)
                     if text_el:
                         message_text = (await text_el.inner_text()).strip()
                 except Exception:
                     pass
-
                 message_type = "image"
             else:
-                # Plain text message
                 try:
                     text_el = await container.query_selector(MSG_TEXT_SELECTOR)
                     if text_el:
@@ -704,7 +693,6 @@ async def scrape_messages_from_current_chat(
                     pass
                 message_type = "text"
 
-            # Extract timestamp
             timestamp = None
             try:
                 time_el = await container.query_selector(
@@ -718,20 +706,20 @@ async def scrape_messages_from_current_chat(
             if not message_text and not raw_image_bytes:
                 continue
 
-            messages.append({
-                "whatsapp_message_id": msg_id,
-                "sender_name": sender_name,
-                "message_text": message_text,
-                "message_type": message_type,
-                "timestamp": timestamp,
-                "raw_image_bytes": raw_image_bytes,
-            })
+            messages.append(
+                {
+                    "whatsapp_message_id": msg_id,
+                    "sender_name": sender_name,
+                    "message_text": message_text,
+                    "message_type": message_type,
+                    "timestamp": timestamp,
+                    "raw_image_bytes": raw_image_bytes,
+                }
+            )
+        except Exception as exc:
+            logger.debug("Error extracting message: %s", exc)
 
-        except Exception as e:
-            logger.debug(f"Error extracting message: {e}")
-            continue
-
-    logger.info(f"📨 Extracted {len(messages)} new messages")
+    logger.info("📨 Extracted %s candidate new messages", len(messages))
     return messages
 
 

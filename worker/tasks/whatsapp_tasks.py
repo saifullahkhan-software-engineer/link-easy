@@ -325,6 +325,7 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                 "role": filters_row.role,
                 "job_title": filters_row.job_title,
                 "experience_level": filters_row.experience_level,
+                "latest_messages_limit": filters_row.latest_messages_limit,
             }
             effective_filter_id = filters_row.id if filter_id is not None else None
         else:
@@ -337,20 +338,23 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
         filter_role = filter_data["role"]
         filter_job_title = filter_data["job_title"]
         filter_experience = filter_data["experience_level"]
+        latest_messages_limit = int(filter_data["latest_messages_limit"] or 20)
     else:
         match_threshold = 60.0
         filter_keywords = None
         filter_role = None
         filter_job_title = None
         filter_experience = None
+        latest_messages_limit = 20
 
     logger.info(
-        "🔧 Filters: threshold=%s keywords=%s role=%s title=%s exp=%s",
+        "🔧 Filters: threshold=%s keywords=%s role=%s title=%s exp=%s latest_messages=%s",
         match_threshold,
         filter_keywords,
         filter_role,
         filter_job_title,
         filter_experience,
+        latest_messages_limit,
     )
 
     try:
@@ -402,6 +406,7 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                 page,
                 last_message_id=group.get("last_message_id"),
                 last_timestamp=group.get("last_message_timestamp"),
+                message_limit=latest_messages_limit,
             )
 
             if not new_messages:
@@ -415,8 +420,11 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                         g_row.last_checked_at = datetime.now(timezone.utc)
                 continue
 
-            logger.info(f"📋 Found {len(new_messages)} new messages in {group_name}")
-            stats["scraped"] += len(new_messages)
+            logger.info(
+                "📋 Found %s candidate new messages in %s",
+                len(new_messages),
+                group_name,
+            )
 
             with get_sync_db() as db_save:
                 from models.whatsapp import WhatsAppRawMessage, WhatsAppMonitoredGroup
@@ -425,12 +433,48 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                     WhatsAppMonitoredGroup.id == group["id"]
                 ).first()
                 if g_row and new_messages:
+                    # The scraper returns newest first. Persist the newest
+                    # observed id before processing so the next scan starts
+                    # strictly after this checkpoint.
                     latest_msg = new_messages[0]
                     g_row.last_message_id = latest_msg.get("whatsapp_message_id")
                     g_row.last_message_timestamp = latest_msg.get("timestamp")
                     g_row.last_checked_at = datetime.now(timezone.utc)
 
-                for msg in new_messages:
+                candidate_ids = {
+                    msg.get("whatsapp_message_id")
+                    for msg in new_messages
+                    if msg.get("whatsapp_message_id")
+                }
+                existing_ids: set[str] = set()
+                if candidate_ids:
+                    existing_ids = {
+                        value
+                        for (value,) in (
+                            db_save.query(WhatsAppRawMessage.whatsapp_message_id)
+                            .filter(
+                                WhatsAppRawMessage.group_id == group["id"],
+                                WhatsAppRawMessage.whatsapp_message_id.in_(candidate_ids),
+                            )
+                            .all()
+                        )
+                    }
+
+                unseen_messages = [
+                    msg
+                    for msg in new_messages
+                    if not msg.get("whatsapp_message_id")
+                    or msg.get("whatsapp_message_id") not in existing_ids
+                ]
+                stats["scraped"] += len(unseen_messages)
+                if len(unseen_messages) != len(new_messages):
+                    logger.info(
+                        "⏭️ Skipped %s already-pulled messages in %s",
+                        len(new_messages) - len(unseen_messages),
+                        group_name,
+                    )
+
+                for msg in unseen_messages:
                     raw_msg = WhatsAppRawMessage(
                         filter_id=effective_filter_id,
                         group_id=group["id"],
