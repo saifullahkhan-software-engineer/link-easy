@@ -838,6 +838,7 @@ async def delete_whatsapp_filter_job(
     from sqlalchemy import delete as sa_delete
 
     filter_row = await _load_owned_filter(filter_id, current_user, db)
+    filter_name = filter_row.name
     await db.execute(
         sa_delete(WhatsAppRawMessage).where(WhatsAppRawMessage.filter_id == filter_id)
     )
@@ -853,7 +854,7 @@ async def delete_whatsapp_filter_job(
     )
     await db.delete(filter_row)
     await db.commit()
-    return {"message": f"WhatsApp filter '{filter_row.name}' deleted successfully"}
+    return {"message": f"WhatsApp filter '{filter_name}' deleted successfully"}
 
 
 @router.post("/filters/{filter_id}/activate", status_code=200)
@@ -883,13 +884,15 @@ async def activate_whatsapp_filter_job(
         filter_row.remaining_seconds = None
         message = f"Filter '{filter_row.name}' activated. First scan starting..."
 
+    next_scan_at = filter_row.next_scan_at
+    job_id = filter_row.id
     await db.commit()
     celery_app.send_task(
         "tasks.check_whatsapp_messages",
-        args=[filter_row.id],
+        args=[job_id],
         countdown=max(5, delay_seconds),
     )
-    return {"message": message, "next_scan_at": filter_row.next_scan_at}
+    return {"message": message, "next_scan_at": next_scan_at}
 
 
 @router.post("/filters/{filter_id}/pause", status_code=200)
@@ -913,10 +916,12 @@ async def pause_whatsapp_filter_job(
     else:
         filter_row.remaining_seconds = max(0, int(filter_row.interval_hours * 3600))
     filter_row.status = "paused"
+    remaining_seconds = filter_row.remaining_seconds
+    filter_name = filter_row.name
     await db.commit()
     return {
-        "message": f"Filter '{filter_row.name}' paused",
-        "remaining_seconds": filter_row.remaining_seconds,
+        "message": f"Filter '{filter_name}' paused",
+        "remaining_seconds": remaining_seconds,
     }
 
 
