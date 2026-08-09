@@ -78,6 +78,16 @@ export default function WhatsAppScannerPage() {
 
   // ── Poll status when connecting ──
   useEffect(() => {
+    if (status === 'connected') {
+      // Move straight into the configured flow after QR/2FA completes. The
+      // user should not have to discover and click Refresh Groups manually.
+      loadGroups();
+      loadFilters();
+      loadStats();
+    }
+  }, [status]);
+
+  useEffect(() => {
     if (status === 'waiting_qr') {
       const interval = setInterval(loadStatus, 3000);
       setStatusPolling(interval);
@@ -104,7 +114,13 @@ export default function WhatsAppScannerPage() {
     try {
       setGroupsLoading(true);
       const { data } = await whatsappApi.getGroups();
-      setGroups(data.groups || []);
+      const loadedGroups = data.groups || [];
+      setGroups(loadedGroups);
+      // Restore the saved flow so reconnecting does not reset the user's
+      // monitored groups or forwarding destination.
+      const savedNames = new Set(data.monitored_group_names || []);
+      setSelectedGroups(loadedGroups.filter((g) => savedNames.has(g.group_name)));
+      setForwardGroup(data.forward_group_name || '');
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to load groups'));
     } finally {
@@ -298,7 +314,7 @@ export default function WhatsAppScannerPage() {
       </div>
 
       {/* ── Section 1.5: Live browser view ──────────────────────── */}
-      <BrowserViewPanel />
+      {status !== 'connected' && <BrowserViewPanel />}
 
       {/* ── Section 2: Group Selection ──────────────────────────── */}
       {status === 'connected' && (
