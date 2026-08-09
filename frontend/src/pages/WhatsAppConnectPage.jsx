@@ -121,7 +121,7 @@ export default function WhatsAppConnectPage() {
             scanner.
             <div className="mt-3 flex flex-wrap gap-2">
               <Link to="/app/whatsapp-scanner" className="btn-primary text-xs">
-                Open WhatsApp scanner →
+                Open WhatsApp filters →
               </Link>
               <Link to="/app/account" className="btn-secondary text-xs">
                 Back to Accounts

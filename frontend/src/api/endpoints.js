@@ -182,23 +182,59 @@ export const whatsappApi = {
     api.post('/whatsapp/connect', null, { timeout: WHATSAPP_TIMEOUT }),
   getStatus: () =>
     api.get('/whatsapp/status'),
-  getGroups: (search = '') =>
+
+  // The groups endpoint still talks to WhatsApp Web, but saved selections are
+  // scoped to a filter job when filterId is supplied.
+  getGroups: (search = '', filterId = null) =>
     api.get('/whatsapp/groups', {
-      params: search ? { search } : {},
+      params: {
+        ...(search ? { search } : {}),
+        ...(filterId ? { filter_id: filterId } : {}),
+      },
       timeout: WHATSAPP_TIMEOUT,
     }),
   selectGroups: (payload) =>
     api.post('/whatsapp/groups/select', payload),
+
+  // Legacy singleton endpoints kept for older links/integrations.
   getFilters: () =>
     api.get('/whatsapp/filters'),
   saveFilters: (payload) =>
     api.post('/whatsapp/filters', payload),
-  getMessages: (params = {}) =>
-    api.get('/whatsapp/messages', { params }),
-  triggerScan: () =>
-    api.post('/whatsapp/scan/trigger', null, { timeout: WHATSAPP_TIMEOUT }),
-  getStats: () =>
-    api.get('/whatsapp/stats'),
+
+  // Filter-job workflow: list -> detail -> start/pause/delete.
+  listFilterJobs: () =>
+    api.get('/whatsapp/filters/jobs'),
+  getFilterJob: (filterId) =>
+    api.get(`/whatsapp/filters/jobs/${filterId}`),
+  createFilterJob: (payload) =>
+    api.post('/whatsapp/filters/jobs', payload),
+  updateFilterJob: (filterId, payload) =>
+    api.patch(`/whatsapp/filters/jobs/${filterId}`, payload),
+  deleteFilterJob: (filterId) =>
+    api.delete(`/whatsapp/filters/jobs/${filterId}`),
+  activateFilterJob: (filterId) =>
+    api.post(`/whatsapp/filters/jobs/${filterId}/activate`),
+  pauseFilterJob: (filterId) =>
+    api.post(`/whatsapp/filters/jobs/${filterId}/pause`),
+
+  getMessages: (params = {}, filterId = null) =>
+    api.get('/whatsapp/messages', {
+      params: { ...params, ...(filterId ? { filter_id: filterId } : {}) },
+    }),
+  triggerScan: (filterId = null) =>
+    api.post(
+      '/whatsapp/scan/trigger',
+      null,
+      {
+        params: filterId ? { filter_id: filterId } : {},
+        timeout: WHATSAPP_TIMEOUT,
+      }
+    ),
+  getStats: (filterId = null) =>
+    api.get('/whatsapp/stats', {
+      params: filterId ? { filter_id: filterId } : {},
+    }),
 };
 
 /* --------------------------------- live debug ------------------------------ */

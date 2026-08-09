@@ -20,6 +20,8 @@ import FeedScrollEditPage from './pages/FeedScrollEditPage';
 import FeedScrollResultsPage from './pages/FeedScrollResultsPage';
 import FeedScrollAppliedPostsPage from './pages/FeedScrollAppliedPostsPage';
 import WhatsAppScannerPage from './pages/WhatsAppScannerPage';
+import WhatsAppFilterJobsPage from './pages/WhatsAppFilterJobsPage';
+import WhatsAppFilterCreatePage from './pages/WhatsAppFilterCreatePage';
 
 export default function App() {
   return (
@@ -69,7 +71,9 @@ export default function App() {
             <Route path="feed-scroll/jobs/:jobId/edit" element={<FeedScrollEditPage />} />
             <Route path="feed-scroll/jobs/:jobId/applied" element={<FeedScrollAppliedPostsPage />} />
             <Route path="feed-scroll/jobs/:jobId/applied-posts" element={<FeedScrollAppliedPostsPage />} />
-            <Route path="whatsapp-scanner" element={<WhatsAppScannerPage />} />
+            <Route path="whatsapp-scanner" element={<WhatsAppFilterJobsPage />} />
+            <Route path="whatsapp-scanner/create" element={<WhatsAppFilterCreatePage />} />
+            <Route path="whatsapp-scanner/jobs/:filterId" element={<WhatsAppScannerPage />} />
           </Route>
 
           {/* catch-all */}

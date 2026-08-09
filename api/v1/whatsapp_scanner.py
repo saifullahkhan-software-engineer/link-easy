@@ -6,8 +6,12 @@ POST   /api/v1/whatsapp/connect          → start embedded browser view + QR wa
 GET    /api/v1/whatsapp/status           → connection status
 GET    /api/v1/whatsapp/groups           → list all groups
 POST   /api/v1/whatsapp/groups/select    → save monitored + forward groups
-GET    /api/v1/whatsapp/filters          → get current filters
-POST   /api/v1/whatsapp/filters          → save filters
+GET    /api/v1/whatsapp/filters/jobs    → list the user's filter jobs
+POST   /api/v1/whatsapp/filters/jobs    → create a draft filter job
+GET    /api/v1/whatsapp/filters/jobs/{id} → filter details
+PATCH/DELETE/POST .../{id}              → edit, remove, activate or pause
+GET    /api/v1/whatsapp/filters         → legacy singleton filter endpoint
+POST   /api/v1/whatsapp/filters         → legacy filter upsert
 GET    /api/v1/whatsapp/messages         → paginated list with scores/status
 POST   /api/v1/whatsapp/scan/trigger     → manually trigger scan task
 GET    /api/v1/whatsapp/stats            → matched/rejected/forwarded counts
@@ -27,12 +31,12 @@ Logs are written to the terminal/backend for easy monitoring.
 """
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func as sa_func
+from sqlalchemy import func as sa_func, update as sa_update
 
 from api.dependencies import get_db, get_current_user
 from models.user import User
@@ -44,6 +48,8 @@ from schemas.whatsapp import (
     WhatsAppGroupSelectRequest,
     WhatsAppGroupSelectResponse,
     WhatsAppScanFilterRequest,
+    WhatsAppScanFilterCreate,
+    WhatsAppScanFilterUpdate,
     WhatsAppScanFilterResponse,
     WhatsAppMessageResponse,
     WhatsAppMessageListResponse,
@@ -61,6 +67,96 @@ from core.logging_config import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/whatsapp", tags=["whatsapp-scanner"])
+
+
+async def _load_owned_filter(
+    filter_id: int,
+    current_user: User,
+    db: AsyncSession,
+) -> WhatsAppScanFilter:
+    """Load a filter job owned by the caller or raise a uniform 404."""
+    result = await db.execute(
+        select(WhatsAppScanFilter).where(
+            WhatsAppScanFilter.id == filter_id,
+            WhatsAppScanFilter.owner_email == current_user.email,
+        )
+    )
+    filter_row = result.scalars().first()
+    if not filter_row:
+        raise HTTPException(status_code=404, detail="WhatsApp filter not found")
+    return filter_row
+
+
+async def _filter_response(
+    filter_row: WhatsAppScanFilter,
+    db: AsyncSession,
+) -> WhatsAppScanFilterResponse:
+    """Build the list/detail shape including groups and message counters."""
+    monitored_result = await db.execute(
+        select(WhatsAppMonitoredGroup)
+        .where(WhatsAppMonitoredGroup.filter_id == filter_row.id)
+        .order_by(WhatsAppMonitoredGroup.id)
+    )
+    monitored = monitored_result.scalars().all()
+
+    forward_result = await db.execute(
+        select(WhatsAppForwardGroup)
+        .where(WhatsAppForwardGroup.filter_id == filter_row.id)
+        .order_by(WhatsAppForwardGroup.id)
+        .limit(1)
+    )
+    forward = forward_result.scalars().first()
+
+    total_result = await db.execute(
+        select(sa_func.count())
+        .select_from(WhatsAppRawMessage)
+        .where(WhatsAppRawMessage.filter_id == filter_row.id)
+    )
+    total = total_result.scalar() or 0
+
+    async def _count(status_value: str) -> int:
+        result = await db.execute(
+            select(sa_func.count())
+            .select_from(WhatsAppRawMessage)
+            .where(
+                WhatsAppRawMessage.filter_id == filter_row.id,
+                WhatsAppRawMessage.status == status_value,
+            )
+        )
+        return result.scalar() or 0
+
+    forwarded_result = await db.execute(
+        select(sa_func.count())
+        .select_from(WhatsAppRawMessage)
+        .where(
+            WhatsAppRawMessage.filter_id == filter_row.id,
+            WhatsAppRawMessage.forwarded == True,
+        )
+    )
+
+    return WhatsAppScanFilterResponse(
+        id=filter_row.id,
+        name=filter_row.name or "WhatsApp Filter",
+        owner_email=filter_row.owner_email,
+        status=filter_row.status or "draft",
+        role=filter_row.role,
+        job_title=filter_row.job_title,
+        keywords=filter_row.keywords,
+        experience_level=filter_row.experience_level,
+        match_threshold=filter_row.match_threshold,
+        interval_hours=filter_row.interval_hours,
+        remaining_seconds=filter_row.remaining_seconds,
+        next_scan_at=filter_row.next_scan_at,
+        updated_at=filter_row.updated_at,
+        created_at=getattr(filter_row, "created_at", None),
+        last_scan_at=filter_row.last_scan_at,
+        monitored_group_names=[group.group_name for group in monitored],
+        forward_group_name=forward.group_name if forward else None,
+        total_count=total,
+        matched_count=await _count("matched"),
+        rejected_count=await _count("rejected"),
+        forwarded_count=forwarded_result.scalar() or 0,
+    )
 
 
 # ── QR watcher bookkeeping ───────────────────────────────────────────────────
@@ -386,6 +482,7 @@ async def get_whatsapp_status(
 @router.get("/groups", response_model=WhatsAppGroupListResponse)
 async def list_whatsapp_groups(
     search: str | None = None,
+    filter_id: int | None = Query(None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppGroupListResponse:
@@ -401,6 +498,9 @@ async def list_whatsapp_groups(
     30s for the chat list and only mark the session disconnected when the QR
     landing screen is actually confirmed.
     """
+    if filter_id is not None:
+        await _load_owned_filter(filter_id, current_user, db)
+
     # Check if we have an active session
     result = await db.execute(
         select(WhatsAppSession)
@@ -496,12 +596,18 @@ async def list_whatsapp_groups(
                 release_profile_lock(profile_lock)
 
     try:
-        monitored_result = await db.execute(
-            select(WhatsAppMonitoredGroup).order_by(WhatsAppMonitoredGroup.id)
-        )
-        forward_result = await db.execute(
-            select(WhatsAppForwardGroup).order_by(WhatsAppForwardGroup.id).limit(1)
-        )
+        monitored_query = select(WhatsAppMonitoredGroup).order_by(WhatsAppMonitoredGroup.id)
+        forward_query = select(WhatsAppForwardGroup).order_by(WhatsAppForwardGroup.id).limit(1)
+        if filter_id is not None:
+            monitored_query = monitored_query.where(WhatsAppMonitoredGroup.filter_id == filter_id)
+            forward_query = forward_query.where(WhatsAppForwardGroup.filter_id == filter_id)
+        else:
+            # Legacy singleton rows are deliberately NULL-scoped.
+            monitored_query = monitored_query.where(WhatsAppMonitoredGroup.filter_id.is_(None))
+            forward_query = forward_query.where(WhatsAppForwardGroup.filter_id.is_(None))
+
+        monitored_result = await db.execute(monitored_query)
+        forward_result = await db.execute(forward_query)
         saved_forward = forward_result.scalars().first()
         return WhatsAppGroupListResponse(
             groups=[WhatsAppGroupItem(**g) for g in groups],
@@ -535,6 +641,9 @@ async def select_whatsapp_groups(
             detail="Exactly 3 monitored groups must be selected.",
         )
 
+    if payload.filter_id is not None:
+        await _load_owned_filter(payload.filter_id, current_user, db)
+
     # Normalise empty strings to None so DB stores NULL not '' — avoids
     # unique/confusion issues and matches the model definition.
     def _clean(v: str | None) -> str | None:
@@ -547,8 +656,18 @@ async def select_whatsapp_groups(
     from sqlalchemy import delete as sa_delete
 
     try:
-        await db.execute(sa_delete(WhatsAppMonitoredGroup))
-        await db.execute(sa_delete(WhatsAppForwardGroup))
+        group_scope = (
+            WhatsAppMonitoredGroup.filter_id == payload.filter_id
+            if payload.filter_id is not None
+            else WhatsAppMonitoredGroup.filter_id.is_(None)
+        )
+        forward_scope = (
+            WhatsAppForwardGroup.filter_id == payload.filter_id
+            if payload.filter_id is not None
+            else WhatsAppForwardGroup.filter_id.is_(None)
+        )
+        await db.execute(sa_delete(WhatsAppMonitoredGroup).where(group_scope))
+        await db.execute(sa_delete(WhatsAppForwardGroup).where(forward_scope))
         await db.flush()
 
         # Save monitored groups
@@ -556,6 +675,7 @@ async def select_whatsapp_groups(
             payload.monitored_group_names, payload.monitored_group_ids
         ):
             group = WhatsAppMonitoredGroup(
+                filter_id=payload.filter_id,
                 group_name=name.strip(),
                 whatsapp_id=_clean(gid),
             )
@@ -563,6 +683,7 @@ async def select_whatsapp_groups(
 
         # Save forward group
         forward = WhatsAppForwardGroup(
+            filter_id=payload.filter_id,
             group_name=payload.forward_group_name.strip(),
             whatsapp_id=_clean(payload.forward_group_id),
         )
@@ -589,7 +710,224 @@ async def select_whatsapp_groups(
     )
 
 
+# ── Filter jobs workflow ─────────────────────────────────────────────────────
+
+
+@router.get("/filters/jobs", response_model=list[WhatsAppScanFilterResponse])
+async def list_whatsapp_filter_jobs(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[WhatsAppScanFilterResponse]:
+    """List the caller's WhatsApp filter jobs, newest first."""
+    result = await db.execute(
+        select(WhatsAppScanFilter)
+        .where(
+            (WhatsAppScanFilter.owner_email == current_user.email)
+            | (WhatsAppScanFilter.owner_email.is_(None))
+        )
+        .order_by(WhatsAppScanFilter.created_at.desc(), WhatsAppScanFilter.id.desc())
+    )
+    rows = result.scalars().all()
+
+    # Adopt the one legacy singleton row into the authenticated user's filter
+    # workspace on first visit. Move its NULL-scoped groups/results as well so
+    # the new detail page shows the existing configuration instead of looking
+    # empty after the migration.
+    adopted = False
+    for row in rows:
+        if row.owner_email is not None:
+            continue
+        row.owner_email = current_user.email
+        row.name = row.name or "WhatsApp Filter"
+        row.status = row.status or "active"
+        await db.execute(
+            sa_update(WhatsAppMonitoredGroup)
+            .where(WhatsAppMonitoredGroup.filter_id.is_(None))
+            .values(filter_id=row.id)
+        )
+        await db.execute(
+            sa_update(WhatsAppForwardGroup)
+            .where(WhatsAppForwardGroup.filter_id.is_(None))
+            .values(filter_id=row.id)
+        )
+        await db.execute(
+            sa_update(WhatsAppRawMessage)
+            .where(WhatsAppRawMessage.filter_id.is_(None))
+            .values(filter_id=row.id)
+        )
+        adopted = True
+    if adopted:
+        await db.commit()
+        # Bulk UPDATE statements can expire scalar attributes on ORM rows even
+        # when the session uses expire_on_commit=False. Refresh before building
+        # the response so async SQLAlchemy never attempts implicit IO.
+        for row in rows:
+            await db.refresh(row)
+
+    return [await _filter_response(row, db) for row in rows]
+
+
+@router.post(
+    "/filters/jobs",
+    response_model=WhatsAppScanFilterResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_whatsapp_filter_job(
+    payload: WhatsAppScanFilterCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppScanFilterResponse:
+    """Create a draft WhatsApp filter job."""
+    filter_row = WhatsAppScanFilter(
+        owner_email=current_user.email,
+        name=payload.name.strip(),
+        status="draft",
+        role=payload.role,
+        job_title=payload.job_title,
+        keywords=payload.keywords,
+        experience_level=payload.experience_level,
+        match_threshold=payload.match_threshold,
+        interval_hours=payload.interval_hours,
+    )
+    db.add(filter_row)
+    await db.commit()
+    await db.refresh(filter_row)
+    return await _filter_response(filter_row, db)
+
+
+@router.get("/filters/{filter_id}", response_model=WhatsAppScanFilterResponse)
+@router.get("/filters/jobs/{filter_id}", response_model=WhatsAppScanFilterResponse)
+async def get_whatsapp_filter_job(
+    filter_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppScanFilterResponse:
+    """Return all configuration and counters for one filter job."""
+    filter_row = await _load_owned_filter(filter_id, current_user, db)
+    return await _filter_response(filter_row, db)
+
+
+@router.patch("/filters/{filter_id}", response_model=WhatsAppScanFilterResponse)
+@router.patch("/filters/jobs/{filter_id}", response_model=WhatsAppScanFilterResponse)
+async def update_whatsapp_filter_job(
+    filter_id: int,
+    payload: WhatsAppScanFilterUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppScanFilterResponse:
+    """Update filter criteria without changing its lifecycle state."""
+    filter_row = await _load_owned_filter(filter_id, current_user, db)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if field == "name" and value is not None:
+            value = value.strip()
+        setattr(filter_row, field, value)
+    filter_row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(filter_row)
+    return await _filter_response(filter_row, db)
+
+
+@router.delete("/filters/{filter_id}", status_code=200)
+@router.delete("/filters/jobs/{filter_id}", status_code=200)
+async def delete_whatsapp_filter_job(
+    filter_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a filter and its group configuration/results."""
+    from sqlalchemy import delete as sa_delete
+
+    filter_row = await _load_owned_filter(filter_id, current_user, db)
+    filter_name = filter_row.name
+    await db.execute(
+        sa_delete(WhatsAppRawMessage).where(WhatsAppRawMessage.filter_id == filter_id)
+    )
+    await db.execute(
+        sa_delete(WhatsAppMonitoredGroup).where(
+            WhatsAppMonitoredGroup.filter_id == filter_id
+        )
+    )
+    await db.execute(
+        sa_delete(WhatsAppForwardGroup).where(
+            WhatsAppForwardGroup.filter_id == filter_id
+        )
+    )
+    await db.delete(filter_row)
+    await db.commit()
+    return {"message": f"WhatsApp filter '{filter_name}' deleted successfully"}
+
+
+@router.post("/filters/{filter_id}/activate", status_code=200)
+@router.post("/filters/jobs/{filter_id}/activate", status_code=200)
+async def activate_whatsapp_filter_job(
+    filter_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Start or resume a filter job, preserving a paused countdown."""
+    from worker.celery_app import celery_app
+
+    filter_row = await _load_owned_filter(filter_id, current_user, db)
+    if filter_row.status == "active":
+        raise HTTPException(status_code=409, detail="Filter is already active")
+
+    now = datetime.now(timezone.utc)
+    filter_row.status = "active"
+    if filter_row.remaining_seconds is not None and filter_row.remaining_seconds > 0:
+        delay_seconds = filter_row.remaining_seconds
+        filter_row.next_scan_at = now + timedelta(seconds=delay_seconds)
+        filter_row.remaining_seconds = None
+        message = f"Filter '{filter_row.name}' resumed. Next scan in {delay_seconds} seconds."
+    else:
+        delay_seconds = 10
+        filter_row.next_scan_at = now + timedelta(seconds=delay_seconds)
+        filter_row.remaining_seconds = None
+        message = f"Filter '{filter_row.name}' activated. First scan starting..."
+
+    next_scan_at = filter_row.next_scan_at
+    job_id = filter_row.id
+    await db.commit()
+    celery_app.send_task(
+        "tasks.check_whatsapp_messages",
+        args=[job_id],
+        countdown=max(5, delay_seconds),
+    )
+    return {"message": message, "next_scan_at": next_scan_at}
+
+
+@router.post("/filters/{filter_id}/pause", status_code=200)
+@router.post("/filters/jobs/{filter_id}/pause", status_code=200)
+async def pause_whatsapp_filter_job(
+    filter_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pause a running filter and preserve its remaining scan time."""
+    filter_row = await _load_owned_filter(filter_id, current_user, db)
+    if filter_row.status != "active":
+        raise HTTPException(status_code=400, detail="Filter is not active")
+
+    now = datetime.now(timezone.utc)
+    if filter_row.next_scan_at:
+        next_at = filter_row.next_scan_at
+        if next_at.tzinfo is None:
+            next_at = next_at.replace(tzinfo=timezone.utc)
+        filter_row.remaining_seconds = max(0, int((next_at - now).total_seconds()))
+    else:
+        filter_row.remaining_seconds = max(0, int(filter_row.interval_hours * 3600))
+    filter_row.status = "paused"
+    remaining_seconds = filter_row.remaining_seconds
+    filter_name = filter_row.name
+    await db.commit()
+    return {
+        "message": f"Filter '{filter_name}' paused",
+        "remaining_seconds": remaining_seconds,
+    }
+
+
 # ── GET /filters ─────────────────────────────────────────────────────────────
+# Legacy singleton endpoints remain available for older clients. New pages use
+# /filters/jobs above and never mix their data with the legacy NULL-scoped rows.
 
 
 @router.get("/filters", response_model=WhatsAppScanFilterResponse)
@@ -599,7 +937,13 @@ async def get_whatsapp_filters(
 ) -> WhatsAppScanFilterResponse:
     """Get the current scan filters."""
     result = await db.execute(
-        select(WhatsAppScanFilter).order_by(WhatsAppScanFilter.id.desc()).limit(1)
+        select(WhatsAppScanFilter)
+        .where(
+            (WhatsAppScanFilter.owner_email == current_user.email)
+            | (WhatsAppScanFilter.owner_email.is_(None))
+        )
+        .order_by(WhatsAppScanFilter.id.desc())
+        .limit(1)
     )
     filters = result.scalars().first()
 
@@ -633,12 +977,23 @@ async def save_whatsapp_filters(
     from datetime import datetime, timezone
 
     result = await db.execute(
-        select(WhatsAppScanFilter).order_by(WhatsAppScanFilter.id.desc()).limit(1)
+        select(WhatsAppScanFilter)
+        .where(
+            (WhatsAppScanFilter.owner_email == current_user.email)
+            | (WhatsAppScanFilter.owner_email.is_(None))
+        )
+        .order_by(WhatsAppScanFilter.id.desc())
+        .limit(1)
     )
     filters = result.scalars().first()
 
     if filters:
-        # Update existing
+        # Claim a legacy row when the first authenticated user saves it, then
+        # keep the old singleton endpoint active for compatibility.
+        if filters.owner_email is None:
+            filters.owner_email = current_user.email
+        filters.status = "active"
+        filters.name = filters.name or "WhatsApp Filter"
         filters.role = payload.role
         filters.job_title = payload.job_title
         filters.keywords = payload.keywords
@@ -649,6 +1004,9 @@ async def save_whatsapp_filters(
     else:
         # Create new
         filters = WhatsAppScanFilter(
+            owner_email=current_user.email,
+            name="WhatsApp Filter",
+            status="active",
             role=payload.role,
             job_title=payload.job_title,
             keywords=payload.keywords,
@@ -672,41 +1030,32 @@ async def list_whatsapp_messages(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status_filter: str | None = Query(None, alias="status"),
+    filter_id: int | None = Query(None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppMessageListResponse:
     """Get paginated list of scraped messages with scores and statuses."""
-    query = select(WhatsAppRawMessage)
+    if filter_id is not None:
+        await _load_owned_filter(filter_id, current_user, db)
 
+    filters = [WhatsAppRawMessage.filter_id == filter_id] if filter_id is not None else []
     if status_filter:
-        query = query.where(WhatsAppRawMessage.status == status_filter)
+        filters.append(WhatsAppRawMessage.status == status_filter)
 
-    # Get total count
-    count_query = select(sa_func.count()).select_from(
-        query.subquery() if status_filter else WhatsAppRawMessage
-    )
-    if status_filter and not query.whereclause:
-        count_query = select(sa_func.count()).select_from(WhatsAppRawMessage)
-
-    # Simpler approach: two queries
-    total_result = await db.execute(
-        select(sa_func.count()).select_from(WhatsAppRawMessage).where(
-            WhatsAppRawMessage.status == status_filter
-        )
-        if status_filter
-        else select(sa_func.count()).select_from(WhatsAppRawMessage)
-    )
+    count_query = select(sa_func.count()).select_from(WhatsAppRawMessage)
+    if filters:
+        count_query = count_query.where(*filters)
+    total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
 
-    # Fetch page
     query = (
         select(WhatsAppRawMessage)
         .order_by(WhatsAppRawMessage.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    if status_filter:
-        query = query.where(WhatsAppRawMessage.status == status_filter)
+    if filters:
+        query = query.where(*filters)
 
     result = await db.execute(query)
     messages = result.scalars().all()
@@ -724,11 +1073,15 @@ async def list_whatsapp_messages(
 
 @router.post("/scan/trigger", status_code=200)
 async def trigger_whatsapp_scan(
+    filter_id: int | None = Query(None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Manually trigger a WhatsApp message scan."""
     from worker.celery_app import celery_app
+
+    if filter_id is not None:
+        await _load_owned_filter(filter_id, current_user, db)
 
     # Verify we have an active session
     result = await db.execute(
@@ -748,22 +1101,39 @@ async def trigger_whatsapp_scan(
     # Pre-flight: ensure groups are configured, otherwise the Celery task
     # will immediately skip with "No monitored groups" and the user sees
     # nothing happening.
-    mg_result = await db.execute(select(WhatsAppMonitoredGroup).limit(1))
+    monitored_query = select(WhatsAppMonitoredGroup).limit(1)
+    forward_query = select(WhatsAppForwardGroup).limit(1)
+    if filter_id is not None:
+        monitored_query = monitored_query.where(WhatsAppMonitoredGroup.filter_id == filter_id)
+        forward_query = forward_query.where(WhatsAppForwardGroup.filter_id == filter_id)
+    else:
+        monitored_query = monitored_query.where(WhatsAppMonitoredGroup.filter_id.is_(None))
+        forward_query = forward_query.where(WhatsAppForwardGroup.filter_id.is_(None))
+
+    mg_result = await db.execute(monitored_query)
     if mg_result.scalars().first() is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No monitored groups configured. Please select and save 3 groups first.",
         )
 
-    fg_result = await db.execute(select(WhatsAppForwardGroup).limit(1))
+    fg_result = await db.execute(forward_query)
     if fg_result.scalars().first() is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No forward group configured. Please select a forward group.",
         )
 
-    celery_app.send_task("tasks.check_whatsapp_messages", countdown=2)
-    logger.info("📱 Manual WhatsApp scan triggered by user %s", current_user.email)
+    celery_app.send_task(
+        "tasks.check_whatsapp_messages",
+        args=[filter_id] if filter_id is not None else [],
+        countdown=2,
+    )
+    logger.info(
+        "📱 Manual WhatsApp scan triggered by user %s filter=%s",
+        current_user.email,
+        filter_id,
+    )
 
     return {"message": "WhatsApp scan triggered. Results will be available shortly."}
 
@@ -773,20 +1143,31 @@ async def trigger_whatsapp_scan(
 
 @router.get("/stats", response_model=WhatsAppStatsResponse)
 async def get_whatsapp_stats(
+    filter_id: int | None = Query(None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppStatsResponse:
     """Get aggregated counts: matched, rejected, forwarded, pending, total."""
+    if filter_id is not None:
+        await _load_owned_filter(filter_id, current_user, db)
+
+    scope = [WhatsAppRawMessage.filter_id == filter_id] if filter_id is not None else []
+
+    def _scoped(query):
+        return query.where(*scope) if scope else query
+
     total_result = await db.execute(
-        select(sa_func.count()).select_from(WhatsAppRawMessage)
+        _scoped(select(sa_func.count()).select_from(WhatsAppRawMessage))
     )
     total = total_result.scalar() or 0
 
     async def _count(status_val: str) -> int:
         r = await db.execute(
-            select(sa_func.count())
-            .select_from(WhatsAppRawMessage)
-            .where(WhatsAppRawMessage.status == status_val)
+            _scoped(
+                select(sa_func.count())
+                .select_from(WhatsAppRawMessage)
+                .where(WhatsAppRawMessage.status == status_val)
+            )
         )
         return r.scalar() or 0
 
@@ -794,9 +1175,11 @@ async def get_whatsapp_stats(
     rejected = await _count("rejected")
     pending = await _count("pending")
     forwarded_result = await db.execute(
-        select(sa_func.count())
-        .select_from(WhatsAppRawMessage)
-        .where(WhatsAppRawMessage.forwarded == True)
+        _scoped(
+            select(sa_func.count())
+            .select_from(WhatsAppRawMessage)
+            .where(WhatsAppRawMessage.forwarded == True)
+        )
     )
     forwarded = forwarded_result.scalar() or 0
 

@@ -127,7 +127,7 @@ export default function AccountsPage() {
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-zinc-100">WhatsApp</h2>
-                <p className="text-xs text-zinc-500">Job scanner &amp; group monitoring</p>
+                <p className="text-xs text-zinc-500">Job filters &amp; group monitoring</p>
               </div>
             </div>
             {waLoading ? <Spinner /> : <WhatsAppStatusBadge status={waStatus} />}
@@ -141,7 +141,7 @@ export default function AccountsPage() {
               </div>
             ) : waStatus === 'connected' ? (
               <p className="text-sm leading-relaxed text-zinc-500">
-                WhatsApp is connected and ready — the job scanner can monitor your
+                WhatsApp is connected and ready — your filters can monitor
                 groups and forward matches.
               </p>
             ) : waStatus === 'waiting_qr' ? (
