@@ -4,7 +4,7 @@ FROM python:3.14-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies required for Playwright
+# Install system dependencies required for Playwright + Tesseract OCR
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -28,6 +28,9 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    libleptonica-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file
