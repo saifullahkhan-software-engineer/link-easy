@@ -391,11 +391,12 @@ async def restore_session_and_navigate(
 # ── Group scraping ───────────────────────────────────────────────────────────
 
 
-async def fetch_group_list(page: Page) -> list[dict]:
-    """Scrape all group names and WhatsApp IDs from the sidebar.
+async def fetch_group_list(page: Page, search: Optional[str] = None) -> list[dict]:
+    """Scrape the first ten chats/groups, or find a specific chat/group.
 
-    Returns:
-        List of dicts: [{"group_name": "...", "whatsapp_id": "..."}, ...]
+    WhatsApp's sidebar is a virtualized list, so the first page is intentionally
+    small. When ``search`` is supplied, use WhatsApp Web's search field to find
+    older groups as well.
     """
     logger.info("📋 Fetching WhatsApp group list from sidebar...")
 
@@ -408,10 +409,21 @@ async def fetch_group_list(page: Page) -> list[dict]:
 
     await asyncio.sleep(2)
 
-    groups = []
+    if search:
+        # Search both chats and groups; the result rows use the same selectors.
+        search_box = page.locator('div[contenteditable="true"][data-tab], input[placeholder*="Search"]')
+        try:
+            await search_box.first.fill(search)
+            await asyncio.sleep(2)
+        except Exception:
+            logger.warning("Could not open WhatsApp search field")
 
-    # Scroll through the entire chat list to load all groups
-    for _ in range(10):
+    groups = []
+    max_rounds = 10 if search else 1
+
+    # The sidebar is virtualized. Load only the first ten rows by default;
+    # search mode may scroll a little to expose all matching results.
+    for _ in range(max_rounds):
         try:
             # Collect visible chat rows
             rows = await page.query_selector_all(CHAT_ROW_SELECTOR)

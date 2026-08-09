@@ -182,8 +182,11 @@ export const whatsappApi = {
     api.post('/whatsapp/connect', null, { timeout: WHATSAPP_TIMEOUT }),
   getStatus: () =>
     api.get('/whatsapp/status'),
-  getGroups: () =>
-    api.get('/whatsapp/groups', { timeout: WHATSAPP_TIMEOUT }),
+  getGroups: (search = '') =>
+    api.get('/whatsapp/groups', {
+      params: search ? { search } : {},
+      timeout: WHATSAPP_TIMEOUT,
+    }),
   selectGroups: (payload) =>
     api.post('/whatsapp/groups/select', payload),
   getFilters: () =>

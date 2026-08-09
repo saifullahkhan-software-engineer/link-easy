@@ -385,6 +385,7 @@ async def get_whatsapp_status(
 
 @router.get("/groups", response_model=WhatsAppGroupListResponse)
 async def list_whatsapp_groups(
+    search: str | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppGroupListResponse:
@@ -486,7 +487,7 @@ async def list_whatsapp_groups(
                     detail="WhatsApp Web did not finish loading in time. Please try again.",
                 )
 
-            groups = await fetch_group_list(page)
+            groups = await fetch_group_list(page, search=search.strip() if search else None)
         finally:
             # Only close browsers we launched ourselves — never the live view.
             if context is not None:
@@ -616,6 +617,7 @@ async def save_whatsapp_filters(
         filters.keywords = payload.keywords
         filters.experience_level = payload.experience_level
         filters.match_threshold = payload.match_threshold
+        filters.interval_hours = payload.interval_hours
         filters.updated_at = datetime.now(timezone.utc)
     else:
         # Create new
@@ -625,6 +627,7 @@ async def save_whatsapp_filters(
             keywords=payload.keywords,
             experience_level=payload.experience_level,
             match_threshold=payload.match_threshold,
+            interval_hours=payload.interval_hours,
         )
         db.add(filters)
 
