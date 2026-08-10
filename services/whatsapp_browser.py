@@ -16,6 +16,7 @@ rather than React hashed class names.
 """
 import asyncio
 import base64
+import io
 import json
 import os
 import random
@@ -168,19 +169,23 @@ CHAT_NAME_SELECTOR = 'span[data-testid="cell-frame-title"], span[dir="auto"]'
 # Search box for finding groups
 SEARCH_BOX_SELECTOR = 'div[data-testid="chat-list-search"], div[contenteditable="true"][data-tab="3"]'
 
-# Message containers in the conversation pane. WhatsApp has used both the
-# data-testid and role/data-id shapes over time. The tabindex/data-id fallback
-# also handles newer builds where the role is mounted only on the outer list
-# item.
-MSG_CONTAINER_SELECTOR = (
-    'div[data-testid="msg-container"], '
+# Message containers in the conversation pane. Keep the wrapper and data-id
+# selectors separate: in current WhatsApp Web builds the same logical message
+# is often represented by BOTH an outer ``msg-container`` and an inner
+# ``data-id`` row. Querying the comma-joined selector and treating every result
+# as a message doubled three real messages into six candidates.
+MSG_CONTAINER_WRAPPER_SELECTOR = 'div[data-testid="msg-container"]'
+MSG_CONTAINER_ID_SELECTOR = (
     'div[role="row"][data-id], '
     'div[data-id][tabindex="-1"]'
 )
+MSG_CONTAINER_SELECTOR = (
+    f'{MSG_CONTAINER_WRAPPER_SELECTOR}, {MSG_CONTAINER_ID_SELECTOR}'
+)
 # Last-resort selector used when a WhatsApp build wraps the visible messages
 # without either of the stable attributes above. It is only used when the
-# primary selector returns one (or zero) item, then records are filtered by
-# actual message text/image content.
+# primary selectors return one (or zero) logical items, then records are
+# filtered by actual message text/image content.
 MSG_CONTAINER_FALLBACK_SELECTOR = (
     '#main div[data-id], '
     'div[data-testid="conversation-panel-wrapper"] div[data-id], '
@@ -590,31 +595,104 @@ async def navigate_to_group(page: Page, group_name: str) -> bool:
 
 
 async def _message_id(container) -> str | None:
-    """Read the WhatsApp id from a rendered message element.
+    """Read the canonical WhatsApp id from a rendered message element.
 
-    Some WhatsApp builds wrap the logical message (with data-id) inside an outer
-    ``div[data-testid="msg-container"]`` that itself has no data-id. Check the
-    container first, then fall back to the first descendant bearing data-id.
+    Some WhatsApp builds wrap the logical message (with ``data-id``) inside an
+    outer ``msg-container`` that also has a generated HTML ``id``. The HTML id
+    identifies the wrapper, not the message. Prefer the descendant WhatsApp
+    ``data-id`` before that generic id so the outer and inner DOM nodes collapse
+    to the same logical message during deduplication.
     """
     try:
         msg_id = await container.get_attribute("data-id")
         if msg_id:
             return msg_id
-        msg_id = await container.get_attribute("id")
-        if msg_id:
-            return msg_id
-        # Fallback: many msg-container wrappers hide the id on a child
+
+        # Depending on the release, the data-id row can wrap msg-container
+        # instead of sitting below it.
         try:
-            inner = await container.query_selector("[data-id]")
-            if inner:
-                inner_id = await inner.get_attribute("data-id")
-                if inner_id:
-                    return inner_id
+            ancestor_id = await container.evaluate("""(element) => {
+                const row = element.closest(
+                    '[role="row"][data-id], [data-id][tabindex="-1"]'
+                );
+                return row ? row.getAttribute('data-id') : null;
+            }""")
+            if ancestor_id:
+                return ancestor_id
         except Exception:
             pass
-        return None
+
+        for selector in (
+            '[role="row"][data-id]',
+            '[data-id][tabindex="-1"]',
+            "[data-id]",
+        ):
+            try:
+                inner = await container.query_selector(selector)
+                if inner:
+                    inner_id = await inner.get_attribute("data-id")
+                    if inner_id:
+                        return inner_id
+            except Exception:
+                continue
+
+        # Last resort for older builds where the actual message node used id.
+        return await container.get_attribute("id")
     except Exception:
         return None
+
+
+def _image_payload_dimensions(payload: str | bytes | None) -> tuple[int, int]:
+    """Return decoded image dimensions without leaking malformed media errors."""
+    if not payload:
+        return (0, 0)
+    try:
+        from PIL import Image
+
+        if isinstance(payload, bytes):
+            image_bytes = payload
+        else:
+            encoded = str(payload).strip()
+            if encoded.startswith("data:"):
+                encoded = encoded.split(",", 1)[1]
+            encoded = "".join(encoded.split())
+            encoded += "=" * (-len(encoded) % 4)
+            image_bytes = base64.b64decode(
+                encoded.replace("-", "+").replace("_", "/"),
+                validate=False,
+            )
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            return tuple(int(value) for value in image.size)
+    except Exception:
+        return (0, 0)
+
+
+def _best_image_payload(*payloads: str | bytes | None) -> str | None:
+    """Choose the highest-resolution copy of a rendered WhatsApp image.
+
+    WhatsApp sometimes exposes a very small blob thumbnail (for example 32x72)
+    even though the element is rendered at several hundred pixels. Previously
+    that tiny blob was sent to Tesseract and the element screenshot fallback was
+    attempted only when blob download failed. Compare both every time and keep
+    the copy containing the most pixels.
+    """
+    best_payload: str | bytes | None = None
+    best_score = -1
+    for payload in payloads:
+        if not payload:
+            continue
+        width, height = _image_payload_dimensions(payload)
+        # Unknown-but-present data remains a valid last-resort payload.
+        score = width * height if width and height else 0
+        if best_payload is None or score > best_score:
+            best_payload = payload
+            best_score = score
+
+    if best_payload is None:
+        return None
+    if isinstance(best_payload, bytes):
+        return base64.b64encode(best_payload).decode("ascii")
+    return str(best_payload)
 
 
 async def _extract_message_container(container) -> dict | None:
@@ -640,43 +718,78 @@ async def _extract_message_container(container) -> dict | None:
         is_image = False
         img_el = None
         try:
-            img_candidates = await container.query_selector_all(MSG_IMAGE_SELECTOR)
-            for candidate in img_candidates:
+            # Selector-list order does not imply priority in querySelectorAll;
+            # it returns document order. The former "first image wins" logic
+            # therefore selected emoji, avatars, and 32px link icons before the
+            # actual flyer. Inspect every image and choose the largest likely
+            # media element, strongly preferring WhatsApp's image-thumb region.
+            candidates = []
+            seen_candidate_objects: set[int] = set()
+            for selector in (MSG_IMAGE_SELECTOR, "img"):
                 try:
-                    is_valid_img = await candidate.evaluate("""(img) => {
-                        if (img.hasAttribute('data-plain-text')) return false;
-                        if (img.className && typeof img.className === 'string' && img.className.includes('emoji')) return false;
-                        if (img.alt && img.alt.toLowerCase().includes('emoji')) return false;
-                        const w = img.naturalWidth || img.clientWidth || img.width || 0;
-                        const h = img.naturalHeight || img.clientHeight || img.height || 0;
-                        if (w > 0 && h > 0 && w < 40 && h < 40) return false;
-                        return true;
+                    selected = await container.query_selector_all(selector)
+                except Exception:
+                    selected = []
+                for candidate in selected:
+                    object_key = id(candidate)
+                    if object_key not in seen_candidate_objects:
+                        candidates.append(candidate)
+                        seen_candidate_objects.add(object_key)
+
+            best_score = -1
+            for candidate in candidates:
+                try:
+                    metadata = await candidate.evaluate("""(img) => {
+                        const className = typeof img.className === 'string' ? img.className.toLowerCase() : '';
+                        const alt = (img.alt || '').toLowerCase();
+                        const isEmoji = img.hasAttribute('data-plain-text') ||
+                            className.includes('emoji') || alt.includes('emoji') ||
+                            !!img.closest('[data-plain-text]');
+                        if (isEmoji) return {valid: false, score: 0};
+
+                        const rect = img.getBoundingClientRect();
+                        const naturalWidth = img.naturalWidth || img.width || 0;
+                        const naturalHeight = img.naturalHeight || img.height || 0;
+                        // Validate generic candidates by their DISPLAY size.
+                        // Avatars may have a 640px source but render at 40px.
+                        const displayWidth = Math.round(rect.width || 0) || naturalWidth;
+                        const displayHeight = Math.round(rect.height || 0) || naturalHeight;
+                        const explicitMedia = img.matches(
+                            'img[data-testid="image-thumb"], img.selectable-img'
+                        ) || !!img.closest(
+                            'div[data-testid="image-thumb"], div[data-testid="media-caption"], div._amkd'
+                        );
+                        const displayArea = displayWidth * displayHeight;
+                        const sourceArea = naturalWidth * naturalHeight;
+                        // Non-media images below 80px are avatars/icons. A real
+                        // image-thumb is retained even when WhatsApp exposes a
+                        // low-res blob because its rendered screenshot is used.
+                        const valid = explicitMedia || (
+                            Math.min(displayWidth, displayHeight) >= 80 && displayArea >= 10000
+                        );
+                        return {
+                            valid,
+                            width: displayWidth,
+                            height: displayHeight,
+                            explicitMedia,
+                            score: (explicitMedia ? 1000000000 : 0) +
+                                Math.max(displayArea, sourceArea),
+                        };
                     }""")
-                    if is_valid_img:
+                    # Simple browser doubles used by tests may return a boolean.
+                    if isinstance(metadata, bool):
+                        valid = metadata
+                        score = 1
+                    else:
+                        valid = bool(metadata and metadata.get("valid"))
+                        score = int((metadata or {}).get("score") or 0)
+                    if valid and score > best_score:
                         img_el = candidate
-                        is_image = True
-                        break
+                        best_score = score
                 except Exception:
                     continue
 
-            if not is_image:
-                all_imgs = await container.query_selector_all('img')
-                for candidate in all_imgs:
-                    try:
-                        is_real = await candidate.evaluate("""(img) => {
-                            if (img.hasAttribute('data-plain-text')) return false;
-                            if (img.className && typeof img.className === 'string' && img.className.includes('emoji')) return false;
-                            if (img.alt && img.alt.toLowerCase().includes('emoji')) return false;
-                            const w = img.naturalWidth || img.clientWidth || img.width || 0;
-                            const h = img.naturalHeight || img.clientHeight || img.height || 0;
-                            return w >= 50 && h >= 50;
-                        }""")
-                        if is_real:
-                            img_el = candidate
-                            is_image = True
-                            break
-                    except Exception:
-                        continue
+            is_image = img_el is not None
         except Exception:
             pass
 
@@ -723,13 +836,24 @@ async def _extract_message_container(container) -> dict | None:
             except Exception as exc:
                 logger.debug("Image download evaluate failed: %s", exc)
 
-            if not raw_image_bytes:
-                try:
-                    image_bytes = await img_el.screenshot()
-                    if image_bytes:
-                        raw_image_bytes = base64.b64encode(image_bytes).decode()
-                except Exception as exc:
-                    logger.debug("Image screenshot fallback failed: %s", exc)
+            # Always capture the rendered element as well. WhatsApp's blob URL
+            # can point at a 32-70px preview while the browser has already
+            # painted a much larger, OCR-readable image. Keep whichever decoded
+            # copy has the greater pixel area.
+            screenshot_bytes = None
+            try:
+                screenshot_bytes = await img_el.screenshot()
+            except Exception as exc:
+                logger.debug("Image screenshot capture failed: %s", exc)
+
+            raw_image_bytes = _best_image_payload(raw_image_bytes, screenshot_bytes)
+            if raw_image_bytes:
+                selected_width, selected_height = _image_payload_dimensions(raw_image_bytes)
+                logger.debug(
+                    "Selected WhatsApp message image %sx%s for OCR",
+                    selected_width,
+                    selected_height,
+                )
 
             try:
                 text_el = await container.query_selector(MSG_TEXT_SELECTOR)
@@ -774,36 +898,54 @@ async def _extract_message_container(container) -> dict | None:
 
 
 async def _query_message_containers(page: Page) -> list:
-    """Return message elements, including the current-build fallback shape.
+    """Return one canonical DOM element per rendered logical message.
 
-    A few WhatsApp Web builds render one outer ``msg-container`` and put the
-    individual messages below it as plain ``div[data-id]`` elements. Querying
-    only the outer element makes every scan look as if the group has one
-    message. Prefer the stable selector, but use the fallback when it exposes
-    more candidates; extraction filters out non-message data-id elements.
+    Current WhatsApp builds commonly match both an outer ``msg-container`` and
+    its inner data-id row. Returning a comma-joined query's raw result therefore
+    reports two containers for every real message. Prefer multiple wrappers;
+    use inner data-id rows only for the build shape with one shared wrapper.
     """
     try:
-        primary = await page.query_selector_all(MSG_CONTAINER_SELECTOR)
+        wrappers = await page.query_selector_all(MSG_CONTAINER_WRAPPER_SELECTOR)
     except Exception:
-        primary = []
+        wrappers = []
 
-    if len(primary) > 1:
-        return primary
+    try:
+        id_rows = await page.query_selector_all(MSG_CONTAINER_ID_SELECTOR)
+    except Exception:
+        id_rows = []
+
+    if len(wrappers) > 1:
+        if id_rows:
+            logger.debug(
+                "📨 Canonicalized WhatsApp DOM: %s wrappers + %s nested id rows -> %s messages",
+                len(wrappers),
+                len(id_rows),
+                len(wrappers),
+            )
+        return wrappers
+
+    # Some releases expose one conversation-level msg-container and put each
+    # actual message in a data-id row beneath it.
+    if len(id_rows) > len(wrappers):
+        return id_rows
+    if wrappers:
+        return wrappers
+    if id_rows:
+        return id_rows
 
     try:
         fallback = await page.query_selector_all(MSG_CONTAINER_FALLBACK_SELECTOR)
-        if len(fallback) > len(primary):
+        if fallback:
             logger.debug(
-                "📨 Primary WhatsApp message selector returned %s item(s); "
-                "using %s data-id fallback item(s)",
-                len(primary),
+                "📨 Stable WhatsApp message selectors returned no items; using %s fallback rows",
                 len(fallback),
             )
             return fallback
     except Exception:
         pass
 
-    return primary
+    return []
 
 
 async def _scroll_message_history_up(page: Page) -> bool:

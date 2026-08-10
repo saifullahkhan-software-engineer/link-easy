@@ -1,6 +1,9 @@
 """Regression tests for bounded, incremental WhatsApp message scraping."""
+import io
 import os
 import unittest
+
+from PIL import Image
 
 # ``whatsapp_browser`` imports application settings even though these tests use
 # only its pure scraping routine. Supply harmless values for source checkouts.
@@ -12,9 +15,15 @@ os.environ.setdefault("FROM_EMAIL", "test@example.com")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 from services.whatsapp_browser import (
+    MSG_CONTAINER_ID_SELECTOR,
     MSG_CONTAINER_SELECTOR,
+    MSG_CONTAINER_WRAPPER_SELECTOR,
     MSG_IMAGE_SELECTOR,
     MSG_TEXT_SELECTOR,
+    _best_image_payload,
+    _image_payload_dimensions,
+    _message_id,
+    _query_message_containers,
     scrape_messages_from_current_chat,
 )
 
@@ -57,8 +66,11 @@ class _Page:
         assert timeout == 10000
 
     async def query_selector_all(self, selector):
-        assert selector == MSG_CONTAINER_SELECTOR
-        return self.containers
+        if selector == MSG_CONTAINER_WRAPPER_SELECTOR:
+            return self.containers
+        if selector == MSG_CONTAINER_ID_SELECTOR:
+            return []
+        return []
 
     async def query_selector(self, _selector):
         return None
@@ -67,7 +79,95 @@ class _Page:
         return None
 
 
+class _InnerMessageId:
+    def __init__(self, message_id):
+        self.message_id = message_id
+
+    async def get_attribute(self, name):
+        return self.message_id if name == "data-id" else None
+
+
+class _GeneratedIdWrapper:
+    def __init__(self, generated_id, message_id):
+        self.generated_id = generated_id
+        self.inner = _InnerMessageId(message_id)
+
+    async def get_attribute(self, name):
+        if name == "id":
+            return self.generated_id
+        return None
+
+    async def query_selector(self, selector):
+        if "data-id" in selector:
+            return self.inner
+        return None
+
+
+class _AncestorIdWrapper:
+    async def get_attribute(self, name):
+        return "generated-wrapper-789" if name == "id" else None
+
+    async def evaluate(self, _script):
+        return "ancestor-whatsapp-message-012"
+
+    async def query_selector(self, _selector):
+        return None
+
+
+class _MixedContainerPage:
+    def __init__(self, wrappers, id_rows):
+        self.wrappers = wrappers
+        self.id_rows = id_rows
+
+    async def query_selector_all(self, selector):
+        if selector == MSG_CONTAINER_WRAPPER_SELECTOR:
+            return self.wrappers
+        if selector == MSG_CONTAINER_ID_SELECTOR:
+            return self.id_rows
+        return []
+
+
 class WhatsAppIncrementalScanningTests(unittest.IsolatedAsyncioTestCase):
+    async def test_message_id_prefers_inner_whatsapp_id_over_generated_wrapper_id(self):
+        wrapper = _GeneratedIdWrapper("generated-wrapper-123", "whatsapp-message-456")
+
+        self.assertEqual(await _message_id(wrapper), "whatsapp-message-456")
+
+    async def test_message_id_uses_whatsapp_id_from_ancestor_row(self):
+        self.assertEqual(
+            await _message_id(_AncestorIdWrapper()),
+            "ancestor-whatsapp-message-012",
+        )
+
+    async def test_nested_wrapper_and_id_rows_are_not_counted_twice(self):
+        wrappers = [object(), object(), object()]
+        id_rows = [object(), object(), object()]
+        page = _MixedContainerPage(wrappers, id_rows)
+
+        containers = await _query_message_containers(page)
+
+        self.assertEqual(containers, wrappers)
+        self.assertEqual(len(containers), 3)
+
+    async def test_shared_wrapper_build_uses_individual_id_rows(self):
+        wrappers = [object()]
+        id_rows = [object(), object(), object()]
+        page = _MixedContainerPage(wrappers, id_rows)
+
+        containers = await _query_message_containers(page)
+
+        self.assertEqual(containers, id_rows)
+
+    async def test_rendered_screenshot_replaces_tiny_blob_for_ocr(self):
+        tiny_buffer = io.BytesIO()
+        Image.new("RGB", (32, 72), "white").save(tiny_buffer, format="PNG")
+        rendered_buffer = io.BytesIO()
+        Image.new("RGB", (320, 720), "white").save(rendered_buffer, format="PNG")
+
+        selected = _best_image_payload(tiny_buffer.getvalue(), rendered_buffer.getvalue())
+
+        self.assertEqual(_image_payload_dimensions(selected), (320, 720))
+
     async def test_first_scan_returns_only_configured_latest_messages_newest_first(self):
         page = _Page(["m1", "m2", "m3", "m4", "m5"])
 
