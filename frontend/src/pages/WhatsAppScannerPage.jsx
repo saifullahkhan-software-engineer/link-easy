@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
+import Modal from '../components/Modal';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
 
 function ScoreBadge({ score }) {
@@ -47,6 +48,8 @@ export default function WhatsAppScannerPage() {
   const [stats, setStats] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [lifecycleLoading, setLifecycleLoading] = useState(false);
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [resettingMessages, setResettingMessages] = useState(false);
   const [messagePage, setMessagePage] = useState(1);
   const [messageTotal, setMessageTotal] = useState(0);
   const [messageStatusFilter, setMessageStatusFilter] = useState('');
@@ -179,6 +182,22 @@ export default function WhatsAppScannerPage() {
       toast.error(getErrorMessage(err, 'Failed to trigger scan'));
     } finally {
       setScanning(false);
+    }
+  };
+
+  const handleResetMessages = async () => {
+    try {
+      setResettingMessages(true);
+      const { data } = await whatsappApi.resetFilterMessages(Number(filterId));
+      setShowResetModal(false);
+      setMessagePage(1);
+      setMessageStatusFilter('');
+      await Promise.all([loadMessages(1, ''), loadStats(), loadFilterJob()]);
+      toast.success(data?.message || 'Scan history and checkpoints reset');
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to reset scan history'));
+    } finally {
+      setResettingMessages(false);
     }
   };
 
@@ -400,6 +419,13 @@ export default function WhatsAppScannerPage() {
               <option value="ocr_failed">OCR Failed</option>
             </select>
             <button onClick={() => { loadMessages(); loadStats(); loadFilterJob(); }} className="rounded-lg border border-surface-600 bg-surface-700 px-3 py-1.5 text-sm font-medium text-zinc-300 hover:bg-surface-600">Refresh</button>
+            <button
+              onClick={() => setShowResetModal(true)}
+              disabled={resettingMessages || monitoredGroups.length === 0}
+              className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-300 transition hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Reset for testing
+            </button>
           </div>
         </div>
 
@@ -475,6 +501,46 @@ export default function WhatsAppScannerPage() {
           </>
         )}
       </section>
+
+      <Modal
+        open={showResetModal}
+        onClose={() => !resettingMessages && setShowResetModal(false)}
+        title="Reset scan history for testing?"
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+            <p className="text-sm font-semibold text-red-300">Stored results and checkpoints will be cleared</p>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              This deletes all scanned, matched, rejected, and forwarded records stored by LinkEasy for this filter. It also resets each monitored group checkpoint so the latest messages can be scanned and forwarded again on your next test.
+            </p>
+          </div>
+          <p className="text-xs leading-relaxed text-zinc-500">
+            Original WhatsApp messages and copies already sent to the forwarding group are not deleted. Running another scan may send duplicate copies to the forwarding group.
+          </p>
+          {filterJob.status === 'active' && (
+            <p className="rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-3 text-xs text-yellow-200">
+              For predictable tests, pause the filter before resetting if a scan may currently be running, then resume it afterward.
+            </p>
+          )}
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => setShowResetModal(false)}
+              disabled={resettingMessages}
+              className="rounded-lg border border-surface-700 px-4 py-2 text-sm font-medium text-zinc-300 hover:bg-surface-700 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleResetMessages}
+              disabled={resettingMessages}
+              className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+            >
+              {resettingMessages && <Spinner />}
+              {resettingMessages ? 'Resetting...' : 'Clear and reset'}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

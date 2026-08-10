@@ -10,6 +10,7 @@ GET    /api/v1/whatsapp/filters/jobs    → list the user's filter jobs
 POST   /api/v1/whatsapp/filters/jobs    → create a draft filter job
 GET    /api/v1/whatsapp/filters/jobs/{id} → filter details
 PATCH/DELETE/POST .../{id}              → edit, remove, activate or pause
+DELETE /api/v1/whatsapp/filters/jobs/{id}/messages → reset results/checkpoints
 GET    /api/v1/whatsapp/filters         → legacy singleton filter endpoint
 POST   /api/v1/whatsapp/filters         → legacy filter upsert
 GET    /api/v1/whatsapp/messages         → paginated list with scores/status
@@ -900,6 +901,57 @@ async def delete_whatsapp_filter_job(
     await db.delete(filter_row)
     await db.commit()
     return {"message": f"WhatsApp filter '{filter_name}' deleted successfully"}
+
+
+@router.delete("/filters/{filter_id}/messages", status_code=200)
+@router.delete("/filters/jobs/{filter_id}/messages", status_code=200)
+async def reset_whatsapp_filter_messages(
+    filter_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear one filter's scan history and cursors so messages can be tested again.
+
+    This only removes LinkEasy's stored copies. It does not delete original
+    messages from monitored WhatsApp groups or previously forwarded copies
+    from the destination group.
+    """
+    from sqlalchemy import delete as sa_delete
+
+    filter_row = await _load_owned_filter(filter_id, current_user, db)
+
+    deleted_result = await db.execute(
+        sa_delete(WhatsAppRawMessage).where(WhatsAppRawMessage.filter_id == filter_id)
+    )
+    reset_result = await db.execute(
+        sa_update(WhatsAppMonitoredGroup)
+        .where(WhatsAppMonitoredGroup.filter_id == filter_id)
+        .values(
+            last_message_id=None,
+            last_message_timestamp=None,
+            last_checked_at=None,
+        )
+    )
+    filter_row.last_scan_at = None
+    await db.commit()
+
+    deleted_count = max(0, deleted_result.rowcount or 0)
+    reset_group_count = max(0, reset_result.rowcount or 0)
+    logger.info(
+        "🧹 Reset WhatsApp scan history for filter=%s user=%s: messages=%s groups=%s",
+        filter_id,
+        current_user.email,
+        deleted_count,
+        reset_group_count,
+    )
+    return {
+        "message": (
+            f"Cleared {deleted_count} stored message(s) and reset "
+            f"{reset_group_count} group checkpoint(s)."
+        ),
+        "deleted_count": deleted_count,
+        "reset_group_count": reset_group_count,
+    }
 
 
 @router.post("/filters/{filter_id}/activate", status_code=200)
