@@ -590,12 +590,29 @@ async def navigate_to_group(page: Page, group_name: str) -> bool:
 
 
 async def _message_id(container) -> str | None:
-    """Read the WhatsApp id from a rendered message element."""
+    """Read the WhatsApp id from a rendered message element.
+
+    Some WhatsApp builds wrap the logical message (with data-id) inside an outer
+    ``div[data-testid="msg-container"]`` that itself has no data-id. Check the
+    container first, then fall back to the first descendant bearing data-id.
+    """
     try:
         msg_id = await container.get_attribute("data-id")
-        if not msg_id:
-            msg_id = await container.get_attribute("id")
-        return msg_id
+        if msg_id:
+            return msg_id
+        msg_id = await container.get_attribute("id")
+        if msg_id:
+            return msg_id
+        # Fallback: many msg-container wrappers hide the id on a child
+        try:
+            inner = await container.query_selector("[data-id]")
+            if inner:
+                inner_id = await inner.get_attribute("data-id")
+                if inner_id:
+                    return inner_id
+        except Exception:
+            pass
+        return None
     except Exception:
         return None
 
@@ -888,6 +905,14 @@ async def scrape_messages_from_current_chat(
     # overlapping windows; scrolling upward adds older records at the front.
     ordered_records: list[dict] = []
     seen_ids: set[str] = set()
+    seen_content: set[str] = set()
+
+    def _fallback_content_key(record: dict) -> str:
+        txt = (record.get("message_text") or "")[:120]
+        img = record.get("raw_image_bytes") or ""
+        # Hash only a preview of the base64 to avoid O(n) on 200k strings
+        img_preview = img[:256] if isinstance(img, str) else ""
+        return f"ct:{hash((txt, img_preview)) & 0xffffffff:08x}"
 
     async def collect(containers: list, prepend: bool = False) -> int:
         extracted: list[dict] = []
@@ -900,6 +925,15 @@ async def scrape_messages_from_current_chat(
                 if msg_id in seen_ids:
                     continue
                 seen_ids.add(msg_id)
+            else:
+                # No stable id (wrapper containers on some builds) — deduplicate
+                # by content hash so overlapping scroll windows don't inflate
+                # the candidate set 3-4x as seen in the 13:08:19 trace
+                # (e.g. the repeating 14/11/10/'iat'/15 pattern).
+                key = _fallback_content_key(record)
+                if key in seen_content:
+                    continue
+                seen_content.add(key)
             extracted.append(record)
 
         if prepend:

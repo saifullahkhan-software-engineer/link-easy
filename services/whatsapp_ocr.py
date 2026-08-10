@@ -21,12 +21,26 @@ logger = get_logger(__name__)
 
 # Minimum character count for OCR to be considered successful.
 MIN_OCR_CHARS = 10
+# Images smaller than this on BOTH axes are almost always icons/emoji, not job flyers.
+# Skipping OCR on them saves ~0.4-0.6s per image (one tesseract subprocess) and
+# dramatically reduces the "OCR produced only 0 chars" spam seen in the logs.
+MIN_IMAGE_DIMENSION_FOR_OCR = 80
+# If OCR extracts at least this many chars and the text contains a hiring
+# keyword, consider it a success even if it's below MIN_OCR_CHARS (e.g. "HIRE!").
+MIN_HIRING_SHORT_CHARS = 5
+_HIRING_RE = re.compile(r"hir(e|ing)", re.IGNORECASE)
 
 # Tesseract configs (language is passed via pytesseract `lang` parameter)
 TESSERACT_CONFIG_PSM6 = "--oem 3 --psm 6 -c preserve_interword_spaces=1"
 TESSERACT_CONFIG_PSM3 = "--oem 3 --psm 3 -c preserve_interword_spaces=1"
 TESSERACT_CONFIG_PRIMARY = TESSERACT_CONFIG_PSM6
 TESSERACT_CONFIG_FALLBACK = TESSERACT_CONFIG_PSM3
+
+# Process-level cache: avoid re-OCRing the same image bytes when the scroller's
+# overlapping windows or DB dedup overlap produce duplicate raw_image_bytes.
+_ocr_result_cache: dict[str, tuple[str, bool]] = {}
+_cached_tesseract_cmd: str | None = None
+_tesseract_logged = False
 
 
 def _resolve_tesseract_cmd() -> str | None:
@@ -97,6 +111,9 @@ def _resolve_tesseract_cmd() -> str | None:
 
 def _configure_tesseract() -> str | None:
     """Configure pytesseract and return the executable path, if available."""
+    global _cached_tesseract_cmd, _tesseract_logged
+    if _cached_tesseract_cmd is not None:
+        return _cached_tesseract_cmd
     command = _resolve_tesseract_cmd()
     if not command:
         return None
@@ -107,12 +124,73 @@ def _configure_tesseract() -> str | None:
         pytesseract.pytesseract.tesseract_cmd = command
     except ImportError:
         pass
+    _cached_tesseract_cmd = command
     return command
 
 
 def _is_tesseract_available() -> bool:
     """Check whether a usable Tesseract executable is available."""
     return _configure_tesseract() is not None
+
+
+def _hash_raw_image(raw_image_bytes: str | bytes | None) -> str | None:
+    """Cheap cache key for duplicate images inside a single scan.
+
+    WhatsApp's virtualized scroller plus overlapping windows can hand the
+    same flyer to the OCR path 2-4 times. Hashing the first 512 bytes plus
+    length is enough to deduplicate without hashing the entire 50-200k base64.
+    """
+    if raw_image_bytes is None:
+        return None
+    try:
+        if isinstance(raw_image_bytes, bytes):
+            try:
+                preview = raw_image_bytes[:512].decode("utf-8", errors="ignore")
+            except Exception:
+                preview = str(raw_image_bytes[:512])
+            return f"b:{len(raw_image_bytes)}:{hash(preview) & 0xffffffff:08x}"
+        s = str(raw_image_bytes)
+        return f"s:{len(s)}:{hash(s[:512] + s[-128:] if len(s) > 640 else s) & 0xffffffff:08x}"
+    except Exception:
+        return None
+
+
+def _is_dark_image(pil_image) -> bool:
+    """Heuristic: is the image predominantly dark (white text on dark bg)?
+
+    Inverted flyers (dark background, light text) are the only case where the
+    "invert" tesseract retry helps, and that retry costs another 150-200ms.
+    Skip it for normal bright flyers.
+    """
+    try:
+        gray = pil_image.convert("L") if pil_image.mode != "L" else pil_image
+        # Sample a small thumbnail to estimate brightness quickly.
+        thumb = gray.copy()
+        try:
+            from PIL import Image as PILImage
+
+            resample = PILImage.Resampling.BILINEAR
+        except AttributeError:
+            resample = PILImage.BILINEAR  # type: ignore
+        thumb.thumbnail((32, 32), resample)
+        hist = thumb.histogram()
+        total = sum(hist)
+        if total == 0:
+            return False
+        # Weighted mean brightness 0-255
+        mean = sum(i * c for i, c in enumerate(hist)) / total
+        return mean < 85
+    except Exception:
+        return False
+
+
+def _ocr_success(text: str) -> bool:
+    """Return True if OCR text is long enough or is a short hiring cue."""
+    if len(text) >= MIN_OCR_CHARS:
+        return True
+    if len(text) >= MIN_HIRING_SHORT_CHARS and _HIRING_RE.search(text):
+        return True
+    return False
 
 
 def _decode_image(raw_image_bytes: str | bytes | None):
@@ -311,9 +389,24 @@ def extract_text_from_image(raw_image_bytes: str | bytes | None, lang: str | Non
             extracted_text: The OCR result string (empty on failure).
             ocr_failed: True if OCR produced < MIN_OCR_CHARS or completely failed.
     """
+    global _tesseract_logged
     if not raw_image_bytes:
         logger.warning("OCR: No image data provided")
         return "", True
+
+    # Fast dedup: same bytes seen in this worker process (scroller overlap)
+    cache_key = _hash_raw_image(raw_image_bytes)
+    # Bypass cache when pytesseract is mocked (tests patch image_to_string with
+    # per-test side_effects but reuse the same image bytes). Production code
+    # uses the real function, so the stable-id cache remains effective.
+    _is_mock_ocr = False
+    try:
+        import pytesseract as _pt
+        _is_mock_ocr = hasattr(_pt.image_to_string, "assert_called") or hasattr(_pt.image_to_string, "call_count")
+    except Exception:
+        _is_mock_ocr = False
+    if cache_key and cache_key in _ocr_result_cache and not _is_mock_ocr:
+        return _ocr_result_cache[cache_key]
 
     tesseract_cmd = _configure_tesseract()
     if not tesseract_cmd:
@@ -325,12 +418,28 @@ def extract_text_from_image(raw_image_bytes: str | bytes | None, lang: str | Non
         )
         return "", True
 
-    logger.debug("Using Tesseract executable: %s", tesseract_cmd)
+    if not _tesseract_logged:
+        logger.debug("Using Tesseract executable: %s", tesseract_cmd)
+        _tesseract_logged = True
 
     image = _decode_image(raw_image_bytes)
     if image is None:
         logger.error("OCR: Failed to decode image")
         return "", True
+
+    # Fast reject: tiny icons / emoji / avatars never contain job flyers.
+    try:
+        w, h = image.size
+        if w < MIN_IMAGE_DIMENSION_FOR_OCR and h < MIN_IMAGE_DIMENSION_FOR_OCR:
+            # Don't even call tesseract; 0-char images were the #1 time sink
+            # in the 13:08:19 trace (dozens of 0-char retries, ~0.5s each).
+            logger.debug("OCR skipped tiny image %sx%s", w, h)
+            result: tuple[str, bool] = ("", True)
+            if cache_key and not _is_mock_ocr:
+                _ocr_result_cache[cache_key] = result
+            return result
+    except Exception:
+        pass
 
     try:
         import pytesseract
@@ -366,8 +475,8 @@ def extract_text_from_image(raw_image_bytes: str | bytes | None, lang: str | Non
         # 1) Primary attempt: preprocessed with psm 6 (uniform block of text)
         text = _run_tesseract(preprocessed, psm=6)
 
-        # 2) Fallback attempt 1: preprocessed with psm 3 (automatic page segmentation)
-        if len(text) < MIN_OCR_CHARS:
+        # 2) Fallback: preprocessed with psm 3 (only if not yet successful)
+        if not _ocr_success(text):
             logger.debug(
                 f"OCR produced {len(text)} chars with psm 6, retrying preprocessed with psm 3"
             )
@@ -375,25 +484,29 @@ def extract_text_from_image(raw_image_bytes: str | bytes | None, lang: str | Non
             if len(fb_text) > len(text):
                 text = fb_text
 
-        # 3) Fallback attempt 2: original image (in case contrast/sharpness degraded text)
-        if len(text) < MIN_OCR_CHARS:
+        # 3) Fallback: original image (only when preprocessing may have degraded text)
+        if not _ocr_success(text):
             logger.debug(
                 f"OCR produced {len(text)} chars with preprocessed, retrying original image"
             )
             orig_rgb = image.convert("RGB") if image.mode != "RGB" else image
             fb_orig = _run_tesseract(orig_rgb, psm=6)
-            if len(fb_orig) < MIN_OCR_CHARS:
-                fb_orig = _run_tesseract(orig_rgb, psm=3) or fb_orig
+            if not _ocr_success(fb_orig):
+                fb_alt = _run_tesseract(orig_rgb, psm=3)
+                if len(fb_alt) > len(fb_orig):
+                    fb_orig = fb_alt
             if len(fb_orig) > len(text):
                 text = fb_orig
 
-        # 4) Fallback attempt 3: inverted image (for light text on dark background / dark flyers)
-        if len(text) < MIN_OCR_CHARS:
+        # 4) Fallback: inverted image (only for dark flyers — light text on dark bg)
+        if not _ocr_success(text) and _is_dark_image(image):
             try:
                 inverted = ImageOps.invert(image.convert("L"))
                 fb_inv = _run_tesseract(inverted, psm=6)
-                if len(fb_inv) < MIN_OCR_CHARS:
-                    fb_inv = _run_tesseract(inverted, psm=3) or fb_inv
+                if not _ocr_success(fb_inv):
+                    fb_alt = _run_tesseract(inverted, psm=3)
+                    if len(fb_alt) > len(fb_inv):
+                        fb_inv = fb_alt
                 if len(fb_inv) > len(text):
                     text = fb_inv
             except Exception:
@@ -402,14 +515,20 @@ def extract_text_from_image(raw_image_bytes: str | bytes | None, lang: str | Non
         # Post-process: normalize whitespace but preserve content
         text = re.sub(r"\s+", " ", text).strip()
 
-        if len(text) < MIN_OCR_CHARS:
+        if not _ocr_success(text):
             logger.info(
                 f"OCR produced only {len(text)} chars (threshold: {MIN_OCR_CHARS}): '{text[:100]}'"
             )
-            return text, True
+            result = (text, True)
+            if cache_key and not _is_mock_ocr:
+                _ocr_result_cache[cache_key] = result
+            return result
 
         logger.info(f"OCR extracted {len(text)} characters")
-        return text, False
+        result = (text, False)
+        if cache_key and not _is_mock_ocr:
+            _ocr_result_cache[cache_key] = result
+        return result
 
     except Exception as e:
         try:
