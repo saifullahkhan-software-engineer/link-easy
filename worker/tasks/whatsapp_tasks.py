@@ -7,6 +7,8 @@ Tasks:
   check_whatsapp_messages — Periodic: scrape groups, OCR images, score, forward.
 """
 import asyncio
+import concurrent.futures
+import hashlib
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
@@ -502,12 +504,64 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                 pending_query = pending_query.filter(WhatsAppRawMessage.filter_id.is_(None))
             pending_messages = pending_query.all()
 
-            for msg in pending_messages:
-                if msg.message_type == "image" and msg.raw_image_bytes:
-                    ocr_text, ocr_failed = extract_text_from_image(msg.raw_image_bytes)
-                    msg.ocr_text = ocr_text
-                    msg.ocr_failed = ocr_failed
+            # ── Parallel OCR for image messages ──────────────────────
+            # The 13:08 trace processed ~50 images sequentially (~0.5s each = 25s).
+            # Deduplicate identical image bytes (scroller overlap duplicates) and
+            # run the remaining unique OCR jobs concurrently. The underlying
+            # whatsapp_ocr cache already skips tiny icons, so this mainly
+            # parallelizes real flyers.
+            image_msgs = [m for m in pending_messages if m.message_type == "image" and m.raw_image_bytes]
+            if image_msgs:
+                # Deduplicate by cheap hash of the base64 string
+                hash_to_msgs: dict[str, list] = {}
+                hash_to_bytes: dict[str, str] = {}
+                for m in image_msgs:
+                    raw = m.raw_image_bytes
+                    try:
+                        h = hashlib.md5(raw[:1024].encode() if isinstance(raw, str) else raw[:1024]).hexdigest()
+                    except Exception:
+                        h = str(id(m))
+                    hash_to_msgs.setdefault(h, []).append(m)
+                    if h not in hash_to_bytes:
+                        hash_to_bytes[h] = raw
 
+                unique_hashes = list(hash_to_bytes.keys())
+                logger.info("🔍 OCR batch: %s images, %s unique after dedup", len(image_msgs), len(unique_hashes))
+
+                # Run OCR concurrently — tesseract is a subprocess, so threads help.
+                def _ocr_one(raw_bytes):
+                    return extract_text_from_image(raw_bytes)
+
+                # Use ThreadPoolExecutor directly (compatible with Celery's event loop)
+                loop = asyncio.get_running_loop()
+                # Limit workers to avoid spawning 50 tesseract processes at once
+                max_workers = min(4, len(unique_hashes))
+                ocr_results: dict[str, tuple[str, bool]] = {}
+
+                # For small batches, sequential is faster due to thread overhead
+                if len(unique_hashes) <= 2:
+                    for h in unique_hashes:
+                        ocr_results[h] = extract_text_from_image(hash_to_bytes[h])
+                else:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        # Schedule all unique images
+                        future_to_hash = {executor.submit(_ocr_one, hash_to_bytes[h]): h for h in unique_hashes}
+                        for future in concurrent.futures.as_completed(future_to_hash):
+                            h = future_to_hash[future]
+                            try:
+                                ocr_results[h] = future.result()
+                            except Exception as e:
+                                logger.warning("OCR task failed for hash %s: %s", h, e)
+                                ocr_results[h] = ("", True)
+
+                # Assign results back to all messages sharing the same bytes
+                for h, msgs in hash_to_msgs.items():
+                    ocr_text, ocr_failed = ocr_results.get(h, ("", True))
+                    for m in msgs:
+                        m.ocr_text = ocr_text
+                        m.ocr_failed = ocr_failed
+
+            for msg in pending_messages:
                 combined = " ".join(
                     part for part in [msg.message_text or "", msg.ocr_text or ""] if part
                 ).strip()
