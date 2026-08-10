@@ -213,6 +213,8 @@ export const whatsappApi = {
     api.patch(`/whatsapp/filters/jobs/${filterId}`, payload),
   deleteFilterJob: (filterId) =>
     api.delete(`/whatsapp/filters/jobs/${filterId}`),
+  resetFilterMessages: (filterId) =>
+    api.delete(`/whatsapp/filters/jobs/${filterId}/messages`),
   activateFilterJob: (filterId) =>
     api.post(`/whatsapp/filters/jobs/${filterId}/activate`),
   pauseFilterJob: (filterId) =>
