@@ -21,6 +21,9 @@ logger = get_logger(__name__)
 
 # Minimum character count for OCR to be considered successful.
 MIN_OCR_CHARS = 10
+# A result below this size is accepted, but we still try the sparse-text mode
+# because job flyers often scatter headings and role names around the image.
+OCR_RETRY_TARGET_CHARS = 40
 # Images smaller than this on BOTH axes are almost always icons/emoji, not job flyers.
 # Skipping OCR on them saves ~0.4-0.6s per image (one tesseract subprocess) and
 # dramatically reduces the "OCR produced only 0 chars" spam seen in the logs.
@@ -430,10 +433,16 @@ def extract_text_from_image(raw_image_bytes: str | bytes | None, lang: str | Non
     # Fast reject: tiny icons / emoji / avatars never contain job flyers.
     try:
         w, h = image.size
+        logger.debug("OCR input image decoded at %sx%s", w, h)
         if w < MIN_IMAGE_DIMENSION_FOR_OCR and h < MIN_IMAGE_DIMENSION_FOR_OCR:
-            # Don't even call tesseract; 0-char images were the #1 time sink
-            # in the 13:08:19 trace (dozens of 0-char retries, ~0.5s each).
-            logger.debug("OCR skipped tiny image %sx%s", w, h)
+            # Don't call Tesseract for an icon. This is an image-capture issue,
+            # not a missing executable: a real flyer thumbnail is normally a
+            # few hundred pixels on at least one axis.
+            logger.warning(
+                "OCR skipped %sx%s icon/thumbnail; Tesseract is installed but this is not an OCR-readable message image",
+                w,
+                h,
+            )
             result: tuple[str, bool] = ("", True)
             if cache_key and not _is_mock_ocr:
                 _ocr_result_cache[cache_key] = result
@@ -459,7 +468,9 @@ def extract_text_from_image(raw_image_bytes: str | bytes | None, lang: str | Non
             result = pytesseract.image_to_string(img, lang=ocr_lang, config=cfg)
             return (result or "").strip()
         except Exception as err:
-            logger.debug(f"pytesseract run with psm={psm} failed: {err}")
+            # Do not hide language-data/permission/process errors at DEBUG and
+            # then make the result look like ordinary zero-character OCR.
+            logger.warning("Tesseract invocation failed with psm=%s: %s", psm, err)
             return ""
 
     try:
@@ -472,39 +483,75 @@ def extract_text_from_image(raw_image_bytes: str | bytes | None, lang: str | Non
             logger.warning(f"OCR preprocessing error, using original image: {e}")
             preprocessed = image
 
-        # 1) Primary attempt: preprocessed with psm 6 (uniform block of text)
+        # 1) Primary attempt: preprocessed with psm 6 (uniform block of text).
         text = _run_tesseract(preprocessed, psm=6)
 
-        # 2) Fallback: preprocessed with psm 3 (only if not yet successful)
+        # 2) Automatic page segmentation is useful when the first pass finds
+        # nothing at all.
         if not _ocr_success(text):
             logger.debug(
-                f"OCR produced {len(text)} chars with psm 6, retrying preprocessed with psm 3"
+                "OCR produced %s chars with psm 6, retrying preprocessed with psm 3",
+                len(text),
             )
             fb_text = _run_tesseract(preprocessed, psm=3)
             if len(fb_text) > len(text):
                 text = fb_text
 
-        # 3) Fallback: original image (only when preprocessing may have degraded text)
-        if not _ocr_success(text):
+        # 3) Flyers are usually sparse layouts, not one uniform paragraph.
+        # Even a technically successful 10-character heading is not enough to
+        # score the role/title, so try sparse-text mode while the result is
+        # still short.
+        if len(text) < OCR_RETRY_TARGET_CHARS:
             logger.debug(
-                f"OCR produced {len(text)} chars with preprocessed, retrying original image"
+                "OCR result is still short (%s chars), retrying sparse-text psm 11",
+                len(text),
             )
-            orig_rgb = image.convert("RGB") if image.mode != "RGB" else image
+            fb_sparse = _run_tesseract(preprocessed, psm=11)
+            if len(fb_sparse) > len(text):
+                text = fb_sparse
+
+        # 4) Retry a color copy at the SAME upscaled resolution. The previous
+        # fallback used the low-resolution original, which could not recover
+        # text lost from a 200-300px WhatsApp thumbnail.
+        if len(text) < OCR_RETRY_TARGET_CHARS:
+            logger.debug(
+                "OCR produced %s chars with preprocessing, retrying upscaled color image",
+                len(text),
+            )
+            orig_rgb = image.convert("RGB") if image.mode != "RGB" else image.copy()
+            if orig_rgb.size != preprocessed.size:
+                try:
+                    from PIL import Image as PILImage
+
+                    resampling = PILImage.Resampling.LANCZOS
+                except AttributeError:
+                    resampling = PILImage.LANCZOS  # type: ignore[attr-defined]
+                orig_rgb = orig_rgb.resize(preprocessed.size, resampling)
             fb_orig = _run_tesseract(orig_rgb, psm=6)
-            if not _ocr_success(fb_orig):
-                fb_alt = _run_tesseract(orig_rgb, psm=3)
+            if len(fb_orig) < OCR_RETRY_TARGET_CHARS:
+                fb_alt = _run_tesseract(orig_rgb, psm=11)
                 if len(fb_alt) > len(fb_orig):
                     fb_orig = fb_alt
             if len(fb_orig) > len(text):
                 text = fb_orig
 
-        # 4) Fallback: inverted image (only for dark flyers — light text on dark bg)
+        # 5) Hard-thresholded text helps low-contrast colored flyers.
+        if not _ocr_success(text):
+            try:
+                thresholded = preprocessed.point(lambda pixel: 255 if pixel > 155 else 0)
+                fb_threshold = _run_tesseract(thresholded, psm=11)
+                if len(fb_threshold) > len(text):
+                    text = fb_threshold
+            except Exception:
+                pass
+
+        # 6) Invert only genuinely dark flyers (light text on dark background).
         if not _ocr_success(text) and _is_dark_image(image):
             try:
-                inverted = ImageOps.invert(image.convert("L"))
+                inverted = ImageOps.invert(preprocessed.convert("L"))
                 fb_inv = _run_tesseract(inverted, psm=6)
                 if not _ocr_success(fb_inv):
-                    fb_alt = _run_tesseract(inverted, psm=3)
+                    fb_alt = _run_tesseract(inverted, psm=11)
                     if len(fb_alt) > len(fb_inv):
                         fb_inv = fb_alt
                 if len(fb_inv) > len(text):

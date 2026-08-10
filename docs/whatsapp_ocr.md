@@ -63,6 +63,17 @@ local worker still needs a host Tesseract installation.
 
 `OCR failed: tesseract binary not found on PATH` means the worker could import
 `pytesseract`, but could not find the native executable. It is independent of
-the Redis connection. After setup, an image scan should log the executable path
-at debug level and should no longer increment `ocr_failed` merely because the
-binary is missing.
+the Redis connection.
+
+`Using Tesseract executable: C:\Program Files\Tesseract-OCR\tesseract.exe`
+means installation and path discovery **already succeeded**. If that is followed
+by an `OCR skipped 32x72 icon/thumbnail` message, the browser captured an icon or
+a low-resolution WhatsApp preview instead of the message image; reinstalling or
+changing PATH will not fix that input. The scraper now selects one canonical DOM
+container per logical message, rejects small avatars/icons, captures both the
+blob and the rendered image, and sends the higher-resolution copy to OCR.
+
+A successful scan logs `OCR extracted N characters`. A Tesseract process,
+permission, or language-data failure is logged explicitly as `Tesseract
+invocation failed ...` rather than being reported as an ordinary zero-character
+result.
