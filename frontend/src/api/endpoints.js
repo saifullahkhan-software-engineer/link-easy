@@ -289,6 +289,41 @@ export const whatsappLiveApi = {
     ),
 };
 
+/* ----------------------------- linkedin live chat ------------------------ */
+// Mirror of the WhatsApp live surface. The same antispam pacing logic keeps
+// fast typers from triggering LinkedIn's automation filter.
+const LINKEDIN_LIVE_TIMEOUT = 60_000;
+
+export const linkedinLiveApi = {
+  start:  () => api.post('/linkedin/live/start',   null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  stop:   () => api.post('/linkedin/live/stop',    null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  getStatus:    () => api.get('/linkedin/live/status'),
+  listChats:    ({ limit = 30 } = {}) =>
+    api.get('/linkedin/live/chats', { params: { limit } }),
+  openChat:     (chatId) =>
+    api.post('/linkedin/live/chats/open', { chat_id: chatId }, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  closeChat:    () =>
+    api.post('/linkedin/live/chats/close', null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  getMessages:  ({ limit = 50 } = {}) =>
+    api.get('/linkedin/live/messages', { params: { limit } }),
+  sendMessage:  (text) =>
+    api.post(
+      '/linkedin/live/messages/send',
+      { text },
+      { timeout: LINKEDIN_LIVE_TIMEOUT }
+    ),
+};
+
+/* ---------------------------- linkedin profile PDF ------------------------- */
+export const linkedinProfileApi = {
+  scan: (profileUrl) =>
+    api.post(
+      '/linkedin/profile/scan',
+      { profile_url: profileUrl },
+      { responseType: 'blob', timeout: 120_000 },
+    ),
+};
+
 /* --------------------------------- live debug ------------------------------ */
 // EventSource cannot send Authorization headers, so the live streams accept
 // the access token as a query parameter (?token=...) instead.

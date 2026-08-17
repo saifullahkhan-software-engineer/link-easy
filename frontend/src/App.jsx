@@ -24,6 +24,8 @@ import WhatsAppFilterJobsPage from './pages/WhatsAppFilterJobsPage';
 import WhatsAppLiveChatPage from './pages/WhatsAppLiveChatPage';
 import WhatsAppFilterCreatePage from './pages/WhatsAppFilterCreatePage';
 import WhatsAppFilterEditPage from './pages/WhatsAppFilterEditPage';
+import LinkedInLiveChatPage from './pages/LinkedInLiveChatPage';
+import LinkedInProfileScanPage from './pages/LinkedInProfileScanPage';
 
 export default function App() {
   return (
@@ -78,6 +80,10 @@ export default function App() {
             <Route path="whatsapp-scanner/jobs/:filterId" element={<WhatsAppScannerPage />} />
             <Route path="whatsapp-scanner/jobs/:filterId/edit" element={<WhatsAppFilterEditPage />} />
             <Route path="whatsapp-live" element={<WhatsAppLiveChatPage />} />
+            <Route path="linkedin-live" element={<LinkedInLiveChatPage />} />
+            <Route path="linkedin-profile" element={<LinkedInProfileScanPage />} />
+            <Route path="linkedin-live" element={<LinkedInLiveChatPage />} />
+            <Route path="linkedin-profile" element={<LinkedInProfileScanPage />} />
           </Route>
 
           {/* catch-all */}
