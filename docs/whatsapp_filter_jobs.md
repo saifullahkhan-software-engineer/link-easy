@@ -44,3 +44,24 @@ The original `/api/v1/whatsapp/filters` and NULL-scoped group rows are retained
 for compatibility. Visiting the new list endpoint adopts an existing legacy
 singleton filter into the current user's workspace and moves its legacy groups
 and messages into that filter.
+
+## Anti-blocking forward pacing
+
+WhatsApp flags accounts that send several messages back-to-back — when a scan
+matches multiple jobs at once and forwards them all at the same time, the sends
+can fail or trip WhatsApp's spam/blocking filter. To prevent this, the
+forwarding pass in `worker/tasks/whatsapp_tasks.py` waits between every
+consecutive forward:
+
+- `FORWARD_DELAY_SECONDS` (default **10 seconds**) is applied before forwarding
+  each matched message after the first, so forwards in a single scan run are
+  never simultaneous.
+- The value is configurable via the `WHATSAPP_FORWARD_DELAY_SECONDS` env var
+  (see `core/config.py`), which the Celery worker reads at startup.
+- Pacing applies per scan run: message 1 forwards immediately, then each
+  following match waits 10 seconds, e.g. 3 matches → 2 pauses → ~20s of pacing.
+
+A log line is emitted before each pause
+(`⏳ Waiting 10s before forwarding the next message ...`) so the pacing is
+visible in the worker logs.
+

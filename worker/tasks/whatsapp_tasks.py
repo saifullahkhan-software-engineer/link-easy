@@ -21,6 +21,14 @@ from worker.celery_app import celery_app
 
 logger = get_logger(__name__)
 
+# Seconds to wait between forwarding matched WhatsApp messages. WhatsApp
+# blocks/errors when several messages are forwarded back-to-back (simultaneous
+# sends look like spam), so each forward is spaced out by this pause. It is
+# configurable via the WHATSAPP_FORWARD_DELAY_SECONDS env var.
+FORWARD_DELAY_SECONDS = float(
+    getattr(settings, "WHATSAPP_FORWARD_DELAY_SECONDS", None) or 10.0
+)
+
 # ── Sync DB session for Celery ──────────────────────────────────────────────
 def _make_sync_url(async_url: str) -> str:
     """Convert async DATABASE_URL to sync psycopg2 URL for Celery tasks."""
@@ -609,7 +617,22 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                     )
                 to_forward = forward_query_db.all()
 
-                for msg in to_forward:
+                total_to_forward = len(to_forward)
+                for index, msg in enumerate(to_forward):
+                    # Anti-blocking filter pacing: WhatsApp errors out when
+                    # multiple messages are forwarded at the same time. Wait
+                    # FORWARD_DELAY_SECONDS (default 10s) between every
+                    # consecutive forward so sends are never simultaneous.
+                    if index > 0:
+                        logger.info(
+                            "⏳ Waiting %ss before forwarding the next message "
+                            "(avoiding WhatsApp blocking filter) — %s of %s remaining",
+                            FORWARD_DELAY_SECONDS,
+                            total_to_forward - index,
+                            total_to_forward,
+                        )
+                        await asyncio.sleep(FORWARD_DELAY_SECONDS)
+
                     combined_text = " ".join(
                         part
                         for part in [msg.message_text or "", msg.ocr_text or ""]
