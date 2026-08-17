@@ -26,6 +26,7 @@ import WhatsAppFilterCreatePage from './pages/WhatsAppFilterCreatePage';
 import WhatsAppFilterEditPage from './pages/WhatsAppFilterEditPage';
 import LinkedInLiveChatPage from './pages/LinkedInLiveChatPage';
 import LinkedInProfileScanPage from './pages/LinkedInProfileScanPage';
+import SystemQueuesPage from './pages/SystemQueuesPage';
 
 export default function App() {
   return (
@@ -82,8 +83,9 @@ export default function App() {
             <Route path="whatsapp-live" element={<WhatsAppLiveChatPage />} />
             <Route path="linkedin-live" element={<LinkedInLiveChatPage />} />
             <Route path="linkedin-profile" element={<LinkedInProfileScanPage />} />
-            <Route path="linkedin-live" element={<LinkedInLiveChatPage />} />
-            <Route path="linkedin-profile" element={<LinkedInProfileScanPage />} />
+            <Route path="system-queues" element={<SystemQueuesPage />} />
+            <Route path="redis-jobs" element={<SystemQueuesPage />} />
+            <Route path="queues" element={<SystemQueuesPage />} />
           </Route>
 
           {/* catch-all */}

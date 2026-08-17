@@ -324,6 +324,27 @@ export const linkedinProfileApi = {
     ),
 };
 
+/* ------------------------------ system / redis queues ------------------------------ */
+export const systemQueuesApi = {
+  overview: () => api.get('/system/queues/overview'),
+  redisInfo: () => api.get('/system/queues/redis-info'),
+  celeryInspect: () => api.get('/system/queues/celery-inspect'),
+  dbStats: () => api.get('/system/queues/db-stats'),
+  listRedisKeys: ({ pattern = '*', limit = 100, offset = 0, key_type } = {}) =>
+    api.get('/system/queues/redis-keys', { params: { pattern, limit, offset, ...(key_type ? { key_type } : {}) } }),
+  deleteRedisKeys: (keys) => api.post('/system/queues/redis-keys/delete', { keys }),
+  flushPattern: ({ pattern, limit = 100, dry_run = false }) =>
+    api.post('/system/queues/flush-pattern', { pattern, limit, dry_run }),
+  purgeQueue: (queueName = 'celery') => api.post('/system/queues/purge', { queue_name: queueName }),
+  clearLocks: (types = ['session', 'profile', 'semaphore'], keys = []) =>
+    api.post('/system/queues/clear-locks', { types, keys }),
+  clearRateLimits: ({ pattern = 'rate:*', limit = 1000, dry_run = false } = {}) =>
+    api.post('/system/queues/clear-rate-limits', { pattern, limit, dry_run }),
+  revokeTask: (taskId, terminate = false) => api.post('/system/queues/revoke', { task_id: taskId, terminate }),
+  deleteCampaignJob: (jobId) => api.delete(`/system/queues/db/campaign-jobs/${jobId}`),
+  bulkDeleteCampaignJobs: (payload) => api.post('/system/queues/db/campaign-jobs/bulk-delete', payload),
+};
+
 /* --------------------------------- live debug ------------------------------ */
 // EventSource cannot send Authorization headers, so the live streams accept
 // the access token as a query parameter (?token=...) instead.

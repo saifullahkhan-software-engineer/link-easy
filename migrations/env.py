@@ -44,8 +44,16 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# IMPORTANT: Alembic's default fileConfig() wipes all existing handlers and
+# sets root level to WARNING (from alembic.ini), which makes it look like logs
+# disappear after migrations finish (INFO logs are hidden).  We must NOT
+# disable existing loggers that the application already configured (uvicorn +
+# our flushing stdout handler).  Passing disable_existing_loggers=False
+# preserves the application's root handler and level, while still configuring
+# the alembic/sqlalchemy loggers defined in alembic.ini.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
