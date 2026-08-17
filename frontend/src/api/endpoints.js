@@ -258,7 +258,7 @@ export const whatsappLiveApi = {
   stop: () =>
     api.post('/whatsapp/live/stop', null, { timeout: WHATSAPP_LIVE_TIMEOUT }),
   getStatus: () => api.get('/whatsapp/live/status'),
-  listChats: ({ q = '', limit = 50 } = {}) =>
+  listChats: ({ q = '', limit = 10 } = {}) =>
     api.get('/whatsapp/live/chats', {
       params: { ...(q ? { q } : {}), limit },
       timeout: WHATSAPP_LIVE_TIMEOUT,
@@ -298,8 +298,11 @@ export const linkedinLiveApi = {
   start:  () => api.post('/linkedin/live/start',   null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
   stop:   () => api.post('/linkedin/live/stop',    null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
   getStatus:    () => api.get('/linkedin/live/status'),
-  listChats:    ({ limit = 30 } = {}) =>
-    api.get('/linkedin/live/chats', { params: { limit } }),
+  listChats:    ({ q = '', limit = 30 } = {}) =>
+    api.get('/linkedin/live/chats', {
+      params: { ...(q ? { q } : {}), limit },
+      timeout: LINKEDIN_LIVE_TIMEOUT,
+    }),
   openChat:     (chatId) =>
     api.post('/linkedin/live/chats/open', { chat_id: chatId }, { timeout: LINKEDIN_LIVE_TIMEOUT }),
   closeChat:    () =>
@@ -320,7 +323,7 @@ export const linkedinProfileApi = {
     api.post(
       '/linkedin/profile/scan',
       { profile_url: profileUrl },
-      { responseType: 'blob', timeout: 120_000 },
+      { timeout: 120_000 },
     ),
 };
 

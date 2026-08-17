@@ -20,6 +20,7 @@ import io
 import json
 import os
 import random
+import re
 import time
 from typing import Optional
 
@@ -205,11 +206,23 @@ MSG_IMAGE_SELECTOR = (
     'img[src^="blob:"], div[role="button"] img[src^="blob:"]'
 )
 
-# Message input box
-MSG_INPUT_SELECTOR = 'div[contenteditable="true"][data-tab="10"], div[contenteditable="true"][role="textbox"]'
+# Message composer. Keep every generic role-based fallback scoped to ``#main``
+# or ``footer``: WhatsApp's sidebar search is also a contenteditable textbox,
+# and selecting it here makes a live-chat "send" silently type into Search.
+MSG_INPUT_SELECTOR = (
+    '#main div[contenteditable="true"][data-tab="10"], '
+    '#main footer div[contenteditable="true"][role="textbox"], '
+    '#main div[contenteditable="true"][role="textbox"], '
+    'footer div[contenteditable="true"][data-tab="10"]'
+)
 
-# Send button
-SEND_BUTTON_SELECTOR = 'button[data-testid="compose-btn-send"], span[data-testid="send"]'
+# Current WhatsApp builds expose an aria-label or data-icon; retain the older
+# data-testid forms for profiles that have not received that rollout yet.
+SEND_BUTTON_SELECTOR = (
+    '#main button[aria-label="Send"], #main button[data-tab="11"], '
+    '#main span[data-icon="send"], button[data-testid="compose-btn-send"], '
+    'span[data-testid="send"]'
+)
 
 # Chat header / group name in conversation
 CHAT_HEADER_SELECTOR = 'div[data-testid="conversation-header"], header span[dir="auto"]'
@@ -217,8 +230,12 @@ CHAT_HEADER_SELECTOR = 'div[data-testid="conversation-header"], header span[dir=
 # Loading / spinner indicators
 LOADING_SELECTOR = 'div[data-testid="progress-bar"], span[data-testid="loading"]'
 
-# Main pane (conversation area)
-MAIN_PANE_SELECTOR = 'div[data-testid="conversation-panel-wrapper"], div[data-testid="conversation-panel"]'
+# Main pane (conversation area). ``#main`` is the long-lived WhatsApp Web
+# selector; the data-testid fallbacks support older builds.
+MAIN_PANE_SELECTOR = (
+    '#main, div[data-testid="conversation-panel-wrapper"], '
+    'div[data-testid="conversation-panel"]'
+)
 
 # Candidate selectors that indicate "you are logged in" (the main interface).
 # Ordered from most- to least-reliable; the first match wins.  Old data-testid
@@ -874,10 +891,45 @@ async def _extract_message_container(container) -> dict | None:
         timestamp = None
         try:
             time_el = await container.query_selector(
-                'span[data-testid="msg-time"], div[data-testid="msg-meta"] span, span[dir="auto"]'
+                'span[data-testid="msg-time"], div[data-testid="msg-meta"] span'
             )
             if time_el:
                 timestamp = (await time_el.inner_text()).strip()
+        except Exception:
+            pass
+
+        # Current WhatsApp rows commonly put direction and copy metadata on an
+        # ancestor of the inner message container. Keep the direct attributes
+        # as a fallback for older builds and fake-DOM tests.
+        is_outgoing = False
+        try:
+            row_class = (await container.get_attribute("class") or "").split()
+            data_id = (await container.get_attribute("data-id") or "").lower()
+            is_outgoing = "message-out" in row_class or data_id.startswith("true_")
+        except Exception:
+            pass
+
+        try:
+            row_metadata = await container.evaluate(
+                """(element) => {
+                    const directionRow = element.closest('.message-in, .message-out');
+                    const idRow = element.closest('[data-id]') || element;
+                    const copyable = element.closest('[data-pre-plain-text]') ||
+                        element.querySelector('[data-pre-plain-text]');
+                    return {
+                        outgoing: directionRow?.classList.contains('message-out') ||
+                            (idRow.getAttribute('data-id') || '').toLowerCase().startsWith('true_'),
+                        prePlainText: copyable?.getAttribute('data-pre-plain-text') || null,
+                    };
+                }"""
+            )
+            if isinstance(row_metadata, dict):
+                is_outgoing = is_outgoing or bool(row_metadata.get("outgoing"))
+                if not timestamp:
+                    pre_plain_text = str(row_metadata.get("prePlainText") or "")
+                    match = re.match(r"^\[([^\]]+)]", pre_plain_text)
+                    if match:
+                        timestamp = match.group(1).strip()
         except Exception:
             pass
 
@@ -890,6 +942,7 @@ async def _extract_message_container(container) -> dict | None:
             "message_text": message_text,
             "message_type": message_type,
             "timestamp": timestamp,
+            "is_outgoing": is_outgoing,
             "raw_image_bytes": raw_image_bytes,
         }
     except Exception as exc:
@@ -1190,7 +1243,10 @@ async def forward_message_to_group(
         input_box = await page.query_selector(MSG_INPUT_SELECTOR)
         if not input_box:
             # Fallback: any contenteditable in the footer
-            input_boxes = await page.query_selector_all('div[contenteditable="true"]')
+            input_boxes = await page.query_selector_all(
+                '#main div[contenteditable="true"], '
+                'footer div[contenteditable="true"]'
+            )
             for ib in input_boxes:
                 try:
                     tab_index = await ib.get_attribute("data-tab")

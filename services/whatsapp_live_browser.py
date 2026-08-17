@@ -33,6 +33,9 @@ from services.whatsapp_browser import (
     CHAT_NAME_SELECTOR,
     CHAT_ROW_SELECTOR,
     LAUNCH_ARGS,
+    MAIN_PANE_SELECTOR,
+    MSG_CONTAINER_FALLBACK_SELECTOR,
+    MSG_CONTAINER_SELECTOR,
     MSG_INPUT_SELECTOR,
     MSG_TEXT_SELECTOR,
     PANE_SIDE_SELECTOR,
@@ -56,10 +59,10 @@ LIVE_SEND_DELAY_SECONDS: float = float(
     getattr(settings, "WHATSAPP_FORWARD_DELAY_SECONDS", None) or 10.0
 )
 
-# Cap on how many chats / messages we expose per request. The chat list
-# DOM is virtualized, so this only returns what's already visible — the
-# frontend can scroll/filter via WhatsApp's own search box.
-DEFAULT_CHAT_LIMIT = 50
+# Keep the default list deliberately small: WhatsApp's sidebar is virtualized,
+# and the first ten rows are the user's most recent conversations. Older chats
+# remain available through the search field.
+DEFAULT_CHAT_LIMIT = 10
 DEFAULT_MESSAGE_LIMIT = 50
 
 VIEWPORT = {"width": 1280, "height": 900}
@@ -88,6 +91,10 @@ class LiveBrowserManager:
         self._send_lock = asyncio.Lock()
 
         self._op_lock = asyncio.Lock()
+        # Every list/open/read/send operation shares one Playwright page. Keep
+        # them serialized so sidebar polling cannot mutate the DOM while a
+        # message snapshot or chat selection is in progress.
+        self._page_lock = asyncio.Lock()
 
     # ── Read-only accessors ────────────────────────────────────────────────
 
@@ -134,6 +141,11 @@ class LiveBrowserManager:
                 )
                 return self.snapshot()
 
+            # Store the lock immediately. Browser launch and login checks can
+            # fail before ``self._page`` is assigned; keeping it only in a local
+            # variable leaked profile_lock:whatsapp for its full 30-minute TTL
+            # after a failed start and made every retry look broken.
+            self._profile_lock = profile_lock
             self._set_status("starting", "Launching WhatsApp live-chat browser…")
 
             try:
@@ -163,6 +175,13 @@ class LiveBrowserManager:
                     except Exception:
                         pass
 
+                # Register resources before any navigation/login work. If one
+                # of those steps fails, ``_shutdown_raw`` must still be able to
+                # close Chromium rather than leaving a SingletonLock behind.
+                self._pw = pw
+                self._context = context
+                self._page = page
+
                 await context.add_init_script(STEALTH_SCRIPT)
                 await navigate_to_whatsapp(page)
 
@@ -180,12 +199,13 @@ class LiveBrowserManager:
                         "WhatsApp Scanner connect flow."
                     )
 
-                self._pw = pw
-                self._context = context
-                self._page = page
-                self._profile_lock = profile_lock
                 self.active_chat_id = None
                 self.active_chat_name = None
+                # Publish running state while the lifecycle lock is still held.
+                # Otherwise a concurrent stop can tear everything down between
+                # lock release and this assignment, leaving status="running"
+                # with no browser page.
+                self._set_status("running", "Live chat is open. The scanner is paused.")
 
             except Exception as exc:
                 self.last_error = str(exc)
@@ -194,17 +214,17 @@ class LiveBrowserManager:
                 await self._shutdown_raw()
                 return self.snapshot()
 
-        self._set_status("running", "Live chat is open. The scanner is paused.")
-        logger.info("✅ WhatsApp live-chat browser started (profile lock held)")
-        return self.snapshot()
+            logger.info("✅ WhatsApp live-chat browser started (profile lock held)")
+            return self.snapshot()
 
     async def stop(self) -> dict:
         """Stop the live browser and release the profile lock."""
         async with self._op_lock:
-            await self._shutdown_raw()
-        self.last_error = None
-        self._set_status("idle", "Live chat closed.")
-        return self.snapshot()
+            async with self._page_lock:
+                await self._shutdown_raw()
+                self.last_error = None
+                self._set_status("idle", "Live chat closed.")
+                return self.snapshot()
 
     async def _shutdown_raw(self) -> None:
         """Tear down browser resources. Caller holds ``self._op_lock``."""
@@ -216,6 +236,9 @@ class LiveBrowserManager:
         self._pw = None
         self._context = None
         self._page = None
+        self.active_chat_id = None
+        self.active_chat_name = None
+        self._last_send_ts = 0.0
 
         if self._profile_lock is not None:
             try:
@@ -228,194 +251,162 @@ class LiveBrowserManager:
 
     # ── Chat list ──────────────────────────────────────────────────────────
 
-    async def list_chats(self, filter_text: Optional[str] = None, limit: int = DEFAULT_CHAT_LIMIT) -> list[dict]:
-        """Return a list of chats from the sidebar (groups + contacts).
+    async def list_chats(
+        self,
+        filter_text: Optional[str] = None,
+        limit: int = DEFAULT_CHAT_LIMIT,
+    ) -> list[dict]:
+        """Return the most recent chats from WhatsApp's sidebar.
 
-        Optional ``filter_text`` performs an in-page search using WhatsApp's
-        own search box so the result rows come back filtered server-side.
+        Sidebar polling and chat selection share a lock because both operations
+        touch WhatsApp's virtualized chat rows and search box.
         """
-        page = await self._require_page()
-        # If the user previously opened a different chat, back out so the
-        # whole sidebar is visible — WhatsApp hides the chat list while a
-        # conversation is open on small screens.
-        await self._ensure_chat_list_visible(page)
+        async with self._page_lock:
+            page = await self._require_page()
+            await self._ensure_chat_list_visible(page)
 
-        if filter_text:
-            search_box = page.locator(
-                'div[contenteditable="true"][data-tab], input[placeholder*="Search"]'
-            )
+            search_box = _chat_search_box(page)
+            if filter_text:
+                try:
+                    await search_box.fill(filter_text, timeout=4000)
+                    await asyncio.sleep(1.0)
+                except Exception as exc:
+                    logger.warning("Could not use WhatsApp search box: %s", exc)
+            else:
+                # Clearing the app's filter must also clear WhatsApp's own
+                # search state. Keep a non-empty search in place so a result
+                # remains clickable after it has been returned to the client.
+                await _clear_search(search_box)
+
             try:
-                await search_box.first.fill(filter_text, timeout=4000)
-                await asyncio.sleep(1.5)
-            except Exception as exc:
-                logger.warning("Could not use WhatsApp search box: %s", exc)
-
-        try:
-            await page.wait_for_selector(CHAT_LIST_SELECTOR, timeout=10000)
-        except Exception:
-            logger.warning("Chat list not visible — is WhatsApp logged in?")
-            return []
-
-        rows = await page.query_selector_all(CHAT_ROW_SELECTOR)
-        chats: list[dict] = []
-        seen: set[str] = set()
-        for row in rows:
-            try:
-                name_el = await row.query_selector(CHAT_NAME_SELECTOR)
-                if name_el is None:
-                    spans = await row.query_selector_all("span[dir='auto']")
-                    name_el = spans[0] if spans else None
-                if name_el is None:
-                    continue
-                name = (await name_el.inner_text()).strip()
-                if not name:
-                    continue
-
-                chat_id = (
-                    await row.get_attribute("data-id")
-                    or await row.get_attribute("aria-label")
-                    or name
-                )
-                if chat_id in seen:
-                    continue
-                seen.add(chat_id)
-
-                # Last message + unread count are opportunistic — the DOM
-                # exposes them via the last-bubble selector and a numeric
-                # badge span. Skip on failure rather than block the list.
-                preview = await _read_last_preview(row)
-                unread = await _read_unread_count(row)
-
-                chats.append(
-                    {
-                        "chat_id": chat_id,
-                        "name": name,
-                        "preview": preview,
-                        "unread_count": unread,
-                    }
-                )
-                if len(chats) >= limit:
-                    break
+                await page.wait_for_selector(CHAT_LIST_SELECTOR, timeout=10000)
             except Exception:
-                continue
+                logger.warning("Chat list not visible — is WhatsApp logged in?")
+                return []
 
-        if filter_text:
-            await _clear_search(box=page.locator(
-                'div[contenteditable="true"][data-tab], input[placeholder*="Search"]'
-            ).first)
+            rows = await _chat_rows(page)
+            chats: list[dict] = []
+            seen: set[str] = set()
+            for row in rows:
+                try:
+                    chat_id, name = await _chat_row_identity(row)
+                    if not chat_id or not name or chat_id in seen:
+                        continue
+                    seen.add(chat_id)
 
-        return chats
+                    chats.append(
+                        {
+                            "chat_id": chat_id,
+                            "name": name,
+                            "preview": await _read_last_preview(row),
+                            "unread_count": await _read_unread_count(row),
+                        }
+                    )
+                    if len(chats) >= limit:
+                        break
+                except Exception:
+                    # WhatsApp can detach virtualized rows while they are read.
+                    continue
+
+            return chats
 
     async def open_chat(self, chat_id: str) -> dict:
-        """Click a chat in the sidebar by ``chat_id`` (data-id/aria/name)."""
-        page = await self._require_page()
-        await self._ensure_chat_list_visible(page)
+        """Click a currently visible chat by stable id or displayed name."""
+        async with self._page_lock:
+            page = await self._require_page()
+            await self._ensure_chat_list_visible(page)
 
-        # Clear any active search so the chat is findable.
-        await _clear_search(
-            box=page.locator(
-                'div[contenteditable="true"][data-tab], input[placeholder*="Search"]'
-            ).first
-        )
-
-        row = None
-        try:
-            row = await page.wait_for_selector(
-                f'{CHAT_ROW_SELECTOR}[data-id="{chat_id}"], '
-                f'{CHAT_ROW_SELECTOR}[aria-label="{chat_id}"]',
-                timeout=4000,
-            )
-        except Exception:
-            pass
-
-        if row is None:
-            # Fall back to scanning rows for a matching aria/data-id
-            # combined with a name match, since some chat rows lack
-            # ``data-id``.
-            for r in await page.query_selector_all(CHAT_ROW_SELECTOR):
-                nid = (
-                    await r.get_attribute("data-id")
-                    or await r.get_attribute("aria-label")
-                    or ""
-                )
-                if nid == chat_id:
-                    row = r
-                    break
-                name_el = await r.query_selector(CHAT_NAME_SELECTOR)
-                if name_el is not None and (await name_el.inner_text()).strip() == chat_id:
-                    row = r
+            # Do not clear the search here: a filtered result may be an older
+            # conversation that disappears from the virtualized top-ten list
+            # as soon as search is cleared.
+            row = None
+            selected_name = None
+            for candidate in await _chat_rows(page):
+                try:
+                    candidate_id, candidate_name = await _chat_row_identity(candidate)
+                except Exception:
+                    continue
+                if candidate_id == chat_id or candidate_name == chat_id:
+                    row = candidate
+                    selected_name = candidate_name
                     break
 
-        if row is None:
-            return {"ok": False, "error": f"Chat '{chat_id}' not found"}
+            if row is None:
+                return {"ok": False, "error": f"Chat '{chat_id}' is no longer visible. Refresh the chat list and try again."}
 
-        try:
-            await row.click()
-        except Exception as exc:
-            return {"ok": False, "error": f"Could not click chat: {exc}"}
+            try:
+                await row.click()
+                # ``#main`` is the stable selector in current WhatsApp Web;
+                # data-testid values are retained as legacy fallbacks.
+                await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=8000)
+            except Exception as exc:
+                logger.warning("Could not open WhatsApp chat %s: %s", chat_id, exc)
+                return {"ok": False, "error": "Chat did not open. Refresh the list and try again."}
 
-        # Wait for the conversation panel to appear and the header text to
-        # settle — header mirrors the chat name.
-        try:
-            await page.wait_for_selector(
-                'div[data-testid="conversation-panel-wrapper"], div[data-testid="conversation-panel"]',
-                timeout=8000,
-            )
-        except Exception:
-            return {"ok": False, "error": "Chat did not open (panel not visible)"}
-
-        # Best-effort resolve of the chat name from the conversation header.
-        name = await _read_active_chat_name(page)
-        self.active_chat_id = chat_id
-        self.active_chat_name = name or chat_id
-        return {"ok": True, "chat_id": chat_id, "name": self.active_chat_name}
+            name = await _read_active_chat_name(page)
+            self.active_chat_id = chat_id
+            self.active_chat_name = name or selected_name or chat_id
+            return {"ok": True, "chat_id": chat_id, "name": self.active_chat_name}
 
     async def close_active_chat(self) -> dict:
-        """Go back to the chat list so the sidebar is visible again."""
-        page = await self._require_page()
-        await self._ensure_chat_list_visible(page)
-        return {"ok": True, "active_chat_id": None}
+        """Clear the selected conversation and return to the list on mobile."""
+        async with self._page_lock:
+            page = await self._require_page()
+            await self._ensure_chat_list_visible(page)
+            self.active_chat_id = None
+            self.active_chat_name = None
+            return {"ok": True, "chat_id": None, "name": None}
 
     async def read_messages(self, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[dict]:
-        """Read the messages currently visible in the open chat."""
-        page = await self._require_page()
-        if not self.active_chat_id:
-            return []
+        """Read the newest messages in the open chat.
 
-        # Reuse the scanner's read path but ignore its incremental cursor —
-        # in live view we always re-snapshot what's on screen.
-        raw = await scrape_messages_from_current_chat(
-            page,
-            last_message_id=None,
-            last_timestamp=0,
-            message_limit=limit,
-        )
+        The shared scanner walks upward through WhatsApp's virtualized history.
+        A live-chat poll must therefore start at the bottom and restore the
+        bottom afterwards; otherwise each poll begins where the previous poll
+        stopped and eventually returns only increasingly old messages.
+        """
+        async with self._page_lock:
+            page = await self._require_page()
+            if not self.active_chat_id:
+                return []
 
-        out = []
-        for msg in raw or []:
-            out.append(
-                {
-                    "whatsapp_message_id": msg.get("whatsapp_message_id"),
-                    "sender": msg.get("sender_name"),
-                    "text": msg.get("message_text") or "",
-                    "type": msg.get("message_type", "text"),
-                    "is_outgoing": bool(msg.get("is_outgoing", False)),
-                    "timestamp": msg.get("timestamp"),
-                }
-            )
-        # Reverse so older messages come first (chat-style display).
-        out.reverse()
-        return out
+            if await _scroll_message_history_to_bottom(page):
+                await asyncio.sleep(0.4)
+
+            # Reuse the scanner's read path but ignore its incremental cursor —
+            # in live view we always re-snapshot what's on screen. The scraper
+            # returns newest-first after walking upward through bounded history.
+            try:
+                raw = await scrape_messages_from_current_chat(
+                    page,
+                    last_message_id=None,
+                    last_timestamp=None,
+                    message_limit=limit,
+                )
+            finally:
+                # Keep the next poll anchored to the newest conversation
+                # window even when extraction raises midway through a read.
+                if await _scroll_message_history_to_bottom(page):
+                    await asyncio.sleep(0.4)
+
+            out = []
+            for msg in raw or []:
+                out.append(
+                    {
+                        "whatsapp_message_id": msg.get("whatsapp_message_id"),
+                        "sender": msg.get("sender_name"),
+                        "text": msg.get("message_text") or "",
+                        "type": msg.get("message_type", "text"),
+                        "is_outgoing": bool(msg.get("is_outgoing", False)),
+                        "timestamp": msg.get("timestamp"),
+                    }
+                )
+            # The scanner walks newest-to-oldest; chat UI needs oldest-to-newest.
+            out.reverse()
+            return out
 
     async def send_message(self, text: str) -> dict:
-        """Type ``text`` into the input box and click send.
-
-        Waits up to ``LIVE_SEND_DELAY_SECONDS`` between consecutive sends
-        so a fast-typing user doesn't trip WhatsApp's blocking filter.
-        """
-        page = await self._require_page()
-        if not self.active_chat_id:
-            return {"ok": False, "error": "Open a chat first"}
+        """Type ``text`` into the active composer with anti-block pacing."""
         text = (text or "").strip()
         if not text:
             return {"ok": False, "error": "Empty message"}
@@ -426,58 +417,64 @@ class LiveBrowserManager:
             if self._last_send_ts and wait > 0:
                 logger.info(
                     "⏳ Throttling manual WhatsApp send by %.1fs "
-                    "(anti-blocking filter)", wait,
+                    "(anti-blocking filter)",
+                    wait,
                 )
                 await asyncio.sleep(wait)
 
-            try:
-                input_box = await page.query_selector(MSG_INPUT_SELECTOR)
-                if input_box is None:
-                    boxes = await page.query_selector_all(
-                        'div[contenteditable="true"]'
+            async with self._page_lock:
+                page = await self._require_page()
+                if not self.active_chat_id:
+                    return {"ok": False, "error": "Open a chat first"}
+
+                try:
+                    input_box = await page.query_selector(MSG_INPUT_SELECTOR)
+                    if input_box is None:
+                        boxes = await page.query_selector_all(
+                            '#main div[contenteditable="true"], '
+                            'footer div[contenteditable="true"]'
+                        )
+                        for candidate in boxes:
+                            try:
+                                if await candidate.get_attribute("data-tab") == "10":
+                                    input_box = candidate
+                                    break
+                            except Exception:
+                                continue
+                    if input_box is None:
+                        return {
+                            "ok": False,
+                            "error": "Message input box not visible",
+                        }
+
+                    await input_box.click()
+                    await asyncio.sleep(0.3)
+                    # Paste via ClipboardEvent — WhatsApp's contenteditable
+                    # composer handles this more reliably than ``fill()``.
+                    await page.evaluate(
+                        """(t) => {
+                            const dt = new DataTransfer();
+                            dt.setData('text/plain', t);
+                            const ev = new ClipboardEvent('paste', {
+                                clipboardData: dt, bubbles: true, cancelable: true,
+                            });
+                            document.activeElement.dispatchEvent(ev);
+                        }""",
+                        text,
                     )
-                    for ib in boxes:
-                        try:
-                            tab = await ib.get_attribute("data-tab")
-                            if tab == "10":
-                                input_box = ib
-                                break
-                        except Exception:
-                            continue
-                if input_box is None:
-                    return {"ok": False, "error": "Message input box not visible"}
+                    await asyncio.sleep(0.4)
 
-                await input_box.click()
-                await asyncio.sleep(0.3)
+                    send_btn = await page.query_selector(SEND_BUTTON_SELECTOR)
+                    if send_btn:
+                        await send_btn.click()
+                    else:
+                        await page.keyboard.press("Enter")
+                    await asyncio.sleep(0.6)
+                except Exception as exc:
+                    return {"ok": False, "error": f"Send failed: {exc}"}
 
-                # Paste via ClipboardEvent — same technique the scanner uses
-                # to inject forwarded messages. This is what WhatsApp Web
-                # expects, vs a plain ``.fill()`` which can lose formatting.
-                await page.evaluate(
-                    """(t) => {
-                        const dt = new DataTransfer();
-                        dt.setData('text/plain', t);
-                        const ev = new ClipboardEvent('paste', {
-                            clipboardData: dt, bubbles: true, cancelable: true,
-                        });
-                        document.activeElement.dispatchEvent(ev);
-                    }""",
-                    text,
-                )
-                await asyncio.sleep(0.4)
-
-                send_btn = await page.query_selector(SEND_BUTTON_SELECTOR)
-                if send_btn:
-                    await send_btn.click()
-                else:
-                    await page.keyboard.press("Enter")
-
-                await asyncio.sleep(0.6)
-            except Exception as exc:
-                return {"ok": False, "error": f"Send failed: {exc}"}
-
-        self._last_send_ts = time.monotonic()
-        return {"ok": True}
+            self._last_send_ts = time.monotonic()
+            return {"ok": True}
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -509,6 +506,88 @@ class LiveBrowserManager:
         self.status = status
         self.status_message = message
         logger.info("📱 live chat status: %s — %s", status, message)
+
+
+async def _scroll_message_history_to_bottom(page) -> bool:
+    """Move WhatsApp's virtualized message pane to its newest window.
+
+    Returns whether the pane moved. All failures are best-effort because a
+    newly opened or very short conversation can already be at the bottom and
+    some WhatsApp builds briefly replace the scroll container while rendering.
+    """
+    try:
+        result = await page.evaluate(
+            """async (selector) => {
+                const messages = Array.from(document.querySelectorAll(selector));
+                const last = messages[messages.length - 1];
+                if (!last) return { moved: false };
+
+                let scrollable = null;
+                for (let node = last; node && node !== document.body; node = node.parentElement) {
+                    const style = window.getComputedStyle(node);
+                    const canScroll = node.scrollHeight > node.clientHeight + 4;
+                    const scrollStyle = style.overflowY === 'auto' || style.overflowY === 'scroll';
+                    if (canScroll && scrollStyle) {
+                        scrollable = node;
+                        break;
+                    }
+                }
+                if (!scrollable) return { moved: false };
+
+                const before = scrollable.scrollTop;
+                scrollable.scrollTop = scrollable.scrollHeight;
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                return { moved: scrollable.scrollTop > before + 1 };
+            }""",
+            f"{MSG_CONTAINER_SELECTOR}, {MSG_CONTAINER_FALLBACK_SELECTOR}",
+        )
+        return bool(isinstance(result, dict) and result.get("moved"))
+    except Exception as exc:
+        logger.debug("Could not restore WhatsApp live chat to the bottom: %s", exc)
+        return False
+
+
+def _chat_search_box(page):
+    """Return the WhatsApp chat-search input, never the message composer."""
+    return page.locator(
+        '#side div[contenteditable="true"][role="textbox"], '
+        'div[data-testid="chat-list-search"], '
+        'div[contenteditable="true"][data-tab="3"], '
+        'div[contenteditable="true"][aria-placeholder*="Search" i], '
+        'input[placeholder*="Search" i]'
+    ).first
+
+
+async def _chat_rows(page) -> list:
+    """Read only sidebar rows so message rows are never mistaken for chats."""
+    try:
+        sidebar = await page.query_selector(PANE_SIDE_SELECTOR)
+    except Exception:
+        sidebar = None
+    if sidebar is None:
+        return []
+    return await sidebar.query_selector_all(CHAT_ROW_SELECTOR)
+
+
+async def _chat_row_identity(row) -> tuple[Optional[str], Optional[str]]:
+    """Return the same stable identity for listing and later row selection."""
+    name_el = await row.query_selector(CHAT_NAME_SELECTOR)
+    if name_el is None:
+        spans = await row.query_selector_all("span[dir='auto']")
+        name_el = spans[0] if spans else None
+    if name_el is None:
+        return None, None
+
+    name = (await name_el.inner_text()).strip()
+    if not name:
+        return None, None
+
+    chat_id = (
+        await row.get_attribute("data-id")
+        or await row.get_attribute("aria-label")
+        or name
+    )
+    return str(chat_id).strip(), name
 
 
 async def _read_last_preview(row) -> Optional[str]:

@@ -172,6 +172,11 @@ async def open_live_chat(
 async def close_live_chat(
     _current_user: User = Depends(get_current_user),
 ) -> LiveOpenChatResponse:
+    if live_browser.status != "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Live chat is not running.",
+        )
     result = await live_browser.close_active_chat()
     return LiveOpenChatResponse(**result)
 
@@ -197,14 +202,27 @@ async def get_live_messages(
             ),
         )
 
-    messages = await live_browser.read_messages(limit=limit)
-    items = [LiveMessageItem(**m) for m in messages]
-    return LiveMessagesResponse(
-        chat_id=live_browser.active_chat_id,
-        chat_name=live_browser.active_chat_name,
-        messages=items,
-        count=len(items),
-    )
+    try:
+        messages = await live_browser.read_messages(limit=limit)
+        items = [LiveMessageItem(**m) for m in messages]
+        return LiveMessagesResponse(
+            chat_id=live_browser.active_chat_id,
+            chat_name=live_browser.active_chat_name,
+            messages=items,
+            count=len(items),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Failed to read WhatsApp live messages (active_chat_id=%r)",
+            live_browser.active_chat_id,
+        )
+        detail = str(exc).strip() or exc.__class__.__name__
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not read messages: {detail}",
+        ) from exc
 
 
 @router.post("/messages/send", response_model=LiveSendResponse)

@@ -131,8 +131,14 @@ api.interceptors.response.use(
  * Pydantic's 422 validation array.
  */
 export function getErrorMessage(error, fallback = 'Something went wrong') {
-  const detail = error?.response?.data?.detail;
-  if (!detail) return error?.message && !error?.response ? 'Network error — is the backend running?' : fallback;
+  const responseData = error?.response?.data;
+  const detail = responseData?.detail;
+  if (!detail) {
+    if (typeof responseData === 'string' && responseData.trim()) return responseData.trim();
+    if (error?.message && !error?.response) return 'Network error — is the backend running?';
+    const status = error?.response?.status;
+    return status ? `${fallback || 'Request failed'} (HTTP ${status})` : fallback;
+  }
   if (typeof detail === 'string') return detail;
   if (Array.isArray(detail)) {
     return detail.map((d) => d.msg || JSON.stringify(d)).join('; ');
