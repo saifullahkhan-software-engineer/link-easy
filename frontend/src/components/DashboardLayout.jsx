@@ -49,6 +49,15 @@ const navItems = [
       </svg>
     ),
   },
+  {
+    to: '/app/whatsapp-live',
+    label: 'WhatsApp Live Chat',
+    icon: (
+      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM21 12c0 4.97-4.03 9-9 9-1.34 0-2.62-.3-3.76-.84L3 21l.84-5.24A8.96 8.96 0 0 1 3 12c0-4.97 4.03-9 9-9s9 4.03 9 9Z" />
+      </svg>
+    ),
+  },
 ];
 
 export default function DashboardLayout() {

@@ -21,6 +21,7 @@ import FeedScrollResultsPage from './pages/FeedScrollResultsPage';
 import FeedScrollAppliedPostsPage from './pages/FeedScrollAppliedPostsPage';
 import WhatsAppScannerPage from './pages/WhatsAppScannerPage';
 import WhatsAppFilterJobsPage from './pages/WhatsAppFilterJobsPage';
+import WhatsAppLiveChatPage from './pages/WhatsAppLiveChatPage';
 import WhatsAppFilterCreatePage from './pages/WhatsAppFilterCreatePage';
 import WhatsAppFilterEditPage from './pages/WhatsAppFilterEditPage';
 
@@ -76,6 +77,7 @@ export default function App() {
             <Route path="whatsapp-scanner/create" element={<WhatsAppFilterCreatePage />} />
             <Route path="whatsapp-scanner/jobs/:filterId" element={<WhatsAppScannerPage />} />
             <Route path="whatsapp-scanner/jobs/:filterId/edit" element={<WhatsAppFilterEditPage />} />
+            <Route path="whatsapp-live" element={<WhatsAppLiveChatPage />} />
           </Route>
 
           {/* catch-all */}

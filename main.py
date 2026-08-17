@@ -21,6 +21,7 @@ from api.v1.feed_leads import router as feed_leads_router
 from api.v1.test_automation import router as test_automation_router
 from api.v1.feed_scroll import router as feed_scroll_router
 from api.v1.whatsapp_scanner import router as whatsapp_scanner_router
+from api.v1.whatsapp_live import router as whatsapp_live_router
 from api.v1.live import router as live_router
 from core.config import settings
 from core.logging_config import get_logger
@@ -110,6 +111,15 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Error while stopping browser view")
 
+        # Same for the dedicated live-chat browser — releasing the profile
+        # lock early lets the Celery scan task pick up where it left off.
+        try:
+            from services.whatsapp_live_browser import live_browser
+
+            await live_browser.stop()
+        except Exception:
+            logger.exception("Error while stopping live chat browser")
+
 
 def _request_user_email(request: Request) -> str | None:
     """Best-effort email of the caller for the API log stream (no DB hit)."""
@@ -176,6 +186,7 @@ app.include_router(feed_leads_router)
 app.include_router(test_automation_router)
 app.include_router(feed_scroll_router)
 app.include_router(whatsapp_scanner_router)
+app.include_router(whatsapp_live_router)
 app.include_router(live_router)
 
 
