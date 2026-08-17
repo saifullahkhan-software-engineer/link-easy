@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # Each LinkedInAccount gets <PROFILE_STORAGE_DIR>/<account.id> as its
     # user-data-dir. Mount this path on a persistent volume in production.
     PROFILE_STORAGE_DIR: str = "./profiles"
+
+    # WhatsApp automation pacing (seconds) between forwarding each matched
+    # message. Sending several messages at the same time trips WhatsApp's
+    # spam/blocking filter, so the scanner waits this long between forwards.
+    # Override with the WHATSAPP_FORWARD_DELAY_SECONDS env var.
+    WHATSAPP_FORWARD_DELAY_SECONDS: float = 10.0
     
     @property
     def cors_origins(self) -> list[str]:

@@ -239,6 +239,91 @@ export const whatsappApi = {
     }),
 };
 
+/* ----------------------------- whatsapp live chat ---------------------------- */
+// Live chat mirrors the WhatsApp Web UI on top of a dedicated Playwright session.
+// Polling-only transport (the user picked polling over SSE to keep the wiring
+// simple and the API stateless).
+//
+// Hot-path endpoints warrant a longer timeout:
+//   - POST /start   — launching the headless browser + warm-up (~30s)
+//   - POST /stop    — tearing it down (~15s)
+//   - POST /open    — searching for / clicking the chat (~15s, search-then-click)
+//   - POST /send    — paced send (up to WHATSAPP_FORWARD_DELAY_SECONDS inside)
+const WHATSAPP_LIVE_TIMEOUT = 60_000;
+const WHATSAPP_LIVE_START_TIMEOUT = 60_000;
+
+export const whatsappLiveApi = {
+  start: () =>
+    api.post('/whatsapp/live/start', null, { timeout: WHATSAPP_LIVE_START_TIMEOUT }),
+  stop: () =>
+    api.post('/whatsapp/live/stop', null, { timeout: WHATSAPP_LIVE_TIMEOUT }),
+  getStatus: () => api.get('/whatsapp/live/status'),
+  listChats: ({ q = '', limit = 50 } = {}) =>
+    api.get('/whatsapp/live/chats', {
+      params: { ...(q ? { q } : {}), limit },
+      timeout: WHATSAPP_LIVE_TIMEOUT,
+    }),
+  openChat: (chatId) =>
+    api.post(
+      '/whatsapp/live/chats/open',
+      { chat_id: chatId },
+      { timeout: WHATSAPP_LIVE_TIMEOUT }
+    ),
+  closeChat: () =>
+    api.post('/whatsapp/live/chats/close', null, {
+      timeout: WHATSAPP_LIVE_TIMEOUT,
+    }),
+  // No special endpoint — GET /messages or POST /send handle reading/writing
+  // when a chat is open. Frontend may call closeChat first, then GET /messages
+  // returns 409 if no chat was open. Open chat list via /chats (Sidebar).
+  getMessages: ({ limit = 50 } = {}) =>
+    api.get('/whatsapp/live/messages', {
+      params: { limit },
+      timeout: WHATSAPP_LIVE_TIMEOUT,
+    }),
+  sendMessage: (text) =>
+    api.post(
+      '/whatsapp/live/messages/send',
+      { text },
+      { timeout: WHATSAPP_LIVE_TIMEOUT }
+    ),
+};
+
+/* ----------------------------- linkedin live chat ------------------------ */
+// Mirror of the WhatsApp live surface. The same antispam pacing logic keeps
+// fast typers from triggering LinkedIn's automation filter.
+const LINKEDIN_LIVE_TIMEOUT = 60_000;
+
+export const linkedinLiveApi = {
+  start:  () => api.post('/linkedin/live/start',   null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  stop:   () => api.post('/linkedin/live/stop',    null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  getStatus:    () => api.get('/linkedin/live/status'),
+  listChats:    ({ limit = 30 } = {}) =>
+    api.get('/linkedin/live/chats', { params: { limit } }),
+  openChat:     (chatId) =>
+    api.post('/linkedin/live/chats/open', { chat_id: chatId }, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  closeChat:    () =>
+    api.post('/linkedin/live/chats/close', null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  getMessages:  ({ limit = 50 } = {}) =>
+    api.get('/linkedin/live/messages', { params: { limit } }),
+  sendMessage:  (text) =>
+    api.post(
+      '/linkedin/live/messages/send',
+      { text },
+      { timeout: LINKEDIN_LIVE_TIMEOUT }
+    ),
+};
+
+/* ---------------------------- linkedin profile PDF ------------------------- */
+export const linkedinProfileApi = {
+  scan: (profileUrl) =>
+    api.post(
+      '/linkedin/profile/scan',
+      { profile_url: profileUrl },
+      { responseType: 'blob', timeout: 120_000 },
+    ),
+};
+
 /* --------------------------------- live debug ------------------------------ */
 // EventSource cannot send Authorization headers, so the live streams accept
 // the access token as a query parameter (?token=...) instead.
