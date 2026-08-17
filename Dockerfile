@@ -1,6 +1,9 @@
 # Use Python 3.14 slim image
 FROM python:3.14-slim
 
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
 # Set working directory
 WORKDIR /app
 

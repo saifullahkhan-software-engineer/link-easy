@@ -25,8 +25,9 @@ from api.v1.whatsapp_live import router as whatsapp_live_router
 from api.v1.linkedin_live import router as linkedin_live_router
 from api.v1.linkedin_profile import router as linkedin_profile_router
 from api.v1.live import router as live_router
+from api.v1.system_queues import router as system_queues_router
 from core.config import settings
-from core.logging_config import get_logger
+from core.logging_config import get_logger, reset_logging
 from core.security import validate_encryption_key
 from database import init_db
 from models.roles import UserRole
@@ -77,8 +78,24 @@ async def lifespan(app: FastAPI):
         # asyncio.to_thread() moves it to a worker thread where no loop is
         # running, so asyncio.run() can create its own loop safely.
         await asyncio.to_thread(run_migrations)
+        # Alembic's env.py historically called logging.config.fileConfig which
+        # wiped the root handler and set level to WARNING, hiding INFO logs.
+        # We now preserve existing loggers in env.py, but as a safety net we
+        # force-reinstall our flushing stdout handler here. Without this, the
+        # user sees "Running database migrations..." and then silence,
+        # thinking the service shut itself down.
+        try:
+            reset_logging()
+        except Exception:
+            # Logging fix is best-effort; don't fail startup if it errors.
+            pass
         logger.info("Database migrations completed")
     except Exception:
+        # Ensure logs remain visible even when migrations fail, so traceback shows.
+        try:
+            reset_logging()
+        except Exception:
+            pass
         # Migrations are idempotent and the base tables already exist via
         # init_db(), so the API can still serve traffic even if a migration
         # fails.  Log the full traceback loudly, then re-raise so the
@@ -93,6 +110,8 @@ async def lifespan(app: FastAPI):
     cleanup_task = start_periodic_cleanup(interval_seconds=300, timeout_minutes=15)
 
     logger.info("Service startup complete — application is ready")
+    # Extra visibility: confirm logging is still working after lifespan yield point is near.
+    print("Service startup complete — application is ready", flush=True)
     try:
         yield
     finally:
@@ -200,6 +219,7 @@ app.include_router(whatsapp_live_router)
 app.include_router(linkedin_live_router)
 app.include_router(linkedin_profile_router)
 app.include_router(live_router)
+app.include_router(system_queues_router)
 
 
 @app.get("/")

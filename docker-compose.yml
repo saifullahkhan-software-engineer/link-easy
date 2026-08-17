@@ -53,6 +53,7 @@ services:
       - BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
       - FROM_EMAIL=noreply@example.com
       - ENVIRONMENT=production
+      - PYTHONUNBUFFERED=1
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,7 +61,7 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --log-level info
 
   # Celery Worker
   worker:
