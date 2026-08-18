@@ -37,12 +37,15 @@ class _TextElement:
 
 
 class _MessageContainer:
-    def __init__(self, message_id: str):
+    def __init__(self, message_id: str, css_class: str = ""):
         self.message_id = message_id
+        self.css_class = css_class
 
     async def get_attribute(self, name):
         if name == "data-id":
             return self.message_id
+        if name == "class":
+            return self.css_class
         return None
 
     async def query_selector(self, selector):
@@ -167,6 +170,16 @@ class WhatsAppIncrementalScanningTests(unittest.IsolatedAsyncioTestCase):
         selected = _best_image_payload(tiny_buffer.getvalue(), rendered_buffer.getvalue())
 
         self.assertEqual(_image_payload_dimensions(selected), (320, 720))
+
+    async def test_message_metadata_keeps_visible_timestamp_and_outgoing_direction(self):
+        page = _Page([])
+        page.containers = [_MessageContainer("sent-message", "message-out")]
+
+        messages = await scrape_messages_from_current_chat(page, message_limit=1)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["timestamp"], "10:00")
+        self.assertTrue(messages[0]["is_outgoing"])
 
     async def test_first_scan_returns_only_configured_latest_messages_newest_first(self):
         page = _Page(["m1", "m2", "m3", "m4", "m5"])

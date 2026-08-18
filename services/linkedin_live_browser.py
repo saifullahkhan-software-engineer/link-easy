@@ -1,444 +1,526 @@
-"""
-LinkedIn live-chat browser manager.
+"""Dedicated, serialized LinkedIn browser manager for live chat and profile scans.
 
-FILE: services/linkedin_live_browser.py
-
-Mirrors ``services/whatsapp_live_browser.py`` but for LinkedIn messaging.
-Acquires ``profile_lock("linkedin")`` so the periodic scan task pauses
-while a user is chatting; the underlying Playwright context is opened on
-the same user-data-dir the user's ``LinkedInAccount`` row already keeps
-logged-in on, so no fresh login is required.
+LinkedIn's messaging UI is a virtualized SPA and its CSS class names change
+regularly.  This module keeps selectors scoped to the full-page messaging UI,
+matches conversations against rows that were actually enumerated, and
+serializes every operation that can navigate or mutate the shared page.
 """
+from __future__ import annotations
+
 import asyncio
+import hashlib
 import time
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import Any, Optional
+from urllib.parse import unquote, urlparse
 
+from sqlalchemy import desc
+from sqlalchemy.future import select
+
+from automation.browser import launch_persistent_browser
 from core.config import settings
 from core.logging_config import get_logger
-from patchright.async_api import async_playwright
-
-# Re-use the existing LinkedIn persistent launcher — uses the pinned
-# fingerprint on the linked account, same proxy, same user-data-dir.
-from automation.browser import launch_persistent_browser
-from services.whatsapp_browser import (
-    LAUNCH_ARGS,  # noqa: F401  (kept for parity with the WhatsApp live module)
-)
-
-# We accept a couple of selectors overlapping with whatsapp_browser for
-# readability — these are deliberately scoped to LinkedIn's messaging UI.
-LINKEDIN_MESSAGING_URL = "https://www.linkedin.com/messaging/"
-
-LIVE_SEND_DELAY_SECONDS: float = float(
-    getattr(settings, "WHATSAPP_FORWARD_DELAY_SECONDS", None) or 10.0
-)
-
-DEFAULT_CHATS_LIMIT: int = 30
+from database import async_session
+from models.linkedin_account import LinkedInAccount, LinkedInAccountStatus
 
 logger = get_logger(__name__)
 
+MESSAGING_URL = "https://www.linkedin.com/messaging/"
+LIVE_SEND_DELAY_SECONDS = float(getattr(settings, "LINKEDIN_LIVE_SEND_DELAY_SECONDS", 10))
+DEFAULT_CHAT_LIMIT = 30
+DEFAULT_MESSAGE_LIMIT = 50
 
-def _short_text(el, *, max_len: int = 120) -> str:
-    """Read ``textContent`` from an async element without raising."""
-    if el is None:
+# Full-page messaging selectors. Every generic textbox is scoped to main so a
+# send can never target LinkedIn's global search or compact messaging overlay.
+CHAT_LIST_ROOT_SELECTOR = (
+    "main ul.msg-conversations-container__conversations-list, "
+    "main .msg-conversations-container__conversations-list, "
+    "main [data-view-name='messages-conversation-list'], "
+    "main ul[aria-label*='conversation' i]"
+)
+CHAT_ROW_SELECTOR = (
+    "li.msg-conversation-listitem, "
+    "li[data-control-name='conversation_item'], "
+    "[data-view-name='messages-conversation-list-item']"
+)
+CHAT_ROW_PAGE_SELECTOR = ", ".join(
+    f"main {selector.strip()}" for selector in CHAT_ROW_SELECTOR.split(",")
+)
+CHAT_LINK_SELECTOR = (
+    "a[href*='/messaging/thread/'], "
+    "a[href*='/messaging/conversation/'], "
+    "a.msg-conversation-listitem__link"
+)
+CHAT_NAME_SELECTOR = (
+    ".msg-conversation-listitem__participant-names, "
+    "h3.msg-conversation-listitem__participant-names, "
+    "[data-anonymize='person-name'], "
+    "span[dir='ltr']"
+)
+CHAT_PREVIEW_SELECTOR = (
+    ".msg-conversation-card__message-snippet, "
+    ".msg-conversation-listitem__message-snippet, "
+    ".msg-conversation-card__message-snippet-body, "
+    "p"
+)
+CHAT_UNREAD_SELECTOR = (
+    ".notification-badge__count, "
+    ".msg-conversation-listitem__unread-count, "
+    "[aria-label*='unread' i]"
+)
+THREAD_PANEL_SELECTOR = (
+    "main .msg-s-message-list-container, "
+    "main .msg-thread, "
+    "main .msg-convo-wrapper, "
+    "main form.msg-form, "
+    "main .msg-form"
+)
+MESSAGE_ROW_SELECTOR = (
+    "main li.msg-s-message-list__event, "
+    "main .msg-s-event-listitem, "
+    "main li.msg-s-message-listitem, "
+    "main [data-view-name='message-bubble']"
+)
+MESSAGE_TEXT_SELECTOR = (
+    ".msg-s-event-listitem__body, "
+    ".msg-s-message-listitem__body, "
+    ".msg-s-event-listitem__message-bubble, "
+    "[data-view-name='message-body'], "
+    "p"
+)
+MESSAGE_SENDER_SELECTOR = (
+    ".msg-s-message-group__name, "
+    ".msg-s-event-listitem__name, "
+    "[data-anonymize='person-name']"
+)
+MESSAGE_TIME_SELECTOR = "time, .msg-s-message-group__timestamp, [data-test-message-time]"
+COMPOSER_SELECTOR = (
+    "main .msg-form__contenteditable[contenteditable='true'], "
+    "main form.msg-form div[contenteditable='true'][role='textbox'], "
+    "main .msg-form div[contenteditable='true'][role='textbox']"
+)
+SEND_BUTTON_SELECTOR = (
+    "main form.msg-form button[type='submit'], "
+    "main button.msg-form__send-button, "
+    "main button[aria-label*='Send' i]"
+)
+
+
+async def _short_text(element: Any, limit: int = 300) -> str:
+    if element is None:
         return ""
     try:
-        return (el.inner_text() or "").strip()[:max_len]
+        return (await element.inner_text()).strip()[:limit]
     except Exception:
         return ""
 
 
-class LinkedInLiveBrowser:
-    """Process-wide singleton managing the LinkedIn live-chat browser."""
+async def _attribute(element: Any, name: str) -> str:
+    if element is None:
+        return ""
+    try:
+        return (await element.get_attribute(name) or "").strip()
+    except Exception:
+        return ""
+
+
+async def _first(element: Any, selector: str) -> Any:
+    if element is None:
+        return None
+    try:
+        return await element.query_selector(selector)
+    except Exception:
+        return None
+
+
+def _chat_id_from_href(href: str) -> str:
+    """Extract a LinkedIn thread id without interpolating it into CSS later."""
+    if not href:
+        return ""
+    try:
+        path = urlparse(href).path
+    except Exception:
+        path = href
+    for marker in ("/messaging/thread/", "/messaging/conversation/"):
+        if marker in path:
+            value = path.split(marker, 1)[1].split("/", 1)[0]
+            return unquote(value).strip()
+    return ""
+
+
+async def _row_identity(row: Any) -> tuple[str, str, str, str, int]:
+    link = await _first(row, CHAT_LINK_SELECTOR)
+    href = await _attribute(link, "href")
+    chat_id = _chat_id_from_href(href)
+
+    if not chat_id:
+        for attr_name in ("data-conversation-id", "data-entity-urn", "data-urn", "id"):
+            value = await _attribute(row, attr_name)
+            if value:
+                chat_id = value
+                break
+
+    name = await _short_text(await _first(row, CHAT_NAME_SELECTOR), 160)
+    preview = await _short_text(await _first(row, CHAT_PREVIEW_SELECTOR), 300)
+    if not name:
+        name = chat_id or "LinkedIn conversation"
+    if not chat_id:
+        digest = hashlib.sha256(f"{name}\n{preview}".encode("utf-8")).hexdigest()[:20]
+        chat_id = f"dom-{digest}"
+
+    unread_text = await _short_text(await _first(row, CHAT_UNREAD_SELECTOR), 30)
+    try:
+        unread = int("".join(ch for ch in unread_text if ch.isdigit()) or "0")
+    except ValueError:
+        unread = 0
+    return chat_id, name, preview, href, unread
+
+
+class LinkedInLiveBrowserManager:
+    """One process-local LinkedIn browser with serialized page operations."""
 
     def __init__(self) -> None:
-        self._pw = None
-        self._browser = None  # launch_persistent_browser returns (pw, browser=None, ...)
-        self._context = None
-        self._page = None
-        self._profile_lock = None
-        self._account = None  # type: ignore[assignment]
-
-        self.status = "idle"  # idle | starting | running | error
-        self.status_message = ""
-        self.last_error: Optional[str] = None
+        self.status: str = "idle"
+        self.message: str = "LinkedIn live chat is not running."
+        self.error: Optional[str] = None
         self.active_chat_id: Optional[str] = None
         self.active_chat_name: Optional[str] = None
-
-        self._last_send_ts: float = 0.0
-        self._send_lock = asyncio.Lock()
-        self._op_lock = asyncio.Lock()
-
-    def snapshot(self) -> dict:
-        return {
-            "status": self.status,
-            "message": self.status_message,
-            "error": self.last_error,
-            "active_chat_id": self.active_chat_id,
-            "active_chat_name": self.active_chat_name,
-        }
-
-    # ── Lifecycle ──────────────────────────────────────────────────────────
-
-    async def start(self) -> dict:
-        """Open the LinkedIn live browser on the user's connected account."""
-        async with self._op_lock:
-            if self._page is not None and self.status in ("running", "starting"):
-                return self.snapshot()
-
-            from api.dependencies import get_db  # local to avoid heavy import at module load
-            from models.linkedin_account import LinkedInAccount
-            from worker.profile_lock import ProfileInUseError, acquire_profile_lock
-
-            # Find the user's most-recent connected LinkedIn account.
-            acct = None
-            sync_sess = None
-            try:
-                import asyncio as _asyncio
-                from database import async_session as _async_session
-                from sqlalchemy.future import select as _select
-
-                async with _async_session() as s:
-                    row = await s.execute(
-                        _select(LinkedInAccount).order_by(LinkedInAccount.id.desc()).limit(1)
-                    )
-                    acct = row.scalars().first()
-                if acct is None:
-                    self._set_status(
-                        "error",
-                        "No connected LinkedIn account found. Connect one in Account first.",
-                    )
-                    return self.snapshot()
-                # Snapshot the fields we need — the live session must not
-                # race with the scan task mutating the row.
-                self._account = self._snapshot_account(acct)
-            except Exception as exc:  # pragma: no cover — DB lookup failure
-                self._set_status("error", f"Could not load LinkedIn account: {exc}")
-                return self.snapshot()
-            finally:
-                # sync_sess intentionally unused — async session above is auto-closed.
-                pass
-
-            try:
-                profile_lock = acquire_profile_lock("linkedin", blocking_timeout=2)
-            except ProfileInUseError:
-                self._set_status(
-                    "error",
-                    "The LinkedIn browser is busy with another operation.",
-                )
-                return self.snapshot()
-
-            self._set_status("starting", "Launching LinkedIn live browser…")
-            try:
-                pw, _, context, page = await launch_persistent_browser(self._account, headless=True)
-            except Exception as exc:
-                self._set_status("error", f"Could not open LinkedIn browser: {exc}")
-                try:
-                    from worker.profile_lock import release_profile_lock
-                    release_profile_lock(profile_lock)
-                except Exception:
-                    pass
-                return self.snapshot()
-
-            # Warm-up: navigate to messaging and wait for the conversation list.
-            try:
-                await page.goto(LINKEDIN_MESSAGING_URL, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                # Soft-warn — some org/region pages block networkidle. Keep going.
-                pass
-
-            self._pw = pw
-            self._context = context
-            self._page = page
-            self._profile_lock = profile_lock
-
-        self._set_status("running", "LinkedIn live chat is open. The scanner paused.")
-        return self.snapshot()
-
-    async def stop(self) -> dict:
-        async with self._op_lock:
-            await self._shutdown_raw()
-        self._set_status("idle", "LinkedIn live chat closed.")
-        return self.snapshot()
-
-    async def _shutdown_raw(self) -> None:
-        if self._pw is not None or self._context is not None:
-            try:
-                if self._context is not None:
-                    await self._context.close()
-                if self._pw is not None:
-                    await self._pw.stop()
-            except Exception:
-                pass
         self._pw = None
         self._browser = None
         self._context = None
         self._page = None
-        self._account = None
+        self._account: Optional[LinkedInAccount] = None
+        self._owner_email: Optional[str] = None
+        self._profile_lock = None
+        self._last_send_monotonic: float = 0.0
+        self._lifecycle_lock = asyncio.Lock()
+        self._operation_lock = asyncio.Lock()
 
-        if self._profile_lock is not None:
-            try:
-                from worker.profile_lock import release_profile_lock
-                release_profile_lock(self._profile_lock)
-            except Exception:
-                pass
+    def snapshot(self) -> dict:
+        return {
+            "status": self.status,
+            "message": self.message,
+            "error": self.error,
+            "active_chat_id": self.active_chat_id,
+            "active_chat_name": self.active_chat_name,
+        }
+
+    @property
+    def owner_email(self) -> Optional[str]:
+        return self._owner_email
+
+    def is_owned_by(self, owner_email: str) -> bool:
+        return bool(self._owner_email and self._owner_email == owner_email)
+
+    async def _cleanup_resources(self) -> None:
+        try:
+            if self._context is not None:
+                await self._context.close()
+        except Exception as exc:
+            logger.warning("Error closing LinkedIn context: %s", exc)
+        try:
+            if self._pw is not None:
+                await self._pw.stop()
+        except Exception as exc:
+            logger.warning("Error stopping LinkedIn Playwright: %s", exc)
+        self._pw = self._browser = self._context = self._page = None
+        self._account = None
+        self._owner_email = None
+        try:
+            from worker.profile_lock import release_profile_lock
+
+            release_profile_lock(self._profile_lock)
+        finally:
             self._profile_lock = None
 
-    # ── Chats ──────────────────────────────────────────────────────────────
+    async def start(self, owner_email: Optional[str] = None) -> dict:
+        async with self._lifecycle_lock:
+            if self.status == "running":
+                if owner_email and not self.is_owned_by(owner_email):
+                    return {
+                        **self.snapshot(),
+                        "status": "error",
+                        "message": "A different LinkedIn account is already using live chat.",
+                        "error": "Stop the existing live chat session before starting this account.",
+                    }
+                return self.snapshot()
+
+            self.status = "starting"
+            self.message = "Starting LinkedIn live chat…"
+            self.error = None
+            # Claim ownership before the first await so status/stop requests
+            # from another authenticated account cannot observe or cancel this
+            # account's in-progress launch.
+            self._owner_email = owner_email
+
+            try:
+                async with async_session() as db:
+                    query = select(LinkedInAccount).where(
+                        LinkedInAccount.status.in_(
+                            [LinkedInAccountStatus.ACTIVE, LinkedInAccountStatus.VALID]
+                        )
+                    )
+                    if owner_email:
+                        query = query.where(LinkedInAccount.owner_email == owner_email)
+                    result = await db.execute(
+                        query.order_by(desc(LinkedInAccount.updated_at)).limit(1)
+                    )
+                    self._account = result.scalars().first()
+
+                if self._account is None:
+                    raise RuntimeError(
+                        "No active LinkedIn account found. Connect and verify LinkedIn first."
+                    )
+
+                from worker.profile_lock import acquire_profile_lock
+
+                self._profile_lock = acquire_profile_lock(
+                    self._account.id, blocking_timeout=0
+                )
+                self._pw, self._browser, self._context, self._page = (
+                    await launch_persistent_browser(self._account, headless=True)
+                )
+                self._owner_email = self._account.owner_email
+                await self._page.goto(
+                    MESSAGING_URL, wait_until="domcontentloaded", timeout=60000
+                )
+                await self._page.wait_for_selector(
+                    f"{CHAT_LIST_ROOT_SELECTOR}, {CHAT_ROW_PAGE_SELECTOR}", timeout=30000
+                )
+
+                self.status = "running"
+                self.message = "LinkedIn live chat is running."
+                return self.snapshot()
+            except Exception as exc:
+                logger.exception("Could not start LinkedIn live chat")
+                await self._cleanup_resources()
+                self.status = "error"
+                self.error = str(exc)
+                self.message = f"Could not start LinkedIn live chat: {exc}"
+                return self.snapshot()
+
+    async def stop(self) -> dict:
+        async with self._lifecycle_lock:
+            self.status = "stopping"
+            self.message = "Stopping LinkedIn live chat…"
+            async with self._operation_lock:
+                await self._cleanup_resources()
+                self.active_chat_id = None
+                self.active_chat_name = None
+                self.status = "idle"
+                self.error = None
+                self.message = "LinkedIn live chat stopped."
+                return self.snapshot()
 
     async def _require_page(self):
-        if self._page is None or self.status != "running":
-            raise RuntimeError("LinkedIn live chat is not running. Start it first.")
+        if self.status != "running" or self._page is None:
+            raise RuntimeError("LinkedIn live chat is not running")
+        if getattr(self._page, "is_closed", lambda: False)():
+            raise RuntimeError("LinkedIn browser page is closed")
         return self._page
 
-    async def list_chats(self, limit: int = 30) -> list[dict]:
-        page = await self._require_page()
-        # LinkedIn's messaging conversation list lives inside the messaging
-        # thread-list container. Items are anchor links to /messaging/thread/<id>.
+    async def _chat_rows(self, page: Any) -> list[Any]:
+        root = await _first(page, CHAT_LIST_ROOT_SELECTOR)
+        if root is not None:
+            try:
+                rows = await root.query_selector_all(CHAT_ROW_SELECTOR)
+                if rows:
+                    return rows
+            except Exception:
+                pass
         try:
-            await page.wait_for_selector(
-                "a[href*='/messaging/thread/'], a[href*='messaging-thread']",
-                timeout=10000,
-            )
+            return await page.query_selector_all(CHAT_ROW_PAGE_SELECTOR)
         except Exception:
             return []
 
-        items = await page.query_selector_all("a[href*='/messaging/thread/']")
-        chats: list[dict] = []
-        seen: set[str] = set()
-        for item in items:
-            try:
-                href = (await item.get_attribute("href")) or ""
-                if not href:
-                    continue
-                # href is usually "/messaging/thread/ACRO-1234-NAME/?..."
-                marker = "/thread/"
-                pos = href.find(marker)
-                if pos == -1:
-                    continue
-                tail = href[pos + len(marker):]
-                chat_id = tail.split("?")[0].split("/")[0]
-                if not chat_id or chat_id in seen:
-                    continue
-                seen.add(chat_id)
+    async def _ensure_messaging(self, page: Any) -> None:
+        if "/messaging" not in (getattr(page, "url", "") or ""):
+            await page.goto(MESSAGING_URL, wait_until="domcontentloaded", timeout=60000)
+        try:
+            await page.wait_for_selector(
+                f"{CHAT_LIST_ROOT_SELECTOR}, {CHAT_ROW_PAGE_SELECTOR}", timeout=15000
+            )
+        except Exception:
+            # A thread may hide the list on a narrow viewport; open/read still
+            # have their own panel checks and should be allowed to continue.
+            pass
 
-                name_el = await item.query_selector(
-                    "span.msg-thread__title, span[class*='thread-name'], .msg-thread__top-row span"
-                )
-                preview_el = await item.query_selector(
-                    ".msg-thread__last-message, .thread-preview, blockquote"
-                )
-                unread_el = await item.query_selector(".notification-badge, .badge, [aria-label*='unread']")
-                chats.append(
-                    {
-                        "chat_id": chat_id,
-                        "name": _short_text(name_el) or chat_id,
-                        "preview": _short_text(preview_el, max_len=200),
-                        "unread_count": _read_unread(unread_el),
-                    }
-                )
-                if len(chats) >= limit:
-                    break
-            except Exception:
-                continue
-        return chats
+    async def list_chats(self, limit: int = DEFAULT_CHAT_LIMIT) -> list[dict]:
+        limit = max(1, min(int(limit or DEFAULT_CHAT_LIMIT), 100))
+        async with self._operation_lock:
+            page = await self._require_page()
+            await self._ensure_messaging(page)
+            rows = await self._chat_rows(page)
+            chats: list[dict] = []
+            seen: set[str] = set()
+            for row in rows:
+                try:
+                    chat_id, name, preview, _href, unread = await _row_identity(row)
+                    if chat_id in seen:
+                        continue
+                    seen.add(chat_id)
+                    chats.append(
+                        {
+                            "chat_id": chat_id,
+                            "name": name,
+                            "preview": preview or None,
+                            "unread_count": unread,
+                        }
+                    )
+                    if len(chats) >= limit:
+                        break
+                except Exception as exc:
+                    logger.debug("Could not parse LinkedIn conversation row: %s", exc)
+            return chats
 
     async def open_chat(self, chat_id: str) -> dict:
-        page = await self._require_page()
-        for_href = f"/messaging/thread/{chat_id}"
-        link = await page.query_selector(f"a[href*='{for_href}']")
-        if link is None:
-            for a in await page.query_selector_all("a[href*='/messaging/thread/']"):
-                href = (await a.get_attribute("href")) or ""
-                if chat_id in href:
-                    link = a
+        """Open an exactly-enumerated row; never interpolate input into CSS."""
+        async with self._operation_lock:
+            page = await self._require_page()
+            await self._ensure_messaging(page)
+            selected = None
+            selected_name = None
+            for row in await self._chat_rows(page):
+                try:
+                    row_id, name, _preview, _href, _unread = await _row_identity(row)
+                except Exception:
+                    continue
+                if row_id == chat_id:
+                    selected = row
+                    selected_name = name
                     break
-        if link is None:
-            return {"ok": False, "error": f"Chat '{chat_id}' not found"}
 
-        try:
-            await link.click()
-        except Exception as exc:
-            return {"ok": False, "error": f"Could not click chat: {exc}"}
+            if selected is None:
+                return {
+                    "ok": False,
+                    "error": "That conversation is no longer visible. Refresh the list and try again.",
+                }
 
-        try:
-            await page.wait_for_selector(
-                "div.msg-conversation-card, div.msg-feed, [data-conversation-id]",
-                timeout=8000,
-            )
-        except Exception:
-            return {"ok": False, "error": "Chat opened but conversation panel is empty"}
+            try:
+                link = await _first(selected, CHAT_LINK_SELECTOR)
+                await (link or selected).click()
+                await page.wait_for_selector(THREAD_PANEL_SELECTOR, timeout=15000)
+            except Exception as exc:
+                logger.warning("Could not open LinkedIn conversation %s: %s", chat_id, exc)
+                return {
+                    "ok": False,
+                    "error": "LinkedIn did not open that conversation. Refresh the list and try again.",
+                }
 
-        # Best-effort title lookup.
-        name_el = await page.query_selector(
-            "header.msg-thread__topbar h2, h2.msg-thread__title, header h2"
-        )
-        name = _short_text(name_el) or chat_id
-        self.active_chat_id = chat_id
-        self.active_chat_name = name
-        return {"ok": True, "chat_id": chat_id, "name": name}
+            self.active_chat_id = chat_id
+            self.active_chat_name = selected_name or chat_id
+            return {
+                "ok": True,
+                "chat_id": chat_id,
+                "name": self.active_chat_name,
+            }
 
     async def close_active_chat(self) -> dict:
-        if self._page is None:
-            return {"ok": True, "active_chat_id": None}
-        # Navigate back to the messaging thread list — pressing the back
-        # arrow on the conversation header or simply going to /messaging/.
-        try:
-            await self._require_page().goto(LINKEDIN_MESSAGING_URL, wait_until="domcontentloaded")
-        except Exception:
-            pass
-        self.active_chat_id = None
-        self.active_chat_name = None
-        return {"ok": True, "active_chat_id": None}
+        async with self._operation_lock:
+            await self._require_page()
+            self.active_chat_id = None
+            self.active_chat_name = None
+            return {"ok": True, "chat_id": None, "name": None}
 
-    async def read_messages(self, limit: int = 50) -> list[dict]:
-        page = await self._require_page()
-        if not self.active_chat_id:
-            return []
-        try:
-            await page.wait_for_selector(
-                ".msg-s-message-list, ul.msg-s-message-list, div.msg-feed__message-list",
-                timeout=10000,
-            )
-        except Exception:
-            return []
-
-        bubbles = await page.query_selector_all(
-            ".msg-s-message-list li, .msg-feed__message-list li, li.msg-s-message-list__item"
-        )
-        out: list[dict] = []
-        for b in bubbles:
+    async def read_messages(self, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[dict]:
+        limit = max(1, min(int(limit or DEFAULT_MESSAGE_LIMIT), 200))
+        async with self._operation_lock:
+            page = await self._require_page()
+            if not self.active_chat_id:
+                return []
             try:
-                text_el = await b.query_selector(
-                    "p.msg-s-message-list__text, .msg-s-message-list__content p, .msg-s-message-listitem__text"
+                await page.wait_for_selector(THREAD_PANEL_SELECTOR, timeout=10000)
+            except Exception:
+                raise RuntimeError(
+                    "The selected LinkedIn conversation is no longer open. Open it again."
                 )
-                # LinkedIn marks own messages with the `[data-sending-status]`
-                # attribute or `.msg-s-message-listitem--me` class.
-                cls = (await b.get_attribute("class")) or ""
-                is_outgoing = "listitem--me" in cls or "outgoing" in cls
-                sender_el = await b.query_selector(
-                    ".msg-s-message-group__name, .msg-s-message-listitem__sender, h3.msg-s-message-group__name"
+
+            try:
+                rows = await page.query_selector_all(MESSAGE_ROW_SELECTOR)
+            except Exception:
+                rows = []
+
+            messages: list[dict] = []
+            seen: set[str] = set()
+            for index, row in enumerate(rows[-limit:]):
+                text = await _short_text(await _first(row, MESSAGE_TEXT_SELECTOR), 4000)
+                if not text:
+                    continue
+                sender = await _short_text(await _first(row, MESSAGE_SENDER_SELECTOR), 160)
+                timestamp = await _short_text(await _first(row, MESSAGE_TIME_SELECTOR), 80)
+                classes = (await _attribute(row, "class")).lower()
+                from_me = (await _attribute(row, "data-from-me")).lower()
+                is_outgoing = (
+                    "from-me" in classes
+                    or "--me" in classes
+                    or "outgoing" in classes
+                    or from_me in {"true", "1"}
+                    or sender.lower() in {"you", "me"}
                 )
-                out.append(
+                message_id = ""
+                for attr_name in ("data-event-urn", "data-message-id", "data-urn", "id"):
+                    message_id = await _attribute(row, attr_name)
+                    if message_id:
+                        break
+                if not message_id:
+                    digest = hashlib.sha256(
+                        f"{sender}\n{text}\n{timestamp}\n{index}".encode("utf-8")
+                    ).hexdigest()[:20]
+                    message_id = f"dom-{digest}"
+                if message_id in seen:
+                    continue
+                seen.add(message_id)
+                messages.append(
                     {
-                        "whatsapp_message_id": None,  # LinkedIn doesn't expose a stable id DOM-side
-                        "sender": _short_text(sender_el),
-                        "text": _short_text(text_el, max_len=2000),
+                        "message_id": message_id,
+                        "text": text,
+                        "sender": sender or None,
+                        "is_outgoing": is_outgoing,
+                        "timestamp": timestamp or None,
                         "type": "text",
-                        "is_outgoing": bool(is_outgoing),
-                        "timestamp": None,
                     }
                 )
-                if len(out) >= limit:
-                    break
-            except Exception:
-                continue
-        return out
+            return messages
 
     async def send_message(self, text: str) -> dict:
-        page = await self._require_page()
-        if not self.active_chat_id:
-            return {"ok": False, "error": "Open a chat first"}
-        text = (text or "").strip()
-        if not text:
-            return {"ok": False, "error": "Empty message"}
+        clean = (text or "").strip()
+        if not clean:
+            return {"ok": False, "error": "Message cannot be empty."}
 
-        async with self._send_lock:
-            now = time.monotonic()
-            wait = LIVE_SEND_DELAY_SECONDS - (now - self._last_send_ts)
-            if self._last_send_ts and wait > 0:
-                logger.info(
-                    "⏳ Throttling manual LinkedIn send by %.1fs (anti-blocking filter)",
-                    wait,
-                )
-                await asyncio.sleep(wait)
+        async with self._operation_lock:
+            page = await self._require_page()
+            if not self.active_chat_id:
+                return {"ok": False, "error": "Open a chat before sending."}
 
-            # LinkedIn's composer is a contenteditable div with role="textbox".
-            editor = await page.query_selector(
-                "div.msg-form__contenteditable[role='textbox'], div.msg-s-message-form__contenteditable, "
-                "div[role='textbox'][contenteditable='true']"
-            )
-            if editor is None:
-                return {"ok": False, "error": "Composer not visible"}
+            elapsed = time.monotonic() - self._last_send_monotonic
+            wait_for = max(0.0, LIVE_SEND_DELAY_SECONDS - elapsed)
+            if wait_for:
+                await asyncio.sleep(wait_for)
+
             try:
-                await editor.click()
-                await asyncio.sleep(0.2)
-                # Match the same paste-first technique used by the WhatsApp
-                # live browser — a plain `.fill()` would bypass the messaging
-                # UI's draft logic.
-                await page.evaluate(
-                    """t => {
-                        const dt = new DataTransfer();
-                        dt.setData('text/plain', t);
-                        const ev = new ClipboardEvent('paste', {
-                            clipboardData: dt, bubbles: true, cancelable: true,
-                        });
-                        const el = document.activeElement || document.querySelector(
-                            "div[role='textbox'][contenteditable='true']"
-                        );
-                        if (el) el.dispatchEvent(ev);
-                    }""",
-                    text,
-                )
-                await asyncio.sleep(0.4)
+                composer = page.locator(COMPOSER_SELECTOR).first
+                await composer.wait_for(state="visible", timeout=10000)
+                await composer.fill(clean)
+                button = page.locator(SEND_BUTTON_SELECTOR).first
+                try:
+                    await button.click(timeout=5000)
+                except Exception:
+                    await composer.press("Enter")
+                self._last_send_monotonic = time.monotonic()
+                return {"ok": True, "throttled_seconds": round(wait_for, 2)}
             except Exception as exc:
-                return {"ok": False, "error": f"Could not type into composer: {exc}"}
+                logger.warning("Could not send LinkedIn live message: %s", exc)
+                return {
+                    "ok": False,
+                    "error": "LinkedIn's message composer was not available. Reopen the chat and try again.",
+                }
 
-            # LinkedIn sends on Enter (or shift+Enter for newline). The
-            # easiest reliable send is the dedicated "Send" button — fall
-            # back to keyboard if not present.
-            try:
-                send_btn = await page.query_selector(
-                    "button.msg-form__send-button, button[type='submit'][data-control-name='send']"
-                )
-                if send_btn:
-                    await send_btn.click()
-                else:
-                    await editor.press("Enter")
-                await asyncio.sleep(0.6)
-            except Exception as exc:
-                return {"ok": False, "error": f"Send click failed: {exc}"}
-
-        self._last_send_ts = time.monotonic()
-        return {"ok": True}
-
-    # ── Helpers ───────────────────────────────────────────────────────────
-
-    def _set_status(self, status: str, message: str) -> None:
-        self.status = status
-        self.status_message = message
-        logger.info("📡 LinkedIn live status: %s — %s", status, message)
-
-    @staticmethod
-    def _snapshot_account(acct) -> "SimpleNamespace":
-        from types import SimpleNamespace
-        return SimpleNamespace(
-            id=acct.id,
-            profile_dir=acct.profile_dir,
-            user_agent=getattr(acct, "user_agent", None),
-            viewport_width=getattr(acct, "viewport_width", 1440),
-            viewport_height=getattr(acct, "viewport_height", 900),
-            timezone_id=getattr(acct, "timezone_id", "America/Los_Angeles"),
-            locale=getattr(acct, "locale", "en-US"),
-            hardware_concurrency=getattr(acct, "hardware_concurrency", 8),
-            device_memory=getattr(acct, "device_memory", 8),
-            proxy_host=getattr(acct, "proxy_host", None),
-            proxy_port=getattr(acct, "proxy_port", None),
-            proxy_username=getattr(acct, "proxy_username", None),
-            proxy_password_enc=getattr(acct, "proxy_password_enc", None),
-        )
+    @asynccontextmanager
+    async def profile_page(self):
+        """Yield the shared page exclusively to the profile scanner."""
+        async with self._operation_lock:
+            page = await self._require_page()
+            yield page
 
 
-def _read_unread(el) -> int:
-    if el is None:
-        return 0
-    try:
-        text = (_short_text(el) or "").strip()
-    except Exception:
-        return 0
-    digits = "".join(ch for ch in text if ch.isdigit())
-    return int(digits) if digits else 0
-
-
-# Process-wide singleton — the FastAPI app owns one LinkedIn live browser.
-linkedin_live_browser = LinkedInLiveBrowser()
+linkedin_live_browser = LinkedInLiveBrowserManager()

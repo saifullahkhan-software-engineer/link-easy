@@ -59,49 +59,83 @@ async def _safe_attr(locator, name: str) -> str:
 # ── Public entry point ───────────────────────────────────────────────────
 
 async def scrape_profile(profile_url: str) -> dict[str, Any]:
-    """Open ``profile_url`` in the live browser, scrape, return a dict.
-
-    The live browser must be running (the user has to be logged in); we
-    reuse its Chromium context so there's no fresh login flow. The page is
-    parked back at the messaging thread list when finished.
-    """
-    page = await linkedin_live_browser._require_page()
-    original_url = page.url
-
+    """Open ``profile_url`` exclusively, scrape it, and restore the prior URL."""
     parsed = urlparse(profile_url)
-    if "linkedin.com" not in (parsed.netloc or ""):
-        raise ValueError(f"profile_url is not a linkedin.com URL: {profile_url}")
+    host = (parsed.hostname or "").lower()
+    if host not in {"linkedin.com", "www.linkedin.com"}:
+        raise ValueError("profile_url must be a linkedin.com profile URL")
+    if not parsed.path.startswith("/in/"):
+        raise ValueError("profile_url must point to a LinkedIn /in/ profile")
 
-    try:
-        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
-        # LinkedIn renders the profile progressively; the headline name
-        # and "About" appear quickly but right-rail widgets take longer.
-        await asyncio.sleep(2.0)
-    except Exception as exc:
-        raise RuntimeError(f"Could not navigate to profile URL: {exc}") from exc
-
-    try:
-        data: dict[str, Any] = {
-            "basics":    await _scrape_basics(page, profile_url),
-            "about":     await _scrape_about(page),
-            "experience": await _scrape_experience(page),
-            "education": await _scrape_education(page),
-            "skills":    await _scrape_skills(page),
-            "scraped_at": time.time(),
-            "source_url": profile_url,
-        }
-    finally:
-        # Park the page back on the messaging thread list so the live
-        # chat picks up where the user left it.
+    # Live chat polling and profile navigation use the same Playwright page.
+    # Holding this manager lock prevents a list/message poll from navigating or
+    # reading the DOM halfway through the profile scan.
+    async with linkedin_live_browser.profile_page() as page:
+        original_url = page.url
         try:
-            await page.goto("https://www.linkedin.com/messaging/", wait_until="domcontentloaded", timeout=15000)
-        except Exception:
+            await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
+            current_url = (page.url or "").lower()
+            if "/login" in current_url or "/checkpoint" in current_url:
+                raise RuntimeError(
+                    "LinkedIn session expired or requires verification. Reconnect the account and try again."
+                )
             try:
-                await page.goto(original_url or "https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+                await page.wait_for_selector(
+                    "main h1.text-heading-xlarge, main h1[class*='top-card'], main h1",
+                    timeout=15000,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "LinkedIn did not render the profile. Check that the URL is accessible to the connected account."
+                ) from exc
+
+            # Experience and education are lazy-rendered below the fold.
+            for y in (700, 1500, 2400):
+                try:
+                    await page.evaluate("y => window.scrollTo({top: y, behavior: 'instant'})", y)
+                except Exception:
+                    break
+                await asyncio.sleep(0.5)
+            try:
+                await page.evaluate("window.scrollTo({top: 0, behavior: 'instant'})")
             except Exception:
                 pass
+            await asyncio.sleep(0.5)
 
-    return data
+            basics = await _scrape_basics(page, profile_url)
+            if not basics.get("name"):
+                raise RuntimeError(
+                    "The profile loaded but LinkedIn did not expose its name. The session may need verification."
+                )
+            experience = await _scrape_experience(page)
+            if experience:
+                first_role = experience[0]
+                basics["current_position"] = " at ".join(
+                    part
+                    for part in (first_role.get("title"), first_role.get("company"))
+                    if part
+                )
+            data: dict[str, Any] = {
+                "basics": basics,
+                "about": await _scrape_about(page),
+                "experience": experience,
+                "education": await _scrape_education(page),
+                "skills": await _scrape_skills(page),
+                "scraped_at": time.time(),
+                "source_url": profile_url,
+            }
+        finally:
+            # Restore the exact thread URL, not merely /messaging/. This keeps
+            # a selected live conversation open after a profile preview.
+            restore_url = original_url or "https://www.linkedin.com/messaging/"
+            try:
+                await page.goto(
+                    restore_url, wait_until="domcontentloaded", timeout=30000
+                )
+            except Exception as exc:
+                logger.warning("Could not restore LinkedIn page after profile scan: %s", exc)
+
+        return data
 
 
 # ── Section scrapers (best-effort) ─────────────────────────────────────────
@@ -109,17 +143,22 @@ async def scrape_profile(profile_url: str) -> dict[str, Any]:
 async def _scrape_basics(page, requested_url: str) -> dict[str, Any]:
     basics: dict[str, Any] = {"name": "", "headline": "", "location": "", "current_position": ""}
     # Name — top-of-card h1.
-    name_el = await page.query_selector("h1.text-heading-xlarge, h1[class*='top-card']")
+    name_el = await page.query_selector(
+        "main h1.text-heading-xlarge, main h1[class*='top-card'], main h1"
+    )
     if name_el is not None:
         basics["name"] = (await _safe_text(name_el)).strip()
     # Headline.
-    headline_el = await page.query_selector(".text-body-medium.break-words, [data-generated-suggestion-target='headline']")
+    headline_el = await page.query_selector(
+        "main .text-body-medium.break-words, "
+        "main [data-generated-suggestion-target='headline']"
+    )
     if headline_el is not None:
         basics["headline"] = (await _safe_text(headline_el)).strip()
     # Location.
     loc_el = await page.query_selector(
-        ".pv-top-card .text-body-small.inline.t-black--light.break-words, "
-        "span.text-body-small.inline.t-black--light.break-words"
+        "main .pv-top-card .text-body-small.inline.t-black--light.break-words, "
+        "main span.text-body-small.inline.t-black--light.break-words"
     )
     if loc_el is not None:
         basics["location"] = (await _safe_text(loc_el)).strip()
@@ -130,16 +169,19 @@ async def _scrape_basics(page, requested_url: str) -> dict[str, Any]:
 
 async def _scrape_about(page) -> str:
     about_el = await page.query_selector(
-        "section.summary .display-flex, "
-        "section[data-section='summary'] .pv-shared-text-with-see-more span[aria-hidden='true'], "
-        "div.inline-show-more-text span.visually-hidden"
+        "main section:has(#about) .inline-show-more-text span[aria-hidden='true'], "
+        "main section:has(#about) .inline-show-more-text, "
+        "main section.summary .display-flex, "
+        "main section[data-section='summary'] "
+        ".pv-shared-text-with-see-more span[aria-hidden='true']"
     )
     if about_el is None:
         # Fallback: the about summary section's first paragraph.
         about_el = await page.query_selector(
-            "section.summary p, "
-            "section[data-section='summary'] p, "
-            ".pv-about__summary-text"
+            "main section:has(#about) p, "
+            "main section.summary p, "
+            "main section[data-section='summary'] p, "
+            "main .pv-about__summary-text"
         )
     if about_el is None:
         return ""
@@ -150,27 +192,37 @@ async def _scrape_about(page) -> str:
 async def _scrape_experience(page) -> list[dict]:
     """Each row is ``[data-section='experience'] li`` or ``section.experience-section li``."""
     rows = await page.query_selector_all(
-        "section.experience-section ul > li, "
-        "section[data-section='experience'] ul > li, "
-        "div[data-view-name='profile-component-entity']"
+        "main section:has(#experience) "
+        "div[data-view-name='profile-component-entity'], "
+        "main section:has(#experience) ul > li, "
+        "main section.experience-section ul > li, "
+        "main section[data-section='experience'] ul > li"
     )
     out: list[dict] = []
     for row in rows:
         try:
             title_el    = await row.query_selector("h3, .t-bold span, .t-bold")
             company_el  = await row.query_selector(
-                "p.t-14.t-normal span[aria-hidden='true'], .pv-entity__secondary-title, .t-14.t-normal.t-black--light"
+                "p.t-14.t-normal:not(.t-black--light) span[aria-hidden='true'], "
+                ".pv-entity__secondary-title"
             )
-            dates_el    = await row.query_selector("h4 span[aria-hidden='true'], .pv-entity__date-range span, [class*='date-range']")
-            location_el = await row.query_selector(".pv-entity__location span, .t-12.t-black--light.t-normal")
-            out.append(
-                {
-                    "title":    (await _safe_text(title_el))[:160].strip(),
-                    "company":  (await _safe_text(company_el))[:160].strip(),
-                    "dates":    (await _safe_text(dates_el))[:120].strip(),
-                    "location": (await _safe_text(location_el))[:120].strip(),
-                }
+            dates_el    = await row.query_selector(
+                "h4 span[aria-hidden='true'], .pv-entity__date-range span, "
+                "[class*='date-range'], "
+                ".t-14.t-normal.t-black--light span[aria-hidden='true']"
             )
+            location_el = await row.query_selector(
+                ".pv-entity__location span, .t-12.t-black--light.t-normal"
+            )
+            item = {
+                "title":    (await _safe_text(title_el))[:160].strip(),
+                "company":  (await _safe_text(company_el))[:160].strip(),
+                "dates":    (await _safe_text(dates_el))[:120].strip(),
+                "location": (await _safe_text(location_el))[:120].strip(),
+            }
+            if not any(item.values()):
+                continue
+            out.append(item)
             if len(out) >= 6:
                 break
         except Exception:
@@ -180,8 +232,11 @@ async def _scrape_experience(page) -> list[dict]:
 
 async def _scrape_education(page) -> list[dict]:
     rows = await page.query_selector_all(
-        "section.education-section ul > li, "
-        "section[data-section='education'] ul > li"
+        "main section:has(#education) "
+        "div[data-view-name='profile-component-entity'], "
+        "main section:has(#education) ul > li, "
+        "main section.education-section ul > li, "
+        "main section[data-section='education'] ul > li"
     )
     out: list[dict] = []
     for row in rows:
@@ -194,13 +249,14 @@ async def _scrape_education(page) -> list[dict]:
             dates_el  = await row.query_selector(
                 ".pv-entity__dates span[aria-hidden='true'], h4 span[aria-hidden='true'], [class*='date-range']"
             )
-            out.append(
-                {
-                    "school": (await _safe_text(school_el))[:140].strip(),
-                    "degree": (await _safe_text(degree_el))[:200].strip(),
-                    "dates": (await _safe_text(dates_el))[:120].strip(),
-                }
-            )
+            item = {
+                "school": (await _safe_text(school_el))[:140].strip(),
+                "degree": (await _safe_text(degree_el))[:200].strip(),
+                "dates": (await _safe_text(dates_el))[:120].strip(),
+            }
+            if not any(item.values()):
+                continue
+            out.append(item)
             if len(out) >= 6:
                 break
         except Exception:
@@ -211,9 +267,13 @@ async def _scrape_education(page) -> list[dict]:
 async def _scrape_skills(page, max_items: int = 8) -> list[str]:
     skills: list[str] = []
     els = await page.query_selector_all(
-        "section.skills-section .pv-skill-category-entity__name span[aria-hidden='true'], "
-        "section[data-section='skills'] li span[class*='skill-name'], "
-        ".skills-section-list span.t-bold"
+        "main section:has(#skills) "
+        "div[data-view-name='profile-component-entity'] .t-bold span[aria-hidden='true'], "
+        "main section:has(#skills) li .t-bold span[aria-hidden='true'], "
+        "main section.skills-section "
+        ".pv-skill-category-entity__name span[aria-hidden='true'], "
+        "main section[data-section='skills'] li span[class*='skill-name'], "
+        "main .skills-section-list span.t-bold"
     )
     for el in els:
         try:

@@ -1,28 +1,12 @@
-"""
-LinkedIn profile-data scanner & downloadable PDF.
-
-FILE: api/v1/linkedin_profile.py
-
-Single POST endpoint that:
-  1. Requires the LinkedIn live browser is running (we need the user's
-     logged-in session cookies to see full profile data).
-  2. Scrapes the profile dict via ``services.linkedin_profile_scraper``.
-  3. Renders it as a styled PDF via ``services.profile_pdf``.
-  4. Returns the PDF as a ``FileResponse`` for direct download.
-
-Endpoint
---------
-POST   /api/v1/linkedin/profile/scan
-       body: { "profile_url": "https://www.linkedin.com/in/handle" }
-       -> application/pdf  (attachment)
-"""
+"""LinkedIn profile scan endpoint with a preview-first JSON contract."""
 from __future__ import annotations
 
-import time
+import base64
+import re
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, HttpUrl
 
 from api.dependencies import get_current_user
 from core.logging_config import get_logger
@@ -32,70 +16,79 @@ from services.linkedin_profile_scraper import scrape_profile
 from services.profile_pdf import render_profile_pdf
 
 logger = get_logger(__name__)
-
 router = APIRouter(prefix="/api/v1/linkedin/profile", tags=["linkedin-profile"])
 
 
 class ProfileScanRequest(BaseModel):
-    profile_url: str = Field(
-        ...,
-        min_length=8,
-        max_length=400,
-        description="Full LinkedIn profile URL (e.g. https://www.linkedin.com/in/username).",
-    )
+    profile_url: HttpUrl
 
 
-@router.post("/scan")
-async def scan_profile(
+class ProfileScanResponse(BaseModel):
+    """Structured preview plus the exact PDF generated from that preview."""
+
+    report: dict[str, Any]
+    filename: str
+    pdf_base64: str
+
+
+def _pdf_filename(report: dict[str, Any]) -> str:
+    name = str((report.get("basics") or {}).get("name") or "linkedin-profile")
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", name).strip("-.").lower()
+    return f"{slug or 'linkedin-profile'}-scan.pdf"
+
+
+@router.post("/scan", response_model=ProfileScanResponse)
+async def scan_profile_pdf(
     payload: ProfileScanRequest,
-    _user: User = Depends(get_current_user),
-) -> Response:
+    current_user: User = Depends(get_current_user),
+) -> ProfileScanResponse:
+    """Scrape once, return a visible report and its downloadable PDF bytes.
+
+    The endpoint starts a temporary LinkedIn browser when live chat is not
+    already running. If live chat is active, the manager's operation lock
+    pauses polling while the profile is visited and restores the exact thread
+    URL afterward.
+    """
+    started_here = False
     if linkedin_live_browser.status != "running":
+        start_result = await linkedin_live_browser.start(current_user.email)
+        if start_result.get("status") != "running":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=start_result.get("message")
+                or "Could not start the connected LinkedIn account.",
+            )
+        started_here = True
+    elif not linkedin_live_browser.is_owned_by(current_user.email):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "LinkedIn live chat must be running to scan profiles (the "
-                "scraper uses the live browser's logged-in session). "
-                "Call POST /api/v1/linkedin/live/start first."
-            ),
+            detail="A different account is currently using the LinkedIn browser.",
         )
 
     try:
-        data = await scrape_profile(payload.profile_url)
+        report = await scrape_profile(str(payload.profile_url))
+        pdf_bytes = render_profile_pdf(report)
+        if not pdf_bytes.startswith(b"%PDF-"):
+            raise RuntimeError("PDF generation returned an invalid document")
+        return ProfileScanResponse(
+            report=report,
+            filename=_pdf_filename(report),
+            pdf_base64=base64.b64encode(pdf_bytes).decode("ascii"),
+        )
+    except HTTPException:
+        raise
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover — Playwright edge case
-        logger.exception("Profile scan failed")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        logger.exception("LinkedIn profile scan failed")
+        detail = str(exc).strip() or exc.__class__.__name__
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Scan failed: {exc}",
+            detail=f"Profile scan failed: {detail}",
         ) from exc
-
-    try:
-        pdf_bytes = render_profile_pdf(data)
-    except Exception as exc:  # pragma: no cover — reportlab edge case
-        logger.exception("PDF render failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"PDF render failed: {exc}",
-        ) from exc
-
-    # Filename derived from profile handle when possible.
-    basename = "profile"
-    try:
-        last = payload.profile_url.rstrip("/").split("/")[-1]
-        if last and "?" not in last and len(last) <= 64:
-            basename = last
-    except Exception:
-        pass
-    filename = f"{basename}-{int(time.time() * 1000)}.pdf"
-
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-            "Content-Length": str(len(pdf_bytes)),
-        },
-    )
+    finally:
+        if started_here:
+            await linkedin_live_browser.stop()

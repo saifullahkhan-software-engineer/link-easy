@@ -94,10 +94,12 @@ const json = (res, code, body) => {
   res.end(JSON.stringify(body));
 };
 
+let linkedinMessageRequestCount = 0;
+
 const CASES = [
   {
     path: '/',
-    mustContain: ['warm conversations', 'Automated connection requests', 'CSV lead import'],
+    mustContain: ['Connect your tools.', 'Automate your day.', 'Connect your social tools', 'Build campaigns in minutes'],
   },
   { path: '/login', mustContain: ['Log in', 'Forgot password?'] },
   { path: '/signup', mustContain: ['Create your account', 'At least 8 characters'] },
@@ -138,6 +140,135 @@ const CASES = [
       'GET /api/v1/whatsapp/filters/jobs': (res) => json(res, 200, []),
     },
     mustContain: ['WhatsApp Filters', 'New Filter', 'No WhatsApp filters yet', 'Create Filter'],
+  },
+  {
+    name: 'whatsapp live chat — running session shows the top ten conversation list',
+    path: '/app/whatsapp-live',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/whatsapp/live/status': (res) => json(res, 200, {
+        status: 'running', message: 'Live chat is open. The scanner is paused.',
+        error: null, active_chat_id: null, active_chat_name: null,
+      }),
+      'GET /api/v1/whatsapp/live/chats': (res, req) => {
+        const url = new URL(req.url, 'http://x');
+        if (url.searchParams.get('limit') !== '10') {
+          return json(res, 400, { detail: 'expected the top-ten chat limit' });
+        }
+        return json(res, 200, {
+          chats: [
+            { chat_id: 'chat-1', name: 'Customer Support', preview: 'Can we talk today?', unread_count: 2 },
+            { chat_id: 'chat-2', name: 'Ava Patel', preview: 'Thanks!', unread_count: 0 },
+          ],
+          count: 2,
+          query: null,
+        });
+      },
+    },
+    mustContain: ['WhatsApp Live Chat', 'Browsing chats', '10 most recent chats', 'Customer Support', 'Ava Patel', 'Pick a chat to start'],
+  },
+  {
+    name: 'linkedin live chat — running session renders stable conversation rows',
+    path: '/app/linkedin-live',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/linkedin/live/status': (res) => json(res, 200, {
+        status: 'running', message: 'LinkedIn live chat is running.',
+        error: null, active_chat_id: null, active_chat_name: null,
+      }),
+      'GET /api/v1/linkedin/live/chats': (res) => json(res, 200, {
+        chats: [
+          { chat_id: 'thread-1', name: 'Sam Founder', preview: 'Thanks for reaching out', unread_count: 1 },
+          { chat_id: 'thread-2', name: 'Amina Recruiter', preview: 'Would Tuesday work?', unread_count: 0 },
+        ],
+        count: 2,
+      }),
+      'POST /api/v1/linkedin/live/chats/open': (res, req) => {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          const { chat_id: chatId } = JSON.parse(body);
+          const names = { 'thread-1': 'Sam Founder', 'thread-2': 'Amina Recruiter' };
+          if (!names[chatId]) return json(res, 400, { detail: 'unexpected chat id' });
+          return json(res, 200, {
+            ok: true, chat_id: chatId, name: names[chatId], error: null,
+          });
+        });
+      },
+      'POST /api/v1/linkedin/live/chats/close': (res) => json(res, 200, {
+        ok: true, chat_id: null, name: null, error: null,
+      }),
+      'GET /api/v1/linkedin/live/messages': (res) => {
+        linkedinMessageRequestCount += 1;
+        if (linkedinMessageRequestCount === 1) {
+          // Deliberately resolve Sam's request after Amina's. The first result
+          // must not overwrite the newly selected conversation.
+          setTimeout(() => json(res, 200, {
+            chat_id: 'thread-1',
+            messages: [{ message_id: 'stale-1', text: 'STALE SAM MESSAGE', is_outgoing: false, timestamp: '3:40 PM' }],
+            count: 1,
+          }), 450);
+          return;
+        }
+        json(res, 200, {
+          chat_id: 'thread-2',
+          messages: [{ message_id: 'fresh-1', text: 'Fresh message from Amina', is_outgoing: false, timestamp: '3:41 PM' }],
+          count: 1,
+        });
+      },
+    },
+    interact: async (window) => {
+      linkedinMessageRequestCount = 0;
+      const waitFor = async (selector) => {
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          const element = window.document.querySelector(selector);
+          if (element) return element;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error(`Timed out waiting for ${selector}`);
+      };
+      (await waitFor('[data-testid="linkedin-chat-row-thread-1"]')).click();
+      const back = await waitFor('[data-testid="linkedin-chat-back"]');
+      for (let attempt = 0; attempt < 50 && linkedinMessageRequestCount === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      back.click();
+      (await waitFor('[data-testid="linkedin-chat-row-thread-2"]')).click();
+    },
+    mustContain: ['LinkedIn Live Chat', 'Amina Recruiter', 'Fresh message from Amina'],
+    mustNotContain: ['STALE SAM MESSAGE'],
+  },
+  {
+    name: 'linkedin profile scan — renders report and PDF before download',
+    path: '/app/linkedin-profile',
+    storage: AUTH_TOKENS,
+    api: {
+      'POST /api/v1/linkedin/profile/scan': (res) => json(res, 200, {
+        report: {
+          basics: { name: 'Ada Lovelace', headline: 'Computing pioneer', location: 'London' },
+          about: 'Built foundational ideas for programmable machines.',
+          experience: [{ title: 'Mathematician', company: 'Analytical Engine', dates: '1842–1852' }],
+          education: [{ school: 'Private study', degree: 'Mathematics', dates: '1830–1835' }],
+          skills: ['Mathematics', 'Algorithms'],
+          source_url: 'https://www.linkedin.com/in/ada-lovelace/',
+        },
+        filename: 'ada-lovelace-scan.pdf',
+        pdf_base64: Buffer.from('%PDF-1.4 smoke preview').toString('base64'),
+      }),
+    },
+    interact: async (window) => {
+      const input = window.document.querySelector('[data-testid="linkedin-profile-url"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'https://www.linkedin.com/in/ada-lovelace/');
+      input.dispatchEvent(new window.Event('input', { bubbles: true }));
+      input.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      window.document.querySelector('[data-testid="linkedin-profile-scan"]').click();
+    },
+    mustContain: [
+      'Scan preview', 'Ada Lovelace', 'Computing pioneer',
+      'Built foundational ideas', 'Generated PDF preview', 'Download PDF',
+    ],
   },
   {
     name: 'whatsapp filter detail — read-only summary, checkpoints, stats, and messages',
@@ -215,6 +346,7 @@ const CASES = [
       'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT),
       'GET /api/v1/campaigns': (res) => json(res, 200, [CAMPAIGN]),
       'GET /api/v1/campaigns/camp-1/steps': (res) => json(res, 200, STEPS),
+      'GET /api/v1/campaigns/camp-1/jobs': (res) => json(res, 200, []),
       'GET /api/v1/leads': (res) => json(res, 200, LEADS),
     },
     mustContain: ['Q3 Founders', 'Jane Doe', 'replied', 'Lead Status', 'Start campaign', 'Next step', 'Scheduled time', 'Send Message', 'Due now'],
@@ -397,9 +529,15 @@ const CASES = [
 ];
 
 let failures = 0;
+const nativeTimers = {
+  setTimeout: globalThis.setTimeout,
+  clearTimeout: globalThis.clearTimeout,
+  setInterval: globalThis.setInterval,
+  clearInterval: globalThis.clearInterval,
+};
 
 for (const testCase of CASES) {
-  const { mustContain, mustNotContain = [], storage = {}, api = {} } = testCase;
+  const { mustContain, mustNotContain = [], storage = {}, api = {}, interact } = testCase;
   const label = testCase.name || testCase.path;
 
   // Per-case same-origin stub API so axios('/api/v1/...') resolves to it.
@@ -423,6 +561,9 @@ for (const testCase of CASES) {
   });
 
   const { window } = dom;
+  window.URL.createObjectURL ||= () => 'blob:linkedin-profile-preview';
+  window.URL.revokeObjectURL ||= () => {};
+  window.HTMLElement.prototype.scrollIntoView ||= () => {};
   window.matchMedia = (query) => ({
     matches: true, // reduced-motion → landing uses static fallback, no WebGL needed
     media: query,
@@ -444,7 +585,7 @@ for (const testCase of CASES) {
   const globals = ['window', 'document', 'localStorage', 'sessionStorage', 'navigator', 'HTMLElement', 'Element', 'Node', 'customElements', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame', 'MutationObserver', 'self',
     // Browsers make axios use its XHR adapter — mirror that here so relative
     // /api/v1 URLs resolve against the jsdom origin (the stub server).
-    'XMLHttpRequest', 'FormData', 'Blob', 'FileReader', 'EventSource', 'matchMedia'];
+    'XMLHttpRequest', 'FormData', 'Blob', 'FileReader', 'EventSource', 'matchMedia', 'URL'];
   const saved = {};
   const setGlobal = (key, value) =>
     Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });
@@ -452,6 +593,34 @@ for (const testCase of CASES) {
     saved[key] = globalThis[key];
     if (window[key] !== undefined) setGlobal(key, window[key]);
   }
+
+  // Production bundles run as Node modules here, so their bare timer calls do
+  // not belong to jsdom automatically. Track them per case to stop one live
+  // chat poll leaking requests into the next case's stub API.
+  const timeoutHandles = new Set();
+  const intervalHandles = new Set();
+  setGlobal('setTimeout', (callback, delay, ...args) => {
+    let handle;
+    handle = nativeTimers.setTimeout(() => {
+      timeoutHandles.delete(handle);
+      callback(...args);
+    }, delay);
+    timeoutHandles.add(handle);
+    return handle;
+  });
+  setGlobal('clearTimeout', (handle) => {
+    timeoutHandles.delete(handle);
+    nativeTimers.clearTimeout(handle);
+  });
+  setGlobal('setInterval', (callback, delay, ...args) => {
+    const handle = nativeTimers.setInterval(callback, delay, ...args);
+    intervalHandles.add(handle);
+    return handle;
+  });
+  setGlobal('clearInterval', (handle) => {
+    intervalHandles.delete(handle);
+    nativeTimers.clearInterval(handle);
+  });
 
   const errors = [];
   window.addEventListener('error', (e) => errors.push(e.error?.message || e.message));
@@ -463,7 +632,11 @@ for (const testCase of CASES) {
 
   try {
     await import(`./dist/assets/${bundleName}?case=${encodeURIComponent(label)}`);
-    await new Promise((r) => setTimeout(r, 900)); // let effects/axios/router settle
+    await new Promise((r) => setTimeout(r, interact ? 250 : 900));
+    if (interact) {
+      await interact(window);
+      await new Promise((r) => setTimeout(r, 900));
+    }
 
     const html = window.document.getElementById('root')?.innerHTML || '';
     const missing = mustContain.filter((text) => !html.includes(text));
@@ -482,6 +655,12 @@ for (const testCase of CASES) {
     console.log(`✗ ${label} threw: ${err.message}`);
   } finally {
     console.error = origConsoleError;
+    for (const handle of timeoutHandles) nativeTimers.clearTimeout(handle);
+    for (const handle of intervalHandles) nativeTimers.clearInterval(handle);
+    setGlobal('setTimeout', nativeTimers.setTimeout);
+    setGlobal('clearTimeout', nativeTimers.clearTimeout);
+    setGlobal('setInterval', nativeTimers.setInterval);
+    setGlobal('clearInterval', nativeTimers.clearInterval);
     for (const key of globals) {
       if (saved[key] === undefined) delete globalThis[key];
       else setGlobal(key, saved[key]);

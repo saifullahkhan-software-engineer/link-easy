@@ -74,9 +74,9 @@ class LiveMessageItem(BaseModel):
     type: str = "text"
     # True when the chat owner sent it, False when received.
     is_outgoing: bool = False
-    # Best-effort timestamp — WhatsApp exposes HH:MM inline, so for live
-    # messages we use the page-render ordering rather than a calendar time.
-    timestamp: Optional[int] = None
+    # Best-effort display timestamp — WhatsApp exposes text such as HH:MM or
+    # "3:42 PM", not an epoch integer.
+    timestamp: Optional[str] = None
 
 
 class LiveMessagesResponse(BaseModel):

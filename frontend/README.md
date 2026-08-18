@@ -7,7 +7,6 @@ automation backend in this repository (base path `/api/v1`).
 
 - **React 18 + Vite**, React Router v6
 - **Tailwind CSS** (dark-first zinc/slate palette, teal accent)
-- **react-three-fiber + three** — 3D network hero on the landing page only
 - **axios** — with a single-flight JWT refresh interceptor
 - **react-hot-toast** — inline feedback
 - **Papaparse** — client-side CSV preview before upload
@@ -39,7 +38,7 @@ For production, serve `dist/` behind a reverse proxy that also forwards
 
 | Route | What it does |
 | --- | --- |
-| `/` | Landing page with 3D node-network hero (reduced-motion fallback) |
+| `/` | Multi-channel automation landing page with connected-tool and campaign workflow previews |
 | `/login` `/signup` `/verify-email` `/forgot-password` `/reset-password` | Full JWT auth lifecycle; live password-rule checklist mirrors the backend |
 | `/app/account` | Connect LinkedIn (Playwright login), 2FA code modal, session refresh, edit, disconnect |
 | `/app/campaigns` | Two-panel campaign + leads workspace: campaign form collapses to a summary card; lead tabs (manual / CSV with Papaparse preview + per-row error list); leads table; start campaign |

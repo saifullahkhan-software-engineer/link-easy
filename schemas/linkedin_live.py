@@ -40,12 +40,15 @@ class LiveOpenChatResponse(BaseModel):
 
 
 class LiveMessageItem(BaseModel):
-    whatsapp_message_id: Optional[str] = None  # LinkedIn doesn't expose a stable id
+    # LinkedIn exposes a stable event URN in some builds; the browser manager
+    # provides a deterministic DOM fallback when it does not.
+    message_id: Optional[str] = None
     sender: Optional[str] = None
     text: str = ""
     type: str = "text"
     is_outgoing: bool = False
-    timestamp: Optional[int] = None
+    # LinkedIn renders localized labels such as "10:42 AM" or "Yesterday".
+    timestamp: Optional[str] = None
 
 
 class LiveMessagesResponse(BaseModel):

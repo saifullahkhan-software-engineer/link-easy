@@ -43,6 +43,7 @@ export default function LinkedInLiveChatPage() {
   const [filterDebounced, setFilterDebounced] = useState('');
   const [listLoading, setListLoading] = useState(false);
   const [activeChatId, setActiveChatId] = useState(null);
+  const [openingChatId, setOpeningChatId] = useState(null);
 
   const [messages, setMessages] = useState([]);
   const [msgsLoading, setMsgsLoading] = useState(false);
@@ -54,15 +55,21 @@ export default function LinkedInLiveChatPage() {
   const lastSendTsRef = useRef(0);
   const freezeStatusRef = useRef(false);
   const filterTimerRef = useRef(null);
+  const activeChatRef = useRef(null);
+  const messagesRequestRef = useRef(0);
+  const statusRequestRef = useRef(0);
 
   const isRunning = status?.status === 'running';
   const statusInfo = useMemo(() => describeStatus(status), [status]);
 
   const refreshStatus = useCallback(async () => {
     if (freezeStatusRef.current) return;
+    const requestId = ++statusRequestRef.current;
     try {
       const { data } = await linkedinLiveApi.getStatus();
-      setStatus(data);
+      if (requestId === statusRequestRef.current && !freezeStatusRef.current) {
+        setStatus(data);
+      }
     } catch { /* keep last known status */ }
   }, []);
 
@@ -81,19 +88,33 @@ export default function LinkedInLiveChatPage() {
 
   const refreshMessages = useCallback(async () => {
     if (!activeChatId) return;
+    const requestedChatId = activeChatId;
+    const requestId = ++messagesRequestRef.current;
     try {
       setMsgsLoading(true);
       const { data } = await linkedinLiveApi.getMessages({ limit: 50 });
-      setMessages((data.messages || []).slice().reverse());
+      // A response from the previously selected chat must never overwrite the
+      // newly opened conversation.
+      if (
+        requestId === messagesRequestRef.current &&
+        activeChatRef.current === requestedChatId
+      ) {
+        setMessages(data.messages || []);
+      }
     } catch (err) {
+      if (requestId !== messagesRequestRef.current) return;
       const detail = getErrorMessage(err, '');
       if (!detail.includes('No chat')) {
-        toast.error(`Could not read messages: ${detail || 'unknown error'}`, {
-          id: 'linkedin-live-msgs',
-        });
+        const message = detail || 'The server did not return an error description.';
+        toast.error(
+          message.startsWith('Could not read LinkedIn messages:')
+            ? message
+            : `Could not read LinkedIn messages: ${message}`,
+          { id: 'linkedin-live-msgs' },
+        );
       }
     } finally {
-      setMsgsLoading(false);
+      if (requestId === messagesRequestRef.current) setMsgsLoading(false);
     }
   }, [activeChatId]);
 
@@ -107,17 +128,34 @@ export default function LinkedInLiveChatPage() {
   }, [filter]);
 
   useEffect(() => {
-    if (!isRunning) return;
+    if (!isRunning) {
+      setChats([]);
+      return undefined;
+    }
+    // Keep list polling from competing with message snapshots on the shared
+    // LinkedIn page while a conversation is selected.
+    if (activeChatId) return undefined;
     refreshChats(filterDebounced, { silent: false });
     const id = setInterval(() => refreshChats(filterDebounced), CHATS_POLL_MS);
     return () => clearInterval(id);
-  }, [isRunning, filterDebounced, refreshChats]);
+  }, [isRunning, activeChatId, filterDebounced, refreshChats]);
 
   useEffect(() => {
     refreshStatus();
     const id = setInterval(refreshStatus, STATUS_POLL_MS);
     return () => clearInterval(id);
   }, [refreshStatus]);
+
+  useEffect(() => {
+    const serverChatId = isRunning ? status?.active_chat_id || null : null;
+    if (activeChatRef.current === serverChatId) return;
+
+    messagesRequestRef.current += 1;
+    activeChatRef.current = serverChatId;
+    setActiveChatId(serverChatId);
+    setMessages([]);
+    if (!serverChatId) setMsgsLoading(false);
+  }, [isRunning, status?.active_chat_id]);
 
   useEffect(() => {
     if (!isRunning || !activeChatId) return undefined;
@@ -139,18 +177,23 @@ export default function LinkedInLiveChatPage() {
   }, [sending, sendCountdown]);
 
   const handleStart = async () => {
+    if (isStarting) return;
     setIsStarting(true);
     freezeStatusRef.current = true;
+    statusRequestRef.current += 1;
     try {
-      await linkedinLiveApi.start();
-      toast.success('Live chat started — the scanner paused for the session.');
-      await refreshStatus();
+      const { data } = await linkedinLiveApi.start();
+      setStatus(data);
+      const serverChatId = data.active_chat_id || null;
+      activeChatRef.current = serverChatId;
+      setActiveChatId(serverChatId);
+      toast.success('LinkedIn live chat started.');
       await refreshChats('', { silent: false });
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to start live chat.'));
     } finally {
+      freezeStatusRef.current = false;
       setIsStarting(false);
-      setTimeout(() => { freezeStatusRef.current = false; }, 1500);
     }
   };
 
@@ -158,40 +201,69 @@ export default function LinkedInLiveChatPage() {
     if (isStopping) return;
     setIsStopping(true);
     freezeStatusRef.current = true;
+    statusRequestRef.current += 1;
+    messagesRequestRef.current += 1;
     try {
-      await linkedinLiveApi.stop();
+      const { data } = await linkedinLiveApi.stop();
+      activeChatRef.current = null;
       setActiveChatId(null);
-      setStatus((prev) => (prev ? { ...prev, status: 'idle' } : prev));
-      toast.success('Live chat closed — the scanner resumed.');
+      setStatus(data);
+      toast.success('LinkedIn live chat closed.');
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to stop live chat.'));
     } finally {
+      freezeStatusRef.current = false;
       setIsStopping(false);
-      setTimeout(() => { freezeStatusRef.current = false; }, 1500);
-      refreshStatus();
     }
   };
 
   const handlePickChat = async (chatId) => {
+    if (openingChatId) return;
+    setOpeningChatId(chatId);
+    freezeStatusRef.current = true;
+    statusRequestRef.current += 1;
+    messagesRequestRef.current += 1;
     try {
       const { data } = await linkedinLiveApi.openChat(chatId);
       if (!data.ok) {
         toast.error(data.error || 'Could not open that conversation.');
         return;
       }
+      activeChatRef.current = chatId;
       setActiveChatId(chatId);
+      setStatus((previous) => previous ? {
+        ...previous,
+        active_chat_id: chatId,
+        active_chat_name: data.name || previous.active_chat_name,
+      } : previous);
       setMessages([]);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to open chat.'));
+    } finally {
+      freezeStatusRef.current = false;
+      setOpeningChatId(null);
     }
   };
 
   const handleBackToList = async () => {
+    freezeStatusRef.current = true;
+    statusRequestRef.current += 1;
+    messagesRequestRef.current += 1;
     try {
       await linkedinLiveApi.closeChat();
-    } catch { /* best-effort */ }
-    setActiveChatId(null);
-    setMessages([]);
+      activeChatRef.current = null;
+      setActiveChatId(null);
+      setStatus((previous) => previous ? {
+        ...previous,
+        active_chat_id: null,
+        active_chat_name: null,
+      } : previous);
+      setMessages([]);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to close chat.'));
+    } finally {
+      freezeStatusRef.current = false;
+    }
   };
 
   const handleSend = async (event) => {
@@ -296,7 +368,9 @@ export default function LinkedInLiveChatPage() {
                     <button
                       type="button"
                       onClick={() => handlePickChat(chat.chat_id)}
-                      className={`flex w-full items-start gap-3 border-b border-surface-800 px-3 py-3 text-left transition hover:bg-surface-800 ${
+                      disabled={Boolean(openingChatId)}
+                      data-testid={`linkedin-chat-row-${chat.chat_id}`}
+                      className={`flex w-full items-start gap-3 border-b border-surface-800 px-3 py-3 text-left transition hover:bg-surface-800 disabled:cursor-wait disabled:opacity-60 ${
                         activeChatId === chat.chat_id ? 'bg-surface-800' : ''
                       }`}
                     >
@@ -366,7 +440,7 @@ export default function LinkedInLiveChatPage() {
                   </p>
                 ) : (
                   messages.map((msg, idx) => (
-                    <LinkedInMessageBubble key={`${msg.sender}-${idx}-${msg.text.slice(0, 8)}`} msg={msg} />
+                    <LinkedInMessageBubble key={msg.message_id || `${msg.sender}-${idx}-${msg.text.slice(0, 8)}`} msg={msg} />
                   ))
                 )}
                 <div ref={messagesEndRef} />
