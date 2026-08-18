@@ -24,10 +24,13 @@ POST /system/queues/clear-rate-limits  -> delete rate:* keys
 GET  /system/queues/celery-inspect     -> active / scheduled / reserved / revoked if worker up
 GET  /system/queues/db-stats           -> paused/failed counts from Postgres tables
 POST /system/queues/revoke             -> revoke a celery task id
+POST /system/queues/cleanup-stale       -> revoke stale reserved/ETA automation tasks
 POST /system/queues/flush-pattern      -> delete keys by pattern (with safety limit)
 """
 
 from typing import Any, Dict, List, Optional
+import ast
+import json
 import redis
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -420,6 +423,177 @@ async def _db_stats(db: AsyncSession) -> Dict[str, Any]:
     return stats
 
 
+# ─── stale task cleanup ────────────────────────────────────────────────────────
+
+_LEGACY_AUTOMATION_TASKS = {
+    "tasks.connect_whatsapp",
+    "tasks.reconcile_stalled_leads",
+    "tasks.execute_campaign_step",
+    "tasks.step1_visit_profile",
+    "tasks.step1_visit_and_like",
+    "tasks.step2_send_connection",
+    "tasks.step3_send_message",
+    "tasks.step4_followup_if_pending",
+    "tasks.step5_thanks_if_accepted",
+}
+
+
+def _inspection_request(item: Any) -> dict:
+    """Normalize Celery's active/reserved/scheduled request shapes."""
+    if not isinstance(item, dict):
+        return {}
+    request = item.get("request")
+    return request if isinstance(request, dict) else item
+
+
+def _inspection_args(request: dict) -> list:
+    args = request.get("args", [])
+    if isinstance(args, list):
+        return args
+    if not isinstance(args, str):
+        return []
+    try:
+        parsed = json.loads(args)
+    except Exception:
+        try:
+            parsed = ast.literal_eval(args)
+        except Exception:
+            return []
+    return parsed if isinstance(parsed, list) else []
+
+
+async def _cleanup_stale_automation_tasks(db: AsyncSession, user: User) -> dict:
+    """Revoke only queued/scheduled work that has no active DB owner.
+
+    Celery's worker inspect API can see reserved and ETA tasks, but not every
+    message still sitting in a broker list. This endpoint is deliberately
+    conservative: it never terminates an active browser task and never purges
+    unrelated user work. The task bodies also re-check status, so cleanup is a
+    safety net rather than the correctness boundary.
+    """
+    from models.campaign import Campaign, CampaignStatus
+    from models.feed_scroll_job import FeedScrollJob, FeedScrollJobStatus
+    from models.linkedin_account import LinkedInAccount
+    from models.whatsapp import WhatsAppScanFilter
+
+    # Cleanup is scoped to the authenticated owner's jobs. A normal workspace
+    # user must not revoke another user's reserved task just because both share
+    # the same Redis/Celery installation.
+    active_accounts = {
+        row[0]
+        for row in (
+            await db.execute(
+                select(Campaign.account_email)
+                .join(LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email)
+                .where(
+                    Campaign.status == CampaignStatus.ACTIVE,
+                    LinkedInAccount.owner_email == user.email,
+                )
+            )
+        ).all()
+    }
+    active_feed_ids = {
+        row[0]
+        for row in (
+            await db.execute(
+                select(FeedScrollJob.id).where(
+                    FeedScrollJob.status == FeedScrollJobStatus.ACTIVE,
+                    FeedScrollJob.owner_email == user.email,
+                )
+            )
+        ).all()
+    }
+    active_filter_ids = {
+        row[0]
+        for row in (
+            await db.execute(
+                select(WhatsAppScanFilter.id).where(
+                    WhatsAppScanFilter.status == "active",
+                    WhatsAppScanFilter.owner_email == user.email,
+                )
+            )
+        ).all()
+    }
+
+    snapshot = _celery_inspect()
+    raw = snapshot.get("raw") or {}
+    candidates = []
+    for bucket in ("scheduled", "reserved"):
+        by_worker = raw.get(bucket) or {}
+        if not isinstance(by_worker, dict):
+            continue
+        for worker_tasks in by_worker.values():
+            if isinstance(worker_tasks, list):
+                candidates.extend(worker_tasks)
+
+    revoked = []
+    for item in candidates:
+        request = _inspection_request(item)
+        task_name = request.get("name") or ""
+        task_id = request.get("id")
+        args = _inspection_args(request)
+        stale = task_name in _LEGACY_AUTOMATION_TASKS
+
+        if task_name == "tasks.run_account_session":
+            stale = not args or args[0] not in active_accounts
+        elif task_name == "tasks.run_feed_scroll":
+            stale = not args or str(args[0]) not in {str(value) for value in active_feed_ids}
+        elif task_name == "tasks.check_whatsapp_messages":
+            filter_id = args[0] if args else None
+            try:
+                filter_id_value = int(filter_id) if filter_id is not None else None
+            except (TypeError, ValueError):
+                filter_id_value = None
+            stale = (
+                not active_filter_ids
+                if filter_id_value is None
+                else filter_id_value not in {int(value) for value in active_filter_ids}
+            )
+
+        if not stale or not task_id:
+            continue
+        try:
+            from worker.celery_app import celery_app
+
+            celery_app.control.revoke(task_id, terminate=False)
+            revoked.append({"id": task_id, "name": task_name, "args": args})
+        except Exception as exc:
+            logger.warning("Could not revoke stale Celery task %s: %s", task_id, exc)
+
+    # Remove abandoned dispatcher leases for rows that no longer exist/active.
+    # The worker's token-aware release prevents this cleanup from deleting a
+    # newly claimed lease for another task.
+    r = _get_redis(decode=True)
+    deleted_leases = []
+    for pattern, valid_ids in (
+        ("linkeasy:scheduler:feed:*", {str(value) for value in active_feed_ids}),
+        ("linkeasy:scheduler:whatsapp:*", {str(value) for value in active_filter_ids}),
+    ):
+        prefix = pattern[:-1]
+        for key in r.scan_iter(match=pattern, count=200):
+            identifier = str(key)[len(prefix):]
+            if identifier not in valid_ids and r.delete(key):
+                deleted_leases.append(key)
+    for key in r.scan_iter(match="linkeasy:scheduler:account:*", count=200):
+        account_email = str(key).split("linkeasy:scheduler:account:", 1)[-1]
+        if account_email not in active_accounts and r.delete(key):
+            deleted_leases.append(key)
+
+    logger.info(
+        "Stale automation cleanup by %s: revoked=%d leases=%d",
+        user.email,
+        len(revoked),
+        len(deleted_leases),
+    )
+    return {
+        "revoked_count": len(revoked),
+        "revoked": revoked,
+        "deleted_lease_count": len(deleted_leases),
+        "deleted_leases": deleted_leases,
+        "inspected_count": len(candidates),
+    }
+
+
 # ─── routes ───────────────────────────────────────────────────────────────────
 
 @router.get("/queues/overview")
@@ -456,6 +630,15 @@ async def get_overview(
         "celery": celery,
         "db": dbstats,
     }
+
+
+@router.post("/queues/cleanup-stale")
+async def cleanup_stale_queues(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Revoke stale reserved/ETA automation tasks without touching active work."""
+    return await _cleanup_stale_automation_tasks(db, user)
 
 
 @router.get("/queues/redis-info")

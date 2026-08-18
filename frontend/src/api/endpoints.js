@@ -252,7 +252,7 @@ export const whatsappApi = {
 //   - POST /open    — searching for / clicking the chat (~15s, search-then-click)
 //   - POST /send    — paced send (up to WHATSAPP_FORWARD_DELAY_SECONDS inside)
 const WHATSAPP_LIVE_TIMEOUT = 60_000;
-const WHATSAPP_LIVE_START_TIMEOUT = 60_000;
+const WHATSAPP_LIVE_START_TIMEOUT = 120_000;
 
 export const whatsappLiveApi = {
   start: () =>
@@ -332,6 +332,7 @@ export const linkedinProfileApi = {
 /* ------------------------------ system / redis queues ------------------------------ */
 export const systemQueuesApi = {
   overview: () => api.get('/system/queues/overview'),
+  cleanupStale: () => api.post('/system/queues/cleanup-stale', null, { timeout: 45_000 }),
   redisInfo: () => api.get('/system/queues/redis-info'),
   celeryInspect: () => api.get('/system/queues/celery-inspect'),
   dbStats: () => api.get('/system/queues/db-stats'),

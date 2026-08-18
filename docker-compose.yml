@@ -97,7 +97,7 @@ services:
     environment: *celery_environment
     depends_on: *celery_dependencies
     volumes: *application_volume
-    command: celery -A worker.celery_app beat --loglevel=info
+    command: celery -A worker.celery_app beat --loglevel=info --schedule=/tmp/linkeasy-celerybeat-schedule
 
 volumes:
   postgres_data:

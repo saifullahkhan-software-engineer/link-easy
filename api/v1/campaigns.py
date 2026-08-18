@@ -138,11 +138,13 @@ async def start_campaign(
     # current_user: User = Depends(get_current_user),  # Commented for testing
 ):
     """
-    Sets campaign to ACTIVE and enqueues Step 1 Celery tasks for all pending leads.
-    Tasks are spread across a random time window minimum 2-hour window to avoid burst detection.
+    Set the campaign to ACTIVE and persist the first due time for its leads.
+
+    The database timestamp is the scheduler's source of truth.  Publish one
+    immediate account-level task after the commit; do not create long Celery
+    countdown/ETA messages that can survive a campaign pause or delete.
     """
-    from datetime import datetime, timedelta, timezone
-    import random
+    from datetime import datetime, timezone
     import redis
     from worker.celery_app import celery_app
     from core.config import settings
@@ -178,11 +180,10 @@ async def start_campaign(
     if not first_step:
         raise HTTPException(status_code=400, detail="Campaign has no steps configured")
 
-    # Persist the initial schedule before returning so the UI can immediately
-    # show both the next step and its execution time. Use the same delay for the
-    # Celery task; next_action_at remains the durable source of truth.
-    session_delay_seconds = random.randint(30, 120)
-    scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=session_delay_seconds)
+    # Make the first step due immediately. Human-like pacing happens inside the
+    # account session; scheduling it here as a long ETA was the source of stale
+    # messages that kept running after a campaign was removed.
+    scheduled_at = datetime.now(timezone.utc)
     leads_result = await db.execute(
         select(Lead).where(
             Lead.campaign_id == campaign_id,
@@ -194,16 +195,20 @@ async def start_campaign(
         lead.current_step = first_step.step_order
         lead.next_action_at = scheduled_at
 
-    # Enqueue a single account session task instead of per-lead tasks.
-    celery_app.send_task(
-        "tasks.run_account_session",
-        args=[campaign.account_email],
-        countdown=session_delay_seconds,
-    )
-
+    # Commit the active status before publishing the task.  A fast worker can
+    # receive a countdown task before the request handler returns; publishing
+    # first used to make that worker see a draft campaign and silently skip it.
     campaign.status = CampaignStatus.ACTIVE
     campaign.started_at = datetime.now(timezone.utc)
     await db.commit()
+
+    # Enqueue a single account session task instead of one message per lead.
+    # The database timestamps remain the source of truth and Beat will recover
+    # the work after a worker/Redis restart.
+    celery_app.send_task(
+        "tasks.run_account_session",
+        args=[campaign.account_email],
+    )
 
     return {"message": f"Campaign started. Account session queued for {campaign.account_email}.", "account_email": campaign.account_email}
 
@@ -217,8 +222,9 @@ async def pause_campaign(
 ):
     """Pauses an active campaign and cancels pending tasks."""
     from models.linkedin_account import LinkedInAccount
-    from worker.celery_app import celery_app
-    
+    import redis
+    from core.config import settings
+
     result = await db.execute(
         select(Campaign).join(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
@@ -232,7 +238,15 @@ async def pause_campaign(
     
     campaign.status = CampaignStatus.PAUSED
     await db.commit()
-    
+    try:
+        redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=0.25,
+            socket_timeout=0.25,
+        ).delete(f"linkeasy:scheduler:account:{campaign.account_email}")
+    except Exception:
+        pass
+
     return {"message": "Campaign paused"}
 
 
@@ -324,8 +338,10 @@ async def restart_campaign(
     campaign.started_at = now
     await db.commit()
 
-    # Start promptly; Beat will dispatch all subsequent due actions.
-    celery_app.send_task("tasks.run_account_session", args=[campaign.account_email], countdown=5)
+    # Start promptly; Beat will dispatch all subsequent due actions.  No ETA
+    # message is used, so a later pause/delete cannot leave a 5-second task in
+    # the broker.
+    celery_app.send_task("tasks.run_account_session", args=[campaign.account_email])
 
     return {
         "message": f"Campaign restarted. {len(pending_leads)} lead(s) reset and {len(in_progress_leads)} lead(s) resumed.",
@@ -344,7 +360,7 @@ async def delete_campaign(
     """
     Permanently deletes a campaign and all associated data:
     - Revokes all pending Celery tasks from Redis
-    - Removes the session lock from Redis
+    - Removes the scheduler lease from Redis
     - Deletes all campaign jobs (audit log)
     - Deletes all leads
     - Deletes all campaign steps
@@ -387,9 +403,12 @@ async def delete_campaign(
         except Exception:
             pass  # Best-effort; task may already be completed or expired
 
-    # 4. Remove the session lock from Redis (if present for this account)
-    session_lock_key = f"session_lock:{account_email}"
-    lock_removed = bool(redis_client.delete(session_lock_key))
+    # 4. Drop only the scheduler lease. Never force-delete the live session
+    # lock: another active campaign may share this LinkedIn account, and an
+    # in-flight browser task must release its own lock safely.
+    dispatch_lease_removed = bool(
+        redis_client.delete(f"linkeasy:scheduler:account:{account_email}")
+    )
 
     # 5. Delete campaign jobs
     await db.execute(
@@ -417,7 +436,7 @@ async def delete_campaign(
         "message": f"Campaign '{campaign_id}' deleted successfully.",
         "campaign_id": campaign_id,
         "tasks_revoked": revoked_count,
-        "session_lock_removed": lock_removed,
+        "scheduler_lease_removed": dispatch_lease_removed,
     }
 
 

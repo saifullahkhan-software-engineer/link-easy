@@ -18,7 +18,7 @@ const STATUS_STYLES = {
  * The view is interactive: clicking or scrolling on the image dispatches the
  * equivalent input into the real browser via `/api/v1/live/browser/input`.
  */
-export default function BrowserViewPanel() {
+export default function BrowserViewPanel({ controls = true }) {
   const [status, setStatus] = useState('idle');
   const [message, setMessage] = useState('');
   const [error, setError] = useState(null);
@@ -122,7 +122,7 @@ export default function BrowserViewPanel() {
   );
 
   return (
-    <div className="flex h-full flex-col rounded-xl border border-surface-700 bg-surface-800 p-5">
+    <div className="flex min-h-[720px] flex-col rounded-xl border border-surface-700 bg-surface-800 p-5">
       {/* Header */}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
@@ -133,44 +133,46 @@ export default function BrowserViewPanel() {
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-zinc-400">
-            <input
-              type="checkbox"
-              checked={interactive}
-              onChange={(e) => setInteractive(e.target.checked)}
-              className="h-3.5 w-3.5 rounded border-surface-600 bg-surface-800 text-accent-500 focus:ring-accent-500"
-            />
-            Click / scroll
-          </label>
-          <button
-            onClick={handleCapture}
-            disabled={status !== 'running'}
-            className="rounded-lg border border-surface-600 bg-surface-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-surface-600 disabled:opacity-40"
-          >
-            Capture
-          </button>
-          {status === 'running' ? (
+        {controls && (
+          <div className="flex items-center gap-2">
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-zinc-400">
+              <input
+                type="checkbox"
+                checked={interactive}
+                onChange={(e) => setInteractive(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-surface-600 bg-surface-800 text-accent-500 focus:ring-accent-500"
+              />
+              Click / scroll
+            </label>
             <button
-              onClick={handleStop}
-              className="rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-1.5 text-xs font-semibold text-red-300 transition hover:bg-red-900/40"
+              onClick={handleCapture}
+              disabled={status !== 'running'}
+              className="rounded-lg border border-surface-600 bg-surface-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-surface-600 disabled:opacity-40"
             >
-              Stop
+              Capture
             </button>
-          ) : (
-            <button
-              onClick={handleStart}
-              disabled={starting}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-accent-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
-            >
-              {starting ? <Spinner /> : 'Start'}
-            </button>
-          )}
-        </div>
+            {status === 'running' ? (
+              <button
+                onClick={handleStop}
+                className="rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-1.5 text-xs font-semibold text-red-300 transition hover:bg-red-900/40"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                onClick={handleStart}
+                disabled={starting}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-accent-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
+              >
+                {starting ? <Spinner /> : 'Start'}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Viewport */}
-      <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-surface-700 bg-surface-950">
+      <div className="relative flex min-h-[560px] flex-1 items-center justify-center overflow-hidden rounded-lg border border-surface-700 bg-surface-950">
         {frame ? (
           <>
             <img
@@ -180,7 +182,7 @@ export default function BrowserViewPanel() {
               draggable={false}
               onPointerDown={handleClick}
               onWheel={handleWheel}
-              className={`w-full select-none ${interactive && status === 'running' ? 'cursor-crosshair' : 'cursor-default'}`}
+              className={`h-full max-h-[78vh] w-full object-contain object-top select-none ${interactive && status === 'running' ? 'cursor-crosshair' : 'cursor-default'}`}
             />
             {status === 'running' && (
               <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-1.5 rounded-full bg-black/50 px-2 py-0.5 text-[10px] text-green-300 backdrop-blur">
@@ -200,28 +202,35 @@ export default function BrowserViewPanel() {
               <>
                 <p className="text-sm font-semibold text-red-300">Browser view failed to start</p>
                 <p className="mt-1 max-w-sm break-words text-xs text-zinc-500">{error || message}</p>
-                <button
-                  onClick={handleStart}
-                  className="mt-4 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400"
-                >
-                  Retry
-                </button>
+                {controls && (
+                  <button
+                    onClick={handleStart}
+                    className="mt-4 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400"
+                  >
+                    Retry
+                  </button>
+                )}
               </>
             ) : (
               <>
                 <span className="text-3xl">🖥️</span>
                 <p className="mt-3 text-sm text-zinc-300">The Playwright browser runs on the server and streams its screen here.</p>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Click <span className="text-accent-300">Start</span> (or “Connect WhatsApp”) to open WhatsApp Web — the QR code
-                  will appear here for you to scan.
+                  {controls ? (
+                    <>Click <span className="text-accent-300">Start</span> (or “Connect WhatsApp”) to open the complete WhatsApp Web surface — the QR code and the post-login screen are streamed here for you to use.</>
+                  ) : (
+                    <>Use <span className="text-accent-300">Connect WhatsApp</span> above. This view will remain open while the QR code and the full post-login screen render.</>
+                  )}
                 </p>
-                <button
-                  onClick={handleStart}
-                  disabled={starting}
-                  className="mt-4 inline-flex items-center gap-2 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
-                >
-                  {starting ? <Spinner /> : 'Start Browser'}
-                </button>
+                {controls && (
+                  <button
+                    onClick={handleStart}
+                    disabled={starting}
+                    className="mt-4 inline-flex items-center gap-2 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
+                  >
+                    {starting ? <Spinner /> : 'Start Browser'}
+                  </button>
+                )}
               </>
             )}
           </div>

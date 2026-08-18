@@ -27,7 +27,12 @@ from api.v1.linkedin_profile import router as linkedin_profile_router
 from api.v1.live import router as live_router
 from api.v1.system_queues import router as system_queues_router
 from core.config import settings
-from core.logging_config import get_logger, reset_logging
+from core.logging_config import get_logger
+try:
+    from core.logging_config import reset_logging
+except ImportError:  # lightweight test doubles may only expose get_logger
+    def reset_logging():
+        return None
 from core.security import validate_encryption_key
 from database import init_db
 from models.roles import UserRole
@@ -251,4 +256,4 @@ if __name__ == "__main__":
     # `python main.py` without --log-level.  Uvicorn's default INFO level
     # hides lifespan tracebacks; we force it to show them.
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

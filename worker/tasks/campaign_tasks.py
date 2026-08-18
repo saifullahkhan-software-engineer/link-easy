@@ -24,6 +24,7 @@ from worker.profile_lock import (
     acquire_profile_lock,
     release_profile_lock,
 )
+from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 from automation.browser import launch_persistent_browser
 from automation.session import verify_session, LinkedInSessionStatus
 from automation.actions.visit_profile import (
@@ -107,11 +108,21 @@ def _jitter_hours(base_hours: int) -> float:
 
 
 def _schedule_next(task_name: str, args: list, delay_hours: int, campaign_id: str) -> None:
-    """Legacy wrapper for backward compatibility. Delegates to new step-based scheduling."""
-    # This is kept for legacy tasks but should not be used in new code
-    # The new system uses _schedule_next_step which is step-aware
-    eta = datetime.now(timezone.utc) + timedelta(hours=delay_hours)
-    celery_app.send_task(task_name, args=args, eta=eta)
+    """Deprecated compatibility hook for the retired per-lead task chain.
+
+    Older workers used long ETA messages for every drip step.  Those messages
+    survive a campaign delete/pause in Redis and are the reason operators can
+    see automation tasks running after the campaign is gone.  Scheduling is
+    now exclusively database-backed (``next_action_at`` plus Beat's due
+    dispatcher), so this function deliberately does not enqueue another
+    Celery message.  Legacy task messages may still arrive during a rolling
+    deployment, but they cannot create another legacy chain.
+    """
+    logger.info(
+        "Skipping retired ETA task %s for campaign %s; durable scheduler owns the next action",
+        task_name,
+        campaign_id,
+    )
  
  
 def _schedule_next_step(lead_id: str, campaign_id: str, current_step_order: int) -> None:
@@ -151,10 +162,16 @@ def _schedule_next_step(lead_id: str, campaign_id: str, current_step_order: int)
         if lead:
             lead.current_step = next_step.step_order
             lead.next_action_at = eta
-        celery_app.send_task(
-            "tasks.execute_campaign_step",
-            args=[lead_id, campaign_id, next_step.step_order],
-            eta=eta
+        # Do not enqueue an ETA task here.  Celery ETA messages are not
+        # durable campaign state and remain in Redis after a campaign is
+        # paused/deleted.  ``dispatch_due_account_sessions`` will pick this
+        # row up once ``next_action_at`` is due, and re-check the campaign
+        # status before opening LinkedIn.
+        logger.info(
+            "📅 Persisted next campaign step %s for lead %s at %s",
+            next_step.step_order,
+            lead_id,
+            eta.isoformat(),
         )
  
  
@@ -162,7 +179,7 @@ def _schedule_next_step(lead_id: str, campaign_id: str, current_step_order: int)
 #  GENERIC STEP EXECUTOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@celery_app.task(bind=True, max_retries=3, name="tasks.execute_campaign_step")
+# Retired task implementation kept only for source-level compatibility.
 def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int):
     """Execute a campaign step for a lead based on campaign_steps table."""
     with get_sync_db() as db:
@@ -200,16 +217,10 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
             db.add(job)
             db.commit()
             
-            # Re-enqueue the task for 1 hour later
-            from datetime import timedelta
-            eta = datetime.now(timezone.utc) + timedelta(hours=1)
-            celery_app.send_task(
-                "tasks.execute_campaign_step",
-                args=[lead_id, campaign_id, step_order],
-                eta=eta
-            )
-            
-            return {"status": "skipped", "reason": "account not active", "requeued_at": eta.isoformat()}
+            # The account-session dispatcher will reconsider the durable lead
+            # row after the account/campaign becomes eligible. Do not put a
+            # second ETA message in Redis.
+            return {"status": "skipped", "reason": "account not active"}
         
         # Update lead's current step
         lead.current_step = step_order
@@ -245,11 +256,8 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
                 eta = datetime.now(timezone.utc) + timedelta(hours=random.uniform(18, 26))
                 lead.next_action_at = eta
                 db.commit()
-                celery_app.send_task(
-                    "tasks.execute_campaign_step",
-                    args=[lead_id, campaign_id, step_order],
-                    eta=eta,
-                )
+                # ``next_action_at`` is enough; Beat will dispatch the
+                # account session when the durable timestamp is due.
                 return {"status": "rate_limited", "requeued_at": eta.isoformat()}
 
             # Execute the appropriate action based on step type
@@ -295,12 +303,11 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
                         lead.last_action_at = datetime.now(timezone.utc)
                         job.action_message = f"{action_message} Retrying automatically."
                         db.commit()
-                        celery_app.send_task(
-                            "tasks.execute_campaign_step",
-                            args=[lead_id, campaign_id, step_order],
-                            eta=eta,
+                        logger.info(
+                            "🔁 %s — durable step rescheduled for %s",
+                            action_message,
+                            eta.isoformat(),
                         )
-                        logger.info("🔁 %s — step rescheduled for %s", action_message, eta.isoformat())
                         return result
 
                 lead.status = LeadStatus.FAILED
@@ -343,7 +350,51 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
             job.error_message = str(exc)
             lead.status = LeadStatus.FAILED
             db.commit()
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
+
+
+def _account_has_due_work(account_email: str) -> bool:
+    """Return whether an account still has active, due campaign work.
+
+    This check is used before retrying a stale/legacy task.  It is deliberately
+    database-backed so deleting or pausing the last campaign immediately makes
+    old Redis messages harmless and prevents a profile from being reopened.
+    """
+    from sqlalchemy import or_
+
+    now = datetime.now(timezone.utc)
+    with get_sync_db() as db:
+        initial_step_due = (
+            ((Lead.current_step == None) | (Lead.current_step == 0))
+            & (CampaignStep.step_order == 1)
+            & (Lead.next_action_at == None)
+        )
+        scheduled_step_due = (
+            (Lead.current_step == CampaignStep.step_order)
+            & (Lead.next_action_at != None)
+            & (Lead.next_action_at <= now)
+        )
+        return (
+            db.query(Lead.id)
+            .join(Campaign, Lead.campaign_id == Campaign.id)
+            .join(CampaignStep, Campaign.id == CampaignStep.campaign_id)
+            .filter(
+                Campaign.account_email == account_email,
+                Campaign.status == CampaignStatus.ACTIVE,
+                Lead.status.in_([
+                    LeadStatus.PENDING,
+                    LeadStatus.VISITING,
+                    LeadStatus.REQUESTED,
+                    LeadStatus.ACCEPTED,
+                    LeadStatus.MESSAGED,
+                    LeadStatus.REPLIED,
+                ]),
+                or_(initial_step_due, scheduled_step_due),
+            )
+            .first()
+            is not None
+        )
 
 
 @celery_app.task(name="tasks.dispatch_due_account_sessions")
@@ -389,21 +440,42 @@ def dispatch_due_account_sessions():
     # the final race-safe guard; this check simply prevents the expected
     # duplicate "session already running" tasks in the normal case.
     import redis
-    redis_client = redis.from_url(settings.REDIS_URL)
+    # A due row stays due until a worker finishes it, so Beat can observe it
+    # several times while the task is waiting in Redis.  A short dispatch lease
+    # prevents one account from being queued once per Beat tick; the real
+    # ``session_lock`` remains the race-safe guard once the worker starts.
+    redis_client = redis.from_url(
+        settings.REDIS_URL, socket_connect_timeout=0.25, socket_timeout=0.25
+    )
     dispatched = 0
     for account_email in account_emails:
         if redis_client.exists(f"session_lock:{account_email}"):
             logger.debug("⏭️ Session already active for %s; no duplicate dispatch", account_email)
             continue
-        celery_app.send_task("tasks.run_account_session", args=[account_email])
-        dispatched += 1
+        # Keep a lease for the whole browser session, not just for the 60
+        # seconds between Beat ticks.  The task releases its own token in a
+        # finally block.  This removes the old once-per-minute duplicate task
+        # stream without making the database timestamp less durable.
+        dispatch_key = f"linkeasy:scheduler:account:{account_email}"
+        lease_token = claim_dispatch_lease(redis_client, dispatch_key, timeout=7200)
+        if not lease_token:
+            continue
+        try:
+            celery_app.send_task(
+                "tasks.run_account_session",
+                args=[account_email, lease_token],
+            )
+            dispatched += 1
+        except Exception:
+            release_dispatch_lease(redis_client, dispatch_key, lease_token)
+            raise
 
     if dispatched:
         logger.info("📅 Dispatched due account sessions for %d account(s)", dispatched)
     return {"accounts_dispatched": dispatched}
 
 
-@celery_app.task(name="tasks.reconcile_stalled_leads")
+# Retired task implementation kept only for source-level compatibility.
 def reconcile_stalled_leads():
     """Find stalled leads and re-enqueue them for processing.
     
@@ -664,15 +736,17 @@ def _update_lead_status(lead, step_type) -> None:
 #  LEGACY STEP TASKS (Kept for backward compatibility, will be removed)
 # ═══════════════════════════════════════════════════════════════════════════════
  
-@celery_app.task(bind=True, max_retries=3, name="tasks.step1_visit_and_like")
+# Retired task implementation kept only for source-level compatibility.
 def step1_visit_and_like(self, lead_id: str, campaign_id: str):
     with get_sync_db() as db:
         lead     = db.query(Lead).get(lead_id)
         campaign = db.query(Campaign).get(campaign_id)
+        if not lead or not campaign or campaign.status != CampaignStatus.ACTIVE:
+            return {"status": "skipped", "reason": "campaign is missing or not active"}
         account  = db.query(LinkedInAccount).filter_by(linkedin_email=campaign.account_email).first()
  
-        if not lead or not account or account.status != LinkedInAccountStatus.ACTIVE:
-            return {"status": "skipped", "reason": "lead or account not valid"}
+        if not account or account.status != LinkedInAccountStatus.ACTIVE:
+            return {"status": "skipped", "reason": "account not valid"}
  
         # Rate limit check (warm-up aware: new accounts get lower ceilings)
         if not check_and_increment(account.owner_email, "visit_profile",
@@ -707,7 +781,8 @@ def step1_visit_and_like(self, lead_id: str, campaign_id: str):
             job.status = JobStatus.FAILED
             job.error_message = str(exc)
             lead.status = LeadStatus.FAILED
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -823,12 +898,16 @@ async def _run_visit_and_like(account, lead) -> dict:
 #  STEP 2 — Send Connection Request
 # ═══════════════════════════════════════════════════════════════════════════════
  
-@celery_app.task(bind=True, max_retries=3, name="tasks.step2_send_connection")
+# Retired task implementation kept only for source-level compatibility.
 def step2_send_connection(self, lead_id: str, campaign_id: str):
     with get_sync_db() as db:
         lead     = db.query(Lead).get(lead_id)
         campaign = db.query(Campaign).get(campaign_id)
+        if not lead or not campaign or campaign.status != CampaignStatus.ACTIVE:
+            return {"status": "skipped", "reason": "campaign is missing or not active"}
         account  = db.query(LinkedInAccount).filter_by(linkedin_email=campaign.account_email).first()
+        if not account or account.status != LinkedInAccountStatus.ACTIVE:
+            return {"status": "skipped", "reason": "account not valid"}
  
         if not check_and_increment(account.owner_email, "send_connection",
                                     campaign.daily_connection_limit,
@@ -858,7 +937,8 @@ def step2_send_connection(self, lead_id: str, campaign_id: str):
             
 
         except Exception as exc:
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -903,12 +983,16 @@ async def _run_connect(account, lead, campaign) -> dict:
 #  STEP 3 — Send Intro Message (only if accepted)
 # ═══════════════════════════════════════════════════════════════════════════════
  
-@celery_app.task(bind=True, max_retries=3, name="tasks.step3_send_message")
+# Retired task implementation kept only for source-level compatibility.
 def step3_send_message(self, lead_id: str, campaign_id: str):
     with get_sync_db() as db:
         lead     = db.query(Lead).get(lead_id)
         campaign = db.query(Campaign).get(campaign_id)
+        if not lead or not campaign or campaign.status != CampaignStatus.ACTIVE:
+            return {"status": "skipped", "reason": "campaign is missing or not active"}
         account  = db.query(LinkedInAccount).filter_by(linkedin_email=campaign.account_email).first()
+        if not account or account.status != LinkedInAccountStatus.ACTIVE:
+            return {"status": "skipped", "reason": "account not valid"}
  
         # Only send if connection was accepted
         if lead.status != LeadStatus.ACCEPTED:
@@ -944,7 +1028,8 @@ def step3_send_message(self, lead_id: str, campaign_id: str):
             
 
         except Exception as exc:
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -953,12 +1038,16 @@ def step3_send_message(self, lead_id: str, campaign_id: str):
 #  STEP 4 — Follow-up if Pending (not yet accepted)
 # ═══════════════════════════════════════════════════════════════════════════════
  
-@celery_app.task(bind=True, max_retries=2, name="tasks.step4_followup_if_pending")
+# Retired task implementation kept only for source-level compatibility.
 def step4_followup_if_pending(self, lead_id: str, campaign_id: str):
     with get_sync_db() as db:
         lead     = db.query(Lead).get(lead_id)
         campaign = db.query(Campaign).get(campaign_id)
+        if not lead or not campaign or campaign.status != CampaignStatus.ACTIVE:
+            return {"status": "skipped", "reason": "campaign is missing or not active"}
         account  = db.query(LinkedInAccount).filter_by(linkedin_email=campaign.account_email).first()
+        if not account or account.status != LinkedInAccountStatus.ACTIVE:
+            return {"status": "skipped", "reason": "account not valid"}
  
         # If they accepted in the meantime, skip follow-up
         if lead.status == LeadStatus.ACCEPTED:
@@ -990,7 +1079,8 @@ def step4_followup_if_pending(self, lead_id: str, campaign_id: str):
             
 
         except Exception as exc:
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -999,12 +1089,16 @@ def step4_followup_if_pending(self, lead_id: str, campaign_id: str):
 #  STEP 5 — Thanks Message if Accepted
 # ═══════════════════════════════════════════════════════════════════════════════
  
-@celery_app.task(bind=True, max_retries=2, name="tasks.step5_thanks_if_accepted")
+# Retired task implementation kept only for source-level compatibility.
 def step5_thanks_if_accepted(self, lead_id: str, campaign_id: str):
     with get_sync_db() as db:
         lead     = db.query(Lead).get(lead_id)
         campaign = db.query(Campaign).get(campaign_id)
+        if not lead or not campaign or campaign.status != CampaignStatus.ACTIVE:
+            return {"status": "skipped", "reason": "campaign is missing or not active"}
         account  = db.query(LinkedInAccount).filter_by(linkedin_email=campaign.account_email).first()
+        if not account or account.status != LinkedInAccountStatus.ACTIVE:
+            return {"status": "skipped", "reason": "account not valid"}
  
         if lead.status != LeadStatus.ACCEPTED:
             return {"status": "not_accepted_no_action"}
@@ -1032,7 +1126,8 @@ def step5_thanks_if_accepted(self, lead_id: str, campaign_id: str):
             
 
         except Exception as exc:
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -1074,23 +1169,33 @@ async def _run_message(account, lead, message_text: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @celery_app.task(bind=True, name="tasks.run_account_session")
-def run_account_session(self, account_email: str):
+def run_account_session(
+    self,
+    account_email: str,
+    dispatch_token: str | None = None,
+):
     """
     Single task per account that processes all due leads across all campaigns.
     Opens one browser/context, processes leads with human-like timing, and saves state.
+
+    ``dispatch_token`` belongs to the Beat lease.  It is optional so messages
+    from older deployments remain compatible, but new dispatches keep the lease
+    until this task exits instead of creating a second task on every tick.
     """
     import redis
     from core.config import settings
-    
+
+    dispatch_key = f"linkeasy:scheduler:account:{account_email}"
     # Redis lock to prevent overlapping sessions for the same account
     redis_client = redis.from_url(settings.REDIS_URL)
     lock_key = f"session_lock:{account_email}"
     lock = redis_client.lock(lock_key, timeout=7200)  # 2 hour timeout
-    
+
     if not lock.acquire(blocking=False):
         logger.warning(f"⚠️ Session already running for account {account_email}, skipping")
+        release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
         return {"status": "skipped", "reason": "session_already_running"}
-    
+
     try:
         with get_sync_db() as db:
             # Get the account
@@ -1177,24 +1282,26 @@ def run_account_session(self, account_email: str):
     
     except ProfileInUseError as exc:
         # Another code path (manual verify-session, interactive login, ...)
-        # currently holds this account's browser profile. Do NOT attempt to
-        # launch anyway — fail cleanly and keep the self-rescheduling chain
-        # alive by re-enqueueing the next session shortly.
+        # currently holds this account's browser profile. Beat will try again
+        # on its next tick; do not create a 30-minute ETA task that survives a
+        # campaign pause or delete.
         logger.warning(f"⚠️ Profile busy for account {account_email}: {exc}")
-        self.apply_async(args=[account_email], countdown=1800)
-        logger.info(f"📅 Retrying session for {account_email} in 30 minutes (profile was in use)")
         return {"status": "skipped", "reason": "account_profile_in_use"}
 
     except Exception as exc:
-        logger.error(f"❌ Session failed for account {account_email}: {exc}")
-        raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+        logger.error(f"❌ Session failed for account {account_email}: {exc}", exc_info=True)
+        # The durable dispatcher is the retry mechanism.  Returning here is
+        # intentional: Celery ETA retries used to leave stale messages in
+        # Redis after the last campaign was removed.
+        return {"status": "error", "reason": "session_failed", "message": str(exc)}
 
     finally:
         try:
             lock.release()
         except Exception:
-            # Lock may have expired or been released already (e.g., during retry)
+            # Lock may have expired or been released already.
             pass
+        release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
 
 
 async def _process_leads_session(account, due_leads, per_action_seconds, db,
@@ -1258,11 +1365,18 @@ async def _process_leads_session(account, due_leads, per_action_seconds, db,
                     logger.warning(f"⚠️ Step mismatch for lead {lead_id}: step_order={step_order}, current_step={lead.current_step}, skipping")
                     continue
                 
-                # Check if campaign is still active (might have been paused since task started)
-                db.refresh(campaign)
+                # Check if campaign is still active (it may have been paused
+                # or deleted while this long browser session was running).
+                # Stop the session immediately instead of opening LinkedIn for
+                # the remaining stale rows.
+                try:
+                    db.refresh(campaign)
+                except Exception:
+                    logger.info("⏭️ Campaign %s no longer exists; ending account session", campaign_id)
+                    break
                 if campaign.status != CampaignStatus.ACTIVE:
-                    logger.info(f"⏭️ Skipping lead {lead_id} because campaign {campaign_id} is {campaign.status}")
-                    continue
+                    logger.info(f"⏭️ Campaign {campaign_id} is {campaign.status}; ending account session")
+                    break
 
                 # Conditions are part of the persisted campaign definition and
                 # must be enforced here too.  The account-session executor is

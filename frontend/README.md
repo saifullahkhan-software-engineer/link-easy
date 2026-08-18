@@ -38,7 +38,9 @@ For production, serve `dist/` behind a reverse proxy that also forwards
 
 | Route | What it does |
 | --- | --- |
-| `/` | Multi-channel automation landing page with connected-tool and campaign workflow previews |
+| `/` | Multi-channel landing page with separate **App** and **Dashboard** entry buttons |
+| `/dashboard` | Operations dashboard with automation health and service status |
+| `/dashboard/redis-queues` | Redis, Celery queues, locks, and database job management |
 | `/login` `/signup` `/verify-email` `/forgot-password` `/reset-password` | Full JWT auth lifecycle; live password-rule checklist mirrors the backend |
 | `/app/account` | Connect LinkedIn (Playwright login), 2FA code modal, session refresh, edit, disconnect |
 | `/app/campaigns` | Two-panel campaign + leads workspace: campaign form collapses to a summary card; lead tabs (manual / CSV with Papaparse preview + per-row error list); leads table; start campaign |

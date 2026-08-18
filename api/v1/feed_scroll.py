@@ -283,6 +283,20 @@ async def delete_feed_scroll_job(
     if not job:
         raise HTTPException(status_code=404, detail="Feed scroll job not found")
 
+    # Release a pending Beat lease. The worker still re-checks the row, so an
+    # already-running task exits without opening a browser after deletion.
+    try:
+        import redis
+        from core.config import settings
+
+        redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=0.25,
+            socket_timeout=0.25,
+        ).delete(f"linkeasy:scheduler:feed:{job_id}")
+    except Exception:
+        pass
+
     # Delete results first
     await db.execute(
         sa_delete(FeedScrollResult).where(FeedScrollResult.feed_scroll_job_id == job_id)
@@ -671,8 +685,10 @@ async def trigger_manual_scan(
     if not job:
         raise HTTPException(status_code=404, detail="Feed scroll job not found")
 
-    # Enqueue the scan task immediately
-    celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=5)
+    # Manual scans are explicit and bypass the durable next_scan_at check. They
+    # are published without an ETA so deleting/pausing a job never leaves a
+    # delayed Redis message behind.
+    celery_app.send_task("tasks.run_feed_scroll", args=[job.id, None, True])
 
     return {"message": "Manual scan queued. Results will be available shortly."}
 
@@ -707,20 +723,26 @@ async def activate_feed_scroll_job(
     now = datetime.now(timezone.utc)
     job.status = FeedScrollJobStatus.ACTIVE
 
+    immediate_scan = False
     if job.remaining_seconds is not None and job.remaining_seconds > 0:
         delay_seconds = job.remaining_seconds
         job.next_scan_at = now + timedelta(seconds=delay_seconds)
         job.remaining_seconds = None
-        celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=max(5, delay_seconds))
-        await db.commit()
-        return {"message": f"Job '{job.name}' resumed. Next scan in {delay_seconds} seconds."}
+        message = f"Job '{job.name}' resumed. Next scan in {delay_seconds} seconds."
     else:
+        # The first scan is due now. Publish an immediate, force-marked task
+        # only after the database commit; later scans are Beat-dispatched from
+        # next_scan_at with no Celery countdown messages.
+        delay_seconds = 0
         job.remaining_seconds = None
-        job.next_scan_at = now + timedelta(seconds=10)
-        # Schedule first scan immediately
-        celery_app.send_task("tasks.run_feed_scroll", args=[job.id], countdown=10)
-        await db.commit()
-        return {"message": f"Job '{job.name}' activated. First scan starting..."}
+        job.next_scan_at = now
+        immediate_scan = True
+        message = f"Job '{job.name}' activated. First scan starting..."
+
+    await db.commit()
+    if immediate_scan:
+        celery_app.send_task("tasks.run_feed_scroll", args=[job.id, None, True])
+    return {"message": message}
 
 
 @router.post("/jobs/{job_id}/pause", status_code=200)
@@ -755,5 +777,16 @@ async def pause_feed_scroll_job(
 
     job.status = FeedScrollJobStatus.PAUSED
     await db.commit()
+    try:
+        import redis
+        from core.config import settings
+
+        redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=0.25,
+            socket_timeout=0.25,
+        ).delete(f"linkeasy:scheduler:feed:{job_id}")
+    except Exception:
+        pass
 
     return {"message": f"Job '{job.name}' paused", "remaining_seconds": job.remaining_seconds}

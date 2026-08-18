@@ -89,22 +89,6 @@ const linkedinGroup = {
   ],
 };
 
-const systemGroup = {
-  label: 'System',
-  icon: (
-    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.75h4.5M9.75 20.25h4.5M3.75 9.75h16.5M3.75 14.25h16.5M6 6.75h12A2.25 2.25 0 0 1 20.25 9v6A2.25 2.25 0 0 1 18 17.25H6A2.25 2.25 0 0 1 3.75 15V9A2.25 2.25 0 0 1 6 6.75Z" />
-    </svg>
-  ),
-  items: [
-    {
-      to: '/app/system-queues',
-      label: 'Redis & Queues',
-      icon: null,
-    },
-  ],
-};
-
 const whatsappGroup = {
   label: 'WhatsApp',
   icon: (
@@ -172,6 +156,23 @@ export default function DashboardLayout() {
         </Link>
 
         <nav className="flex-1 space-y-3 p-3">
+          <NavLink
+            to="/dashboard"
+            end
+            className={({ isActive }) =>
+              `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition ${
+                isActive
+                  ? 'bg-accent-500/10 text-accent-300 ring-1 ring-inset ring-accent-500/20'
+                  : 'text-zinc-300 hover:bg-surface-800 hover:text-zinc-100'
+              }`
+            }
+          >
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75h6.5v6.5h-6.5zM13.75 3.75h6.5v6.5h-6.5zM3.75 13.75h6.5v6.5h-6.5zM13.75 13.75h6.5v6.5h-6.5z" />
+            </svg>
+            Dashboard
+          </NavLink>
+
           {/* Standalone Account link (top of the workspace). */}
           <div>
             <p className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
@@ -194,7 +195,7 @@ export default function DashboardLayout() {
           </div>
 
           {/* Per-product groups (LinkedIn, WhatsApp). */}
-          {[linkedinGroup, whatsappGroup, systemGroup].map((group) => (
+          {[linkedinGroup, whatsappGroup].map((group) => (
             <div key={group.label}>
               <p className="flex items-center gap-2 px-3 pb-2 pt-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
                 <span className="text-zinc-600">{group.icon}</span>

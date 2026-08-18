@@ -27,6 +27,7 @@ import WhatsAppFilterEditPage from './pages/WhatsAppFilterEditPage';
 import LinkedInLiveChatPage from './pages/LinkedInLiveChatPage';
 import LinkedInProfileScanPage from './pages/LinkedInProfileScanPage';
 import SystemQueuesPage from './pages/SystemQueuesPage';
+import DashboardPage from './pages/DashboardPage';
 
 export default function App() {
   return (
@@ -54,6 +55,19 @@ export default function App() {
           <Route path="/verify-email" element={<VerifyEmail />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+
+          {/* operations dashboard */}
+          <Route
+            path="/dashboard"
+            element={
+              <ProtectedRoute>
+                <DashboardLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<DashboardPage />} />
+            <Route path="redis-queues" element={<SystemQueuesPage />} />
+          </Route>
 
           {/* app shell */}
           <Route
@@ -83,9 +97,10 @@ export default function App() {
             <Route path="whatsapp-live" element={<WhatsAppLiveChatPage />} />
             <Route path="linkedin-live" element={<LinkedInLiveChatPage />} />
             <Route path="linkedin-profile" element={<LinkedInProfileScanPage />} />
-            <Route path="system-queues" element={<SystemQueuesPage />} />
-            <Route path="redis-jobs" element={<SystemQueuesPage />} />
-            <Route path="queues" element={<SystemQueuesPage />} />
+            {/* Legacy links redirect to the operations dashboard. */}
+            <Route path="system-queues" element={<Navigate to="/dashboard/redis-queues" replace />} />
+            <Route path="redis-jobs" element={<Navigate to="/dashboard/redis-queues" replace />} />
+            <Route path="queues" element={<Navigate to="/dashboard/redis-queues" replace />} />
           </Route>
 
           {/* catch-all */}

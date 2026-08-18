@@ -17,6 +17,7 @@ from core.logging_config import get_logger
 from worker.celery_app import celery_app
 from worker.playwright_semaphore import acquire_playwright_session
 from worker.profile_lock import acquire_profile_lock, release_profile_lock
+from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 from automation.browser import launch_persistent_browser
 from automation.session import verify_session, LinkedInSessionStatus
 from automation.actions.feed_scroll import (
@@ -98,29 +99,48 @@ def get_sync_db():
 
 
 @celery_app.task(bind=True, name="tasks.run_feed_scroll")
-def run_feed_scroll(self, feed_scroll_job_id: str):
-    """
-    Execute a feed scroll scan for a job.
+def run_feed_scroll(
+    self,
+    feed_scroll_job_id: str,
+    dispatch_token: str | None = None,
+    force: bool = False,
+):
+    """Execute one feed scan.
 
-    1. Acquire playwright session and profile lock
-    2. Launch browser and verify LinkedIn session
-    3. Scroll feed and collect posts
-    4. Score each post against job criteria
-    5. Store top N results in DB
-    6. Schedule next scan based on interval
+    Beat dispatches with a lease token and the task verifies the durable
+    ``next_scan_at`` before opening LinkedIn.  ``force`` is reserved for an
+    explicit manual scan.  This makes an old queued task harmless after a job
+    is paused, deleted, or rescheduled.
     """
+    import redis
+
+    dispatch_key = f"linkeasy:scheduler:feed:{feed_scroll_job_id}"
+    redis_client = redis.from_url(settings.REDIS_URL)
     logger.info(f"🚀 Starting feed scroll for job {feed_scroll_job_id}")
 
     with get_sync_db() as db:
         # Fetch the job
         job = db.query(FeedScrollJob).filter(FeedScrollJob.id == feed_scroll_job_id).first()
         if not job:
-            logger.error(f"Feed scroll job {feed_scroll_job_id} not found")
-            return
+            logger.info(f"⏭️ Feed scroll job {feed_scroll_job_id} no longer exists; stale task ignored")
+            release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
+            return {"status": "skipped", "reason": "job_not_found"}
 
         if job.status != FeedScrollJobStatus.ACTIVE:
-            logger.info(f"Job {feed_scroll_job_id} is not active (status={job.status}), skipping")
-            return
+            logger.info(f"⏭️ Job {feed_scroll_job_id} is not active (status={job.status}), stale task ignored")
+            release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
+            return {"status": "skipped", "reason": "job_not_active"}
+
+        now = datetime.now(timezone.utc)
+        next_scan_at = job.next_scan_at
+        if (
+            not force
+            and next_scan_at is not None
+            and (next_scan_at if next_scan_at.tzinfo else next_scan_at.replace(tzinfo=timezone.utc)) > now
+        ):
+            logger.info("⏭️ Feed scan %s is not due yet; stale task ignored", feed_scroll_job_id)
+            release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
+            return {"status": "skipped", "reason": "not_due"}
 
         account_email = job.account_email
         # A job may request fewer, but never more than MAX_POSTS_KEPT — every
@@ -146,7 +166,8 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
     with get_sync_db() as db:
         job = db.query(FeedScrollJob).filter(FeedScrollJob.id == feed_scroll_job_id).first()
         if not job:
-            return
+            release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
+            return {"status": "skipped", "reason": "job_deleted_during_scan"}
 
         scan_batch_id = str(uuid.uuid4())
         scan_time = datetime.now(timezone.utc)
@@ -324,9 +345,13 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             f"{len(top_posts)} posts stored | top score {top_posts[0]['score'] if top_posts else 0} | batch={scan_batch_id}"
         )
 
-        # Schedule next scan
-        if job.status == FeedScrollJobStatus.ACTIVE:
-            _schedule_next_scan(job.id, job.feed_interval_hours)
+        # ``next_scan_at`` is the durable schedule.  Do not add a long ETA
+        # Celery message here: it survives a deleted/paused job in Redis and
+        # creates the background tasks operators see after cleanup. Beat's
+        # dispatcher will enqueue the next run when this timestamp is due.
+
+    release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
+    return {"status": "completed", "job_id": feed_scroll_job_id}
 
 
 @celery_app.task(name="tasks.dispatch_due_feed_scans")
@@ -337,6 +362,8 @@ def dispatch_due_feed_scans():
     was closed/restarted, overdue scans are dispatched reliably without
     relying solely on in-memory Celery timers.
     """
+    import redis
+
     now = datetime.now(timezone.utc)
     with get_sync_db() as db:
         due_jobs = (
@@ -348,12 +375,37 @@ def dispatch_due_feed_scans():
             )
             .all()
         )
+        # Claim a Redis lease before publishing.  Leave ``next_scan_at``
+        # untouched: the worker can then reject an old queued task if the job
+        # has already completed, been paused, or been deleted.
         job_ids = [j.id for j in due_jobs]
 
+    redis_client = redis.from_url(
+        settings.REDIS_URL, socket_connect_timeout=0.25, socket_timeout=0.25
+    )
     dispatched = 0
     for job_id in job_ids:
-        celery_app.send_task("tasks.run_feed_scroll", args=[job_id])
-        dispatched += 1
+        dispatch_key = f"linkeasy:scheduler:feed:{job_id}"
+        redis_error = False
+        try:
+            lease_token = claim_dispatch_lease(redis_client, dispatch_key, timeout=7200)
+        except Exception:
+            # Redis is also the broker, so this normally fails the dispatch
+            # immediately. Keep the fallback for lightweight maintenance/test
+            # environments where the DB dispatcher is called in isolation.
+            lease_token = None
+            redis_error = True
+        if not lease_token and not redis_error:
+            continue
+        if redis_error:
+            logger.warning("Could not claim feed scheduler lease for %s", job_id)
+        try:
+            task_args = [job_id, lease_token] if lease_token else [job_id]
+            celery_app.send_task("tasks.run_feed_scroll", args=task_args)
+            dispatched += 1
+        except Exception:
+            release_dispatch_lease(redis_client, dispatch_key, lease_token)
+            raise
 
     if dispatched:
         logger.info(f"📅 Dispatched {dispatched} due feed scroll scan(s)")
@@ -454,17 +506,13 @@ async def _run_feed_scroll_async(account_email: str, keep_limit: int, job) -> di
 
 
 def _schedule_next_scan(job_id: str, interval_hours: int):
-    """Schedule the next feed scan."""
-    import random
+    """Compatibility no-op for the retired ETA scheduling path.
 
-    # Add jitter: ±15 minutes
-    jitter_seconds = random.randint(-900, 900)
-    delay_seconds = interval_hours * 3600 + jitter_seconds
-
-    celery_app.send_task(
-        "tasks.run_feed_scroll",
-        args=[job_id],
-        countdown=delay_seconds,
+    Feed jobs are scheduled from ``FeedScrollJob.next_scan_at`` by Beat.  The
+    helper remains importable for older integrations but never places an ETA
+    message in Redis.
+    """
+    logger.info(
+        "Skipping retired ETA feed task for job %s; durable scheduler owns the next scan",
+        job_id,
     )
-
-    logger.info(f"Scheduled next scan for job {job_id} in {interval_hours} hours (±15 min)")

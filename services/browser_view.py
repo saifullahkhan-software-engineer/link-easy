@@ -44,15 +44,18 @@ VIEWPORT = {"width": 1280, "height": 900}
 # Screencast encoding — kept small so SSE frames stay cheap.
 SCREENCAST_PARAMS = {
     "format": "jpeg",
-    "quality": 42,
-    "maxWidth": 800,
-    "maxHeight": 450,
-    "everyNthFrame": 5,
+    "quality": 50,
+    # Keep the complete 1280x900 browser viewport visible.  The old 800x450
+    # cap made the connection screen look like a QR-only thumbnail and made
+    # post-login hydration hard to diagnose.
+    "maxWidth": 1100,
+    "maxHeight": 780,
+    "everyNthFrame": 2,
 }
 
-# Minimum gap between published frames (~2 fps max) — the screencast can emit
-# frames far faster than a web page needs.
-MIN_FRAME_INTERVAL = 0.5
+# Minimum gap between published frames (~3 fps max) — enough for QR refreshes
+# and the first full WhatsApp render without flooding SSE with large images.
+MIN_FRAME_INTERVAL = 0.35
 
 BROWSER_ARGS = [
     "--no-sandbox",
@@ -176,6 +179,9 @@ class BrowserViewManager:
 
         self._set_status("starting", "Launching headless browser…")
 
+        pw = None
+        context = None
+        cdp = None
         try:
             from patchright.async_api import async_playwright
 
@@ -184,6 +190,7 @@ class BrowserViewManager:
                 STEALTH_SCRIPT,
                 USER_AGENT,
                 ensure_whatsapp_profile_dir,
+                wait_for_whatsapp_surface,
             )
 
             pw = await async_playwright().start()
@@ -217,14 +224,33 @@ class BrowserViewManager:
             cdp = await context.new_cdp_session(page)
             await cdp.send("Page.enable")
 
-            await context.add_init_script(STEALTH_SCRIPT)
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
+            # Register every resource before navigation.  Readiness can fail
+            # on a slow/closed page; the outer error path can then close the
+            # actual Chromium objects instead of leaking a SingletonLock.
             async with self._lock:
                 self._pw = pw
                 self._browser = None  # persistent context has no Browser object
                 self._context, self._page, self._cdp = context, page, cdp
                 self._profile_lock = profile_lock
+
+            await context.add_init_script(STEALTH_SCRIPT)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            # ``domcontentloaded`` is only the web shell.  Wait for the QR
+            # surface or the actual logged-in chat UI before declaring the
+            # browser ready; otherwise a cold profile is handed to the QR
+            # watcher/live chat while React is still hydrating.
+            surface = await wait_for_whatsapp_surface(page, timeout_seconds=45)
+            if surface == "timeout":
+                raise RuntimeError(
+                    "WhatsApp Web took too long to render its QR code or chat list. "
+                    "Please retry the connection."
+                )
+            if surface == "connected":
+                # Give the sidebar/main pane a final paint before the first
+                # screenshot so the user sees the full WhatsApp surface, not a
+                # half-rendered loading shell.
+                await asyncio.sleep(1.5)
 
             # Seed one frame immediately so clients see something right away.
             try:
@@ -245,12 +271,16 @@ class BrowserViewManager:
                 self._screencast_mode = "screenshot"
                 self._frame_task = asyncio.create_task(self._screenshot_loop())
 
-            self._set_status("running", f"Browser view running — {url}")
+            self._set_status(
+                "running",
+                "Browser view running — WhatsApp Web is ready" if surface == "connected"
+                else "Browser view running — waiting for QR scan",
+            )
             logger.info("browser view started: %s (mode=%s)", url, self._screencast_mode)
             return self.snapshot()
 
         except Exception as exc:
-            logger.exception("browser view failed to start")
+            logger.error("browser view failed to start", exc_info=True)
             self.last_error = str(exc)
             self._set_status("error", f"Failed to start browser view: {exc}")
             try:
@@ -258,8 +288,21 @@ class BrowserViewManager:
                     await self._shutdown_locked()
             except Exception:
                 pass
-            # _shutdown_locked() only releases a lock it owns; the launch
-            # never finished, so release the freshly-acquired lock here.
+            # If failure happened before resources were registered on the
+            # manager (for example while creating the CDP session), close the
+            # local handles as well.
+            if context is not None and context is not self._context:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+            if pw is not None and pw is not self._pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            # _shutdown_locked() releases a lock it owns; this is a harmless
+            # best-effort fallback for failures before registration.
             try:
                 from worker.profile_lock import release_profile_lock
 

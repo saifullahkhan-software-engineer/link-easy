@@ -209,7 +209,11 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
     Once 2FA is completed (logged in), the browser is stopped.
     """
     from services.browser_view import browser_view
-    from services.whatsapp_browser import get_storage_state, is_logged_in
+    from services.whatsapp_browser import (
+        get_storage_state,
+        is_logged_in,
+        wait_for_full_whatsapp_surface,
+    )
     from database import async_session
 
     logger.info("👀 Watching for WhatsApp QR scan (session id=%s)", session_id)
@@ -228,15 +232,19 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
         try:
             if await is_logged_in(page):
                 # Give WhatsApp a moment to finish syncing and flush the
-                # session keys before we snapshot the storage state, then
-                # re-verify so a transient frame can't trigger a save.
+                # session keys before we snapshot the storage state, then wait
+                # for BOTH the sidebar and conversation shell. A visible
+                # sidebar by itself is an intermediate hydration state.
                 await asyncio.sleep(3)
-                if await is_logged_in(page):
+                if await wait_for_full_whatsapp_surface(page, timeout_seconds=60):
+                    await asyncio.sleep(2)
                     logged_in = True
                     if encountered_2fa:
                         two_fa_completed = True
                         logger.info("✅ 2FA completed — WhatsApp logged in successfully")
+                    logger.info("✅ WhatsApp full chat surface rendered after login")
                     break
+                logger.info("⏳ WhatsApp sidebar is visible but the full chat surface is still loading")
                 continue
 
             # Check for 2FA page
@@ -965,6 +973,21 @@ async def delete_whatsapp_filter_job(
 
     filter_row = await _load_owned_filter(filter_id, current_user, db)
     filter_name = filter_row.name
+    # Drop the scheduler lease so a deleted filter does not hold a stale
+    # dispatcher slot until Redis' safety TTL expires. The worker still checks
+    # the row and exits before opening WhatsApp if it was already dequeued.
+    try:
+        import redis
+        from core.config import settings
+
+        redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=0.25,
+            socket_timeout=0.25,
+        ).delete(f"linkeasy:scheduler:whatsapp:{filter_id}")
+    except Exception:
+        pass
+
     await db.execute(
         sa_delete(WhatsAppRawMessage).where(WhatsAppRawMessage.filter_id == filter_id)
     )
@@ -1042,8 +1065,6 @@ async def activate_whatsapp_filter_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Start or resume a filter job, preserving a paused countdown."""
-    from worker.celery_app import celery_app
-
     filter_row = await _load_owned_filter(filter_id, current_user, db)
     if filter_row.status == "active":
         raise HTTPException(status_code=409, detail="Filter is already active")
@@ -1084,13 +1105,9 @@ async def activate_whatsapp_filter_job(
         message = f"Filter '{filter_row.name}' activated. First scan starting..."
 
     next_scan_at = filter_row.next_scan_at
-    job_id = filter_row.id
     await db.commit()
-    celery_app.send_task(
-        "tasks.check_whatsapp_messages",
-        args=[job_id],
-        countdown=max(5, delay_seconds),
-    )
+    # Beat owns delayed work. Do not put a long countdown message in Redis;
+    # pausing/deleting a filter must immediately stop future scans.
     return {"message": message, "next_scan_at": next_scan_at}
 
 
@@ -1118,6 +1135,17 @@ async def pause_whatsapp_filter_job(
     remaining_seconds = filter_row.remaining_seconds
     filter_name = filter_row.name
     await db.commit()
+    try:
+        import redis
+        from core.config import settings
+
+        redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=0.25,
+            socket_timeout=0.25,
+        ).delete(f"linkeasy:scheduler:whatsapp:{filter_id}")
+    except Exception:
+        pass
     return {
         "message": f"Filter '{filter_name}' paused",
         "remaining_seconds": remaining_seconds,
@@ -1325,11 +1353,10 @@ async def trigger_whatsapp_scan(
             detail="No forward group configured. Please select a forward group.",
         )
 
-    celery_app.send_task(
-        "tasks.check_whatsapp_messages",
-        args=[filter_id] if filter_id is not None else [],
-        countdown=2,
-    )
+    # Manual scans are explicit and bypass the durable schedule. Publish
+    # immediately, never as a delayed ETA message that can outlive a filter.
+    args = [filter_id, None, True] if filter_id is not None else [None, None, True]
+    celery_app.send_task("tasks.check_whatsapp_messages", args=args)
     logger.info(
         "📱 Manual WhatsApp scan triggered by user %s filter=%s",
         current_user.email,
