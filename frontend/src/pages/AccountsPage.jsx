@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { linkedinApi, whatsappApi } from '../api/endpoints';
+import { getErrorMessage } from '../api/client';
 import { AccountStatusBadge } from '../components/Badge';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
 import { Spinner } from '../components/Spinner';
@@ -23,6 +25,7 @@ export default function AccountsPage() {
   const [liAccount, setLiAccount] = useState(null);
   const [waLoading, setWaLoading] = useState(true);
   const [waStatus, setWaStatus] = useState('disconnected');
+  const [waDisconnecting, setWaDisconnecting] = useState(false);
 
   const loadLinkedIn = useCallback(async () => {
     setLiLoading(true);
@@ -52,6 +55,24 @@ export default function AccountsPage() {
     loadLinkedIn();
     loadWhatsApp();
   }, [loadLinkedIn, loadWhatsApp]);
+
+  const handleWhatsAppDisconnect = async () => {
+    const confirmed = window.confirm(
+      'Disconnect WhatsApp? You will need to scan a new QR code before filters or live chat can use it again.',
+    );
+    if (!confirmed) return;
+
+    try {
+      setWaDisconnecting(true);
+      const { data } = await whatsappApi.disconnect();
+      setWaStatus('disconnected');
+      toast.success(data?.message || 'WhatsApp disconnected successfully');
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to disconnect WhatsApp'));
+    } finally {
+      setWaDisconnecting(false);
+    }
+  };
 
   return (
     <div className="max-w-4xl">
@@ -162,9 +183,21 @@ export default function AccountsPage() {
               {waStatus === 'connected' ? 'Manage WhatsApp connection' : 'Connect WhatsApp'}
             </Link>
             {waStatus === 'connected' && (
-              <Link to="/app/whatsapp-scanner" className="btn-secondary">
-                Open scanner →
-              </Link>
+              <>
+                <Link to="/app/whatsapp-scanner" className="btn-secondary">
+                  Open scanner →
+                </Link>
+                <button
+                  type="button"
+                  onClick={handleWhatsAppDisconnect}
+                  disabled={waDisconnecting}
+                  className="inline-flex items-center gap-2 rounded-lg border border-red-700/50 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  data-testid="accounts-whatsapp-disconnect"
+                >
+                  {waDisconnecting ? <Spinner /> : null}
+                  {waDisconnecting ? 'Disconnecting…' : 'Disconnect WhatsApp'}
+                </button>
+              </>
             )}
           </div>
         </div>

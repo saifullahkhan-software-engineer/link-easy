@@ -4,6 +4,7 @@ FILE: api/v1/whatsapp_scanner.py
 
 POST   /api/v1/whatsapp/connect          → start embedded browser view + QR watcher
 GET    /api/v1/whatsapp/status           → connection status
+DELETE /api/v1/whatsapp/connection       → disconnect + remove durable credentials
 GET    /api/v1/whatsapp/groups           → list all groups
 POST   /api/v1/whatsapp/groups/select    → save monitored + forward groups
 GET    /api/v1/whatsapp/filters/jobs    → list the user's filter jobs
@@ -31,6 +32,7 @@ After successful connection, the browser is stopped to free resources.
 Logs are written to the terminal/backend for easy monitoring.
 """
 import asyncio
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -43,6 +45,7 @@ from api.dependencies import get_db, get_current_user
 from models.user import User
 from schemas.whatsapp import (
     WhatsAppConnectResponse,
+    WhatsAppDisconnectResponse,
     WhatsAppStatusResponse,
     WhatsAppGroupListResponse,
     WhatsAppGroupItem,
@@ -477,6 +480,83 @@ async def get_whatsapp_status(
     return WhatsAppStatusResponse(
         status=session.status,
         is_active=session.is_active,
+    )
+
+
+# ── DELETE /connection ───────────────────────────────────────────────────────
+
+
+@router.delete("/connection", response_model=WhatsAppDisconnectResponse)
+async def disconnect_whatsapp(
+    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppDisconnectResponse:
+    """Disconnect WhatsApp and remove all durable browser credentials.
+
+    Merely changing the database status is not sufficient: WhatsApp's device
+    keys live in the persistent Chromium profile (IndexedDB), so a later
+    browser launch would silently reconnect. Stop both in-process browser
+    managers, reserve the cross-process profile lock, clear the session rows,
+    and then remove that profile before reporting success.
+    """
+    from services.browser_view import browser_view
+    from services.whatsapp_browser import whatsapp_profile_dir
+    from services.whatsapp_live_browser import live_browser
+    from worker.profile_lock import (
+        ProfileInUseError,
+        acquire_profile_lock,
+        release_profile_lock,
+    )
+
+    async with _whatsapp_op_lock:
+        # Either manager may own profile_lock:whatsapp. Their idempotent stop
+        # methods close Chromium and release it before we reserve the profile.
+        await live_browser.stop()
+        await browser_view.stop()
+
+        try:
+            profile_lock = await asyncio.to_thread(
+                acquire_profile_lock, "whatsapp", blocking_timeout=10
+            )
+        except ProfileInUseError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "WhatsApp is busy with a scanner operation. Wait a few seconds "
+                    "and try disconnecting again."
+                ),
+            ) from exc
+
+        try:
+            await db.execute(
+                sa_update(WhatsAppSession).values(
+                    status="disconnected",
+                    is_active=False,
+                    cookies_json=None,
+                    storage_state_json=None,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+
+            profile_dir = whatsapp_profile_dir()
+            try:
+                await asyncio.to_thread(shutil.rmtree, profile_dir)
+            except FileNotFoundError:
+                pass
+        except Exception as exc:
+            logger.exception("Could not disconnect WhatsApp")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Could not remove the saved WhatsApp session. Try again.",
+            ) from exc
+        finally:
+            release_profile_lock(profile_lock)
+
+    logger.info("📱 WhatsApp disconnected and durable profile removed")
+    return WhatsAppDisconnectResponse(
+        message="WhatsApp disconnected successfully.",
+        status="disconnected",
     )
 
 

@@ -19,6 +19,7 @@ export default function WhatsAppConnectPage() {
   const [status, setStatus] = useState('disconnected');
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const prevStatus = useRef(null);
 
   const loadStatus = useCallback(async () => {
@@ -64,6 +65,24 @@ export default function WhatsAppConnectPage() {
     }
   };
 
+  const handleDisconnect = async () => {
+    const confirmed = window.confirm(
+      'Disconnect WhatsApp? Active scans and live chat will no longer be able to use this account until you scan a new QR code.',
+    );
+    if (!confirmed) return;
+
+    try {
+      setDisconnecting(true);
+      const { data } = await whatsappApi.disconnect();
+      setStatus('disconnected');
+      toast.success(data?.message || 'WhatsApp disconnected successfully');
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to disconnect WhatsApp'));
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
@@ -88,8 +107,20 @@ export default function WhatsAppConnectPage() {
             <h2 className="text-lg font-semibold text-zinc-100">Connection status</h2>
             {loading ? <Spinner /> : <WhatsAppStatusBadge status={status} />}
           </div>
-          {status !== 'connected' && (
+          {status === 'connected' ? (
             <button
+              type="button"
+              onClick={handleDisconnect}
+              disabled={disconnecting}
+              className="inline-flex items-center gap-2 rounded-lg border border-red-700/50 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              data-testid="whatsapp-disconnect"
+            >
+              {disconnecting ? <Spinner /> : null}
+              {disconnecting ? 'Disconnecting…' : 'Disconnect WhatsApp'}
+            </button>
+          ) : (
+            <button
+              type="button"
               onClick={handleConnect}
               disabled={connecting}
               title={

@@ -26,6 +26,11 @@ from services.linkedin_live_browser import (  # noqa: E402
     CHAT_ROW_SELECTOR,
     CHAT_UNREAD_SELECTOR,
     COMPOSER_SELECTOR,
+    MESSAGE_ROW_SELECTOR,
+    MESSAGE_ROW_SELECTORS,
+    MESSAGE_SENDER_SELECTOR,
+    MESSAGE_TEXT_SELECTOR,
+    MESSAGE_TIME_SELECTOR,
     LinkedInLiveBrowserManager,
     THREAD_PANEL_SELECTOR,
 )
@@ -216,6 +221,91 @@ class _ProfilePage:
         return []
 
 
+class _SduiProfilePage(_ProfilePage):
+    """LinkedIn's 2026 SDUI profile: h2 + stable card ids, no h1."""
+
+    def __init__(self):
+        super().__init__()
+        self.ready_selector = ""
+
+    async def wait_for_selector(self, selector, timeout):
+        assert timeout == 15000
+        self.ready_selector = selector
+        if "[id$='Topcard'] h2" not in selector:
+            raise TimeoutError("SDUI profile has no h1")
+        return object()
+
+    async def query_selector(self, selector):
+        if "[id$='Topcard'] h2" in selector:
+            return _Element("Grace Hopper")
+        if "[id$='About'] p" in selector:
+            return _Element("Computer scientist and compiler pioneer.")
+        return None
+
+    async def query_selector_all(self, selector):
+        self.section_selectors.append(selector)
+        if selector == "main [id$='Topcard'] p":
+            return [
+                _Element("· 2nd"),
+                _Element("Rear admiral and computer scientist"),
+                _Element("United States Navy"),
+                _Element("Arlington, Virginia, United States"),
+                _Element("·"),
+                _Element("Contact info"),
+            ]
+        return []
+
+
+class _MessageRow(_Element):
+    def __init__(self, message_id, text, sender="Ada", timestamp="3:42 PM"):
+        super().__init__(attrs={"data-event-urn": message_id})
+        self.message_text = _Element(text)
+        self.sender = _Element(sender)
+        self.timestamp = _Element(timestamp)
+
+    async def query_selector(self, selector):
+        if selector == MESSAGE_TEXT_SELECTOR:
+            return self.message_text
+        if selector == MESSAGE_SENDER_SELECTOR:
+            return self.sender
+        if selector == MESSAGE_TIME_SELECTOR:
+            return self.timestamp
+        return None
+
+
+class _NestedMessagePage:
+    """A classic DOM where each event contains a second matching wrapper."""
+
+    def __init__(self):
+        self.url = "https://www.linkedin.com/messaging/thread/thread-1/"
+        self.outer = [
+            _MessageRow("event-1", "First message"),
+            _MessageRow("event-2", "Second message"),
+        ]
+        self.inner = [
+            _MessageRow("inner-1", "First message"),
+            _MessageRow("inner-2", "Second message"),
+        ]
+        self.queries = []
+
+    def is_closed(self):
+        return False
+
+    async def wait_for_selector(self, _selector, timeout):
+        assert timeout == 10000
+        return object()
+
+    async def query_selector_all(self, selector):
+        self.queries.append(selector)
+        if selector == MESSAGE_ROW_SELECTORS[0]:
+            return self.outer
+        if selector == MESSAGE_ROW_SELECTOR:
+            return [self.outer[0], self.inner[0], self.outer[1], self.inner[1]]
+        if selector == MESSAGE_ROW_SELECTORS[-1]:
+            return self.inner
+        return []
+
+
 class LinkedInLiveBrowserTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_uses_owner_account_and_releases_profile_resources(self):
         from services import linkedin_live_browser as browser_module
@@ -293,6 +383,22 @@ class LinkedInLiveBrowserTests(unittest.IsolatedAsyncioTestCase):
         for selector in COMPOSER_SELECTOR.split(","):
             self.assertTrue(selector.strip().startswith("main "), selector)
 
+    async def test_messages_use_one_dom_wrapper_level_without_duplicates(self):
+        page = _NestedMessagePage()
+        manager = LinkedInLiveBrowserManager()
+        manager.status = "running"
+        manager._page = page
+        manager.active_chat_id = "thread-1"
+
+        messages = await manager.read_messages()
+
+        self.assertEqual(
+            [(message["message_id"], message["text"]) for message in messages],
+            [("event-1", "First message"), ("event-2", "Second message")],
+        )
+        self.assertEqual(page.queries, [MESSAGE_ROW_SELECTORS[0]])
+        self.assertNotIn(MESSAGE_ROW_SELECTOR, page.queries)
+
     def test_live_timestamp_models_accept_browser_display_text(self):
         linkedin = LiveMessageItem(
             message_id="event-1",
@@ -325,6 +431,41 @@ class LinkedInLiveBrowserTests(unittest.IsolatedAsyncioTestCase):
                     "location": "Remote",
                 }
             ],
+        )
+
+    async def test_profile_scan_supports_sdui_h2_topcard_without_an_h1(self):
+        from services import linkedin_profile_scraper as scraper
+
+        page = _SduiProfilePage()
+
+        @asynccontextmanager
+        async def profile_context():
+            yield page
+
+        with (
+            patch.object(
+                scraper.linkedin_live_browser,
+                "profile_page",
+                return_value=profile_context(),
+            ),
+            patch.object(scraper.asyncio, "sleep", AsyncMock()),
+        ):
+            report = await scrape_profile(
+                "https://www.linkedin.com/in/grace-hopper/"
+            )
+
+        self.assertIn("[id$='Topcard'] h2", page.ready_selector)
+        self.assertEqual(report["basics"]["name"], "Grace Hopper")
+        self.assertEqual(
+            report["basics"]["headline"],
+            "Rear admiral and computer scientist",
+        )
+        self.assertEqual(
+            report["basics"]["location"],
+            "Arlington, Virginia, United States",
+        )
+        self.assertEqual(
+            report["about"], "Computer scientist and compiler pioneer."
         )
 
     async def test_profile_scrape_scopes_sections_and_restores_exact_thread_url(self):

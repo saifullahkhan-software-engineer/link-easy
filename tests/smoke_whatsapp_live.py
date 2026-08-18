@@ -60,6 +60,7 @@ async def main_async():
         # Also confirm the legacy scanner endpoints still wired (no regressions).
         legacy = [
             ("GET", "/api/v1/whatsapp/status", 401),
+            ("DELETE", "/api/v1/whatsapp/connection", 401),
             ("POST", "/api/v1/whatsapp/scan/trigger", 401),
             ("GET", "/api/v1/whatsapp/groups", 401),
         ]

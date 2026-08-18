@@ -123,7 +123,7 @@ const CASES = [
       'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT),
       'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true }),
     },
-    mustContain: ['li@test.dev', 'Manage LinkedIn account', 'Manage WhatsApp connection', 'Open scanner'],
+    mustContain: ['li@test.dev', 'Manage LinkedIn account', 'Manage WhatsApp connection', 'Open scanner', 'Disconnect WhatsApp'],
   },
   {
     name: 'whatsapp connect page — disconnected shows connect flow + browser view',
@@ -131,6 +131,13 @@ const CASES = [
     storage: AUTH_TOKENS,
     api: { 'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }) },
     mustContain: ['WhatsApp Connection', 'Connection status', 'Connect WhatsApp', 'Live Browser View'],
+  },
+  {
+    name: 'whatsapp connect page — connected account exposes disconnect',
+    path: '/app/account/whatsapp',
+    storage: AUTH_TOKENS,
+    api: { 'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true }) },
+    mustContain: ['WhatsApp Connection', 'WhatsApp is connected', 'Disconnect WhatsApp', 'Open WhatsApp filters'],
   },
   {
     name: 'whatsapp filters — list page replaces the scanner landing page',
