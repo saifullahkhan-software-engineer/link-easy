@@ -109,6 +109,40 @@ def _name_from_title(title: str) -> str:
     return candidate[:200]
 
 
+async def _expand_profile_sections(page) -> None:
+    """Expand profile cards before scraping their virtualized contents.
+
+    LinkedIn frequently renders only the About card and the first visual
+    portion of Experience/Skills until a ``Show all`` or ``See more`` control
+    is clicked.  The control copy and CSS classes change, but the visible
+    button/link text remains a useful semantic hook.  This is best-effort: a
+    missing ``evaluate`` implementation in a test double or an older page
+    must not make an otherwise valid profile fail.
+    """
+    try:
+        await page.evaluate(
+            """() => {
+                const wanted = /^(show all|see more)\b/i;
+                let clicked = 0;
+                const controls = Array.from(document.querySelectorAll(
+                    'main button, main a, main [role="button"]'
+                ));
+                for (const control of controls) {
+                    const text = (control.innerText || control.getAttribute('aria-label') || '')
+                        .replace(/\s+/g, ' ').trim();
+                    if (!wanted.test(text) || control.dataset.linkeasyExpanded === '1') continue;
+                    control.dataset.linkeasyExpanded = '1';
+                    control.click();
+                    clicked += 1;
+                }
+                return clicked;
+            }"""
+        )
+    except Exception:
+        return
+    await asyncio.sleep(0.45)
+
+
 async def _lazy_render_profile(page) -> None:
     """Walk the page so old and virtualized SDUI section cards can render."""
     # Fixed positions are intentional: they work in both Playwright and the
@@ -122,6 +156,15 @@ async def _lazy_render_profile(page) -> None:
         except Exception:
             break
         await asyncio.sleep(0.35)
+    # SDUI can append more rows after the fixed positions above.  One bottom
+    # pass catches those rows without an unbounded scroll loop.
+    try:
+        await page.evaluate(
+            "window.scrollTo({top: document.documentElement.scrollHeight, behavior: 'instant'})"
+        )
+    except Exception:
+        pass
+    await asyncio.sleep(0.35)
     try:
         await page.evaluate("window.scrollTo({top: 0, behavior: 'instant'})")
     except Exception:
@@ -168,6 +211,7 @@ async def scrape_profile(profile_url: str) -> dict[str, Any]:
                         "LinkedIn did not render the profile. Check that the URL is accessible to the connected account."
                     ) from exc
 
+            await _expand_profile_sections(page)
             await _lazy_render_profile(page)
 
             basics = await _scrape_basics(page, profile_url)
@@ -321,9 +365,98 @@ async def _scrape_about(page) -> str:
     return _collapse_whitespace(txt)[:2_600]
 
 
+async def _evaluate_sdui_rows(page, section: str) -> list[list[str]]:
+    """Extract semantic row lines from LinkedIn's classless SDUI cards.
+
+    The newer profile surface gives cards generated IDs and removes the old
+    ``pv-*`` classes.  Section headings/IDs and list semantics are much more
+    stable, so use a small DOM-only fallback when the classic selectors found
+    no rows.  It returns plain data and never exposes a Playwright element.
+    """
+    try:
+        rows = await page.evaluate(
+            """(sectionName) => {
+                const key = String(sectionName || '').toLowerCase();
+                const text = (el) => (el?.innerText || '').replace(/\s+/g, ' ').trim();
+                const marker = (el) => [
+                    el.id,
+                    el.getAttribute('data-section'),
+                    el.getAttribute('data-view-name'),
+                    el.getAttribute('aria-label'),
+                ].filter(Boolean).join(' ').toLowerCase();
+                const roots = Array.from(document.querySelectorAll('main section, main [id], main [data-section]'));
+                const root = roots.find((el) => {
+                    if (marker(el).includes(key)) return true;
+                    return Array.from(el.querySelectorAll(':scope > h2, :scope > h3, :scope > div > h2, :scope > div > h3'))
+                        .some((heading) => text(heading).toLowerCase() === key);
+                });
+                if (!root) return [];
+                let candidates = Array.from(root.querySelectorAll(
+                    'li, [role="listitem"], [data-view-name*="entity" i]'
+                ));
+                if (!candidates.length) candidates = [root];
+                const unique = [];
+                const seen = new Set();
+                for (const candidate of candidates) {
+                    const values = Array.from(candidate.querySelectorAll('h3, h4, p, a, span'))
+                        .map(text).filter(Boolean);
+                    const lines = [];
+                    for (const value of values) {
+                        if (!seen.has(value)) {
+                            seen.add(value);
+                            lines.push(value);
+                        }
+                    }
+                    if (lines.length) unique.push(lines.slice(0, 12));
+                }
+                return unique.slice(0, 12);
+            }""",
+            section,
+        )
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [
+        [_collapse_whitespace(str(value)) for value in row if _collapse_whitespace(str(value))]
+        for row in rows
+        if isinstance(row, list)
+    ]
+
+
+def _parse_sdui_experience_rows(rows: list[list[str]]) -> list[dict]:
+    out = []
+    for lines in rows:
+        if not lines:
+            continue
+        dates = _line_matching(lines[1:], r"\b(?:19|20)\d{2}\b|\bpresent\b")
+        location = next((line[:120] for line in lines[2:] if ',' in line and line != dates), '')
+        out.append({
+            'title': lines[0][:160],
+            'company': (lines[1] if len(lines) > 1 and lines[1] != dates else '')[:160],
+            'dates': dates[:120],
+            'location': location,
+        })
+    return _dedupe_dict_list(out)
+
+
+def _parse_sdui_education_rows(rows: list[list[str]]) -> list[dict]:
+    out = []
+    for lines in rows:
+        if not lines:
+            continue
+        dates = _line_matching(lines[1:], r"\b(?:19|20)\d{2}\b|\bpresent\b")
+        out.append({
+            'school': lines[0][:140],
+            'degree': (lines[1] if len(lines) > 1 and lines[1] != dates else '')[:200],
+            'dates': dates[:120],
+        })
+    return _dedupe_dict_list(out)
+
+
 async def _row_lines(row) -> list[str]:
     """Semantic SDUI fallback when LinkedIn replaces all legacy classes."""
-    return await _safe_texts(row, "h3, p")
+    return await _safe_texts(row, "h3, h4, p, span[aria-hidden='true']")
 
 
 def _line_matching(lines: list[str], pattern: str) -> str:
@@ -339,8 +472,12 @@ async def _scrape_experience(page) -> list[dict]:
         "main section:has(#experience) ul > li, "
         "main section.experience-section ul > li, "
         "main section[data-section='experience'] ul > li, "
+        "main section[id*='experience' i] li, "
+        "main section[id*='experience' i] [role='listitem'], "
         "main [id$='Experience'] li, "
-        "main [id$='Experience'] [role='listitem']"
+        "main [id$='Experience'] [role='listitem'], "
+        "main [id*='Experience' i] [data-view-name*='entity' i], "
+        "main [data-view-name*='experience' i] [role='listitem']"
     )
     out: list[dict] = []
     for row in rows:
@@ -364,14 +501,17 @@ async def _scrape_experience(page) -> list[dict]:
                 "dates": (await _safe_text(dates_el))[:120].strip(),
                 "location": (await _safe_text(location_el))[:120].strip(),
             }
-            if not any(item.values()):
-                lines = await _row_lines(row)
-                if lines:
+            lines = await _row_lines(row)
+            if lines:
+                if not item["title"]:
                     item["title"] = lines[0][:160]
-                    item["company"] = (lines[1] if len(lines) > 1 else "")[:160]
+                if not item["company"] and len(lines) > 1:
+                    item["company"] = lines[1][:160]
+                if not item["dates"]:
                     item["dates"] = _line_matching(
                         lines[1:], r"\b(?:19|20)\d{2}\b|\bpresent\b"
                     )[:120]
+                if not item["location"]:
                     item["location"] = next(
                         (
                             line[:120]
@@ -387,7 +527,12 @@ async def _scrape_experience(page) -> list[dict]:
                 break
         except Exception:
             continue
-    return _dedupe_dict_list(out)
+    out = _dedupe_dict_list(out)
+    if out:
+        return out
+    # Current SDUI profile cards can omit every legacy row selector.  Fall
+    # back to semantic section extraction rather than returning About only.
+    return _parse_sdui_experience_rows(await _evaluate_sdui_rows(page, "experience"))[:6]
 
 
 async def _scrape_education(page) -> list[dict]:
@@ -397,8 +542,12 @@ async def _scrape_education(page) -> list[dict]:
         "main section:has(#education) ul > li, "
         "main section.education-section ul > li, "
         "main section[data-section='education'] ul > li, "
+        "main section[id*='education' i] li, "
+        "main section[id*='education' i] [role='listitem'], "
         "main [id$='Education'] li, "
-        "main [id$='Education'] [role='listitem']"
+        "main [id$='Education'] [role='listitem'], "
+        "main [id*='Education' i] [data-view-name*='entity' i], "
+        "main [data-view-name*='education' i] [role='listitem']"
     )
     out: list[dict] = []
     for row in rows:
@@ -416,11 +565,13 @@ async def _scrape_education(page) -> list[dict]:
                 "degree": (await _safe_text(degree_el))[:200].strip(),
                 "dates": (await _safe_text(dates_el))[:120].strip(),
             }
-            if not any(item.values()):
-                lines = await _row_lines(row)
-                if lines:
+            lines = await _row_lines(row)
+            if lines:
+                if not item["school"]:
                     item["school"] = lines[0][:140]
-                    item["degree"] = (lines[1] if len(lines) > 1 else "")[:200]
+                if not item["degree"] and len(lines) > 1:
+                    item["degree"] = lines[1][:200]
+                if not item["dates"]:
                     item["dates"] = _line_matching(
                         lines[1:], r"\b(?:19|20)\d{2}\b|\bpresent\b"
                     )[:120]
@@ -431,7 +582,10 @@ async def _scrape_education(page) -> list[dict]:
                 break
         except Exception:
             continue
-    return _dedupe_dict_list(out)
+    out = _dedupe_dict_list(out)
+    if out:
+        return out
+    return _parse_sdui_education_rows(await _evaluate_sdui_rows(page, "education"))[:6]
 
 
 async def _scrape_skills(page, max_items: int = 8) -> list[str]:
@@ -443,19 +597,45 @@ async def _scrape_skills(page, max_items: int = 8) -> list[str]:
         "main section.skills-section "
         ".pv-skill-category-entity__name span[aria-hidden='true'], "
         "main section[data-section='skills'] li span[class*='skill-name'], "
+        "main section[id*='skills' i] li h3, "
+        "main section[id*='skills' i] [role='listitem'] h3, "
         "main .skills-section-list span.t-bold, "
         "main [id$='Skills'] li h3, "
-        "main [id$='Skills'] [role='listitem'] h3"
+        "main [id$='Skills'] [role='listitem'] h3, "
+        "main [id*='Skills' i] [data-view-name*='entity' i] h3, "
+        "body [role='dialog'] li h3, "
+        "body [role='dialog'] [role='listitem'] h3"
     )
     for el in els:
         try:
-            txt = (await _safe_text(el)).strip()
-            if txt and txt not in skills:
-                skills.append(txt)
+            txt = _collapse_whitespace(await _safe_text(el))
+            if not txt:
+                continue
+            if txt.casefold() in {"skills", "show all skills"}:
+                continue
+            if re.fullmatch(r"[\d,]+(?:\s+endorsements?)?", txt, re.I):
+                continue
+            if txt not in skills:
+                skills.append(txt[:160])
                 if len(skills) >= max_items:
                     break
         except Exception:
             continue
+    if not skills:
+        for lines in await _evaluate_sdui_rows(page, "skills"):
+            if not lines:
+                continue
+            # The first semantic heading in a Skills entity is the skill name;
+            # endorsement counts and "show all" controls are not skills.
+            candidate = lines[0]
+            if re.fullmatch(r"[\d,]+(?: endorsements?)?", candidate, re.I):
+                continue
+            if candidate.casefold() in {"skills", "show all skills"}:
+                continue
+            if candidate not in skills:
+                skills.append(candidate[:160])
+            if len(skills) >= max_items:
+                break
     return skills
 
 

@@ -209,7 +209,11 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
     Once 2FA is completed (logged in), the browser is stopped.
     """
     from services.browser_view import browser_view
-    from services.whatsapp_browser import get_storage_state, is_logged_in
+    from services.whatsapp_browser import (
+        get_storage_state,
+        is_logged_in,
+        MAIN_PANE_SELECTOR,
+    )
     from database import async_session
 
     logger.info("👀 Watching for WhatsApp QR scan (session id=%s)", session_id)
@@ -232,6 +236,16 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
                 # re-verify so a transient frame can't trigger a save.
                 await asyncio.sleep(3)
                 if await is_logged_in(page):
+                    # The sidebar can appear before the conversation shell and
+                    # IndexedDB sync have finished.  Keep the embedded view
+                    # alive until the full WhatsApp surface is rendered so the
+                    # next live-chat browser never inherits a half-loaded
+                    # profile.
+                    try:
+                        await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=30000)
+                    except Exception:
+                        logger.debug("WhatsApp main pane is still hydrating after login")
+                    await asyncio.sleep(2)
                     logged_in = True
                     if encountered_2fa:
                         two_fa_completed = True

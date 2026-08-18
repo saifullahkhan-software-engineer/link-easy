@@ -29,6 +29,7 @@ from typing import Optional
 from core.config import settings
 from core.logging_config import get_logger
 from services.whatsapp_browser import (
+    CHAT_HEADER_SELECTOR,
     CHAT_LIST_SELECTOR,
     CHAT_NAME_SELECTOR,
     CHAT_ROW_SELECTOR,
@@ -45,6 +46,7 @@ from services.whatsapp_browser import (
     ensure_whatsapp_profile_dir,
     is_logged_in,
     navigate_to_whatsapp,
+    wait_for_login,
     safe_close,
     scrape_messages_from_current_chat,
 )
@@ -185,19 +187,22 @@ class LiveBrowserManager:
                 await context.add_init_script(STEALTH_SCRIPT)
                 await navigate_to_whatsapp(page)
 
-                # Best-effort login confirmation. If the profile directory was
-                # evicted or cookies got wiped, ``is_logged_in`` will return
-                # False and we surface a helpful error.
-                for _ in range(20):
-                    if await is_logged_in(page):
-                        break
-                    await asyncio.sleep(0.5)
-                else:
+                # ``domcontentloaded`` is not the WhatsApp app.  Wait for
+                # the visible chat list for a full cold-start window so live
+                # chat never starts against the QR/loading shell.
+                if not await wait_for_login(page, timeout_seconds=45):
                     raise RuntimeError(
-                        "WhatsApp did not reach the chat list — the saved "
-                        "session may have expired. Reconnect via the "
+                        "WhatsApp did not reach the chat list after 45 seconds — "
+                        "the saved session may have expired. Reconnect via the "
                         "WhatsApp Scanner connect flow."
                     )
+                try:
+                    await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=15000)
+                except Exception:
+                    # Some builds render the sidebar before the empty main pane;
+                    # list/open operations will perform their own readiness check.
+                    pass
+                await asyncio.sleep(1.0)
 
                 self.active_chat_id = None
                 self.active_chat_name = None
@@ -209,7 +214,7 @@ class LiveBrowserManager:
 
             except Exception as exc:
                 self.last_error = str(exc)
-                logger.exception("live chat browser failed to start")
+                logger.error("live chat browser failed to start", exc_info=True)
                 self._set_status("error", f"Failed to start live chat: {exc}")
                 await self._shutdown_raw()
                 return self.snapshot()
@@ -339,11 +344,19 @@ class LiveBrowserManager:
                 # ``#main`` is the stable selector in current WhatsApp Web;
                 # data-testid values are retained as legacy fallbacks.
                 await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=8000)
+                # Waiting only for ``#main`` is insufficient: it is mounted
+                # behind the empty-state screen before a row click completes.
+                # The header is the reliable signal that the selected chat is
+                # actually open.
+                await page.wait_for_selector(CHAT_HEADER_SELECTOR, timeout=15000)
             except Exception as exc:
                 logger.warning("Could not open WhatsApp chat %s: %s", chat_id, exc)
                 return {"ok": False, "error": "Chat did not open. Refresh the list and try again."}
 
             name = await _read_active_chat_name(page)
+            if not name and not selected_name:
+                logger.warning("WhatsApp chat row clicked but no active header appeared for %s", chat_id)
+                return {"ok": False, "error": "Chat did not finish loading. Refresh the list and try again."}
             self.active_chat_id = chat_id
             self.active_chat_name = name or selected_name or chat_id
             return {"ok": True, "chat_id": chat_id, "name": self.active_chat_name}
@@ -490,6 +503,8 @@ class LiveBrowserManager:
         try:
             sidebar = await page.query_selector(PANE_SIDE_SELECTOR)
             if sidebar is None:
+                sidebar = await page.query_selector("#side, div[aria-label='Chat list']")
+            if sidebar is None:
                 # Try to click the back arrow or press Escape.
                 back = await page.query_selector(
                     'div[data-testid="back"], [aria-label="Back"]'
@@ -560,10 +575,14 @@ def _chat_search_box(page):
 
 async def _chat_rows(page) -> list:
     """Read only sidebar rows so message rows are never mistaken for chats."""
-    try:
-        sidebar = await page.query_selector(PANE_SIDE_SELECTOR)
-    except Exception:
-        sidebar = None
+    sidebar = None
+    for selector in (PANE_SIDE_SELECTOR, "#side", 'div[aria-label="Chat list"]'):
+        try:
+            sidebar = await page.query_selector(selector)
+        except Exception:
+            sidebar = None
+        if sidebar is not None:
+            break
     if sidebar is None:
         return []
     return await sidebar.query_selector_all(CHAT_ROW_SELECTOR)
@@ -652,6 +671,7 @@ async def _read_active_chat_name(page) -> Optional[str]:
     for selector in (
         "header div[data-testid='conversation-header'] span[dir='auto']",
         "header span[dir='auto']",
+        "#main header span[dir='auto']",
         "div[data-testid='conversation-header'] span[dir='auto']",
     ):
         try:

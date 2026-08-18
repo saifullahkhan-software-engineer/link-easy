@@ -324,9 +324,10 @@ def run_feed_scroll(self, feed_scroll_job_id: str):
             f"{len(top_posts)} posts stored | top score {top_posts[0]['score'] if top_posts else 0} | batch={scan_batch_id}"
         )
 
-        # Schedule next scan
-        if job.status == FeedScrollJobStatus.ACTIVE:
-            _schedule_next_scan(job.id, job.feed_interval_hours)
+        # ``next_scan_at`` is the durable schedule.  Do not add a long ETA
+        # Celery message here: it survives a deleted/paused job in Redis and
+        # creates the background tasks operators see after cleanup. Beat's
+        # dispatcher will enqueue the next run when this timestamp is due.
 
 
 @celery_app.task(name="tasks.dispatch_due_feed_scans")
@@ -348,6 +349,14 @@ def dispatch_due_feed_scans():
             )
             .all()
         )
+        # Claim the next dispatch before leaving the transaction.  A browser
+        # scan can run longer than Beat's one-minute interval; without this
+        # claim the same active job was queued repeatedly while its first task
+        # was still running.  The worker writes the precise completion time
+        # again when it finishes.
+        for job in due_jobs:
+            interval_hours = float(getattr(job, "feed_interval_hours", None) or 1)
+            job.next_scan_at = now + timedelta(hours=max(interval_hours, 1 / 60))
         job_ids = [j.id for j in due_jobs]
 
     dispatched = 0
@@ -454,17 +463,13 @@ async def _run_feed_scroll_async(account_email: str, keep_limit: int, job) -> di
 
 
 def _schedule_next_scan(job_id: str, interval_hours: int):
-    """Schedule the next feed scan."""
-    import random
+    """Compatibility no-op for the retired ETA scheduling path.
 
-    # Add jitter: ±15 minutes
-    jitter_seconds = random.randint(-900, 900)
-    delay_seconds = interval_hours * 3600 + jitter_seconds
-
-    celery_app.send_task(
-        "tasks.run_feed_scroll",
-        args=[job_id],
-        countdown=delay_seconds,
+    Feed jobs are scheduled from ``FeedScrollJob.next_scan_at`` by Beat.  The
+    helper remains importable for older integrations but never places an ETA
+    message in Redis.
+    """
+    logger.info(
+        "Skipping retired ETA feed task for job %s; durable scheduler owns the next scan",
+        job_id,
     )
-
-    logger.info(f"Scheduled next scan for job {job_id} in {interval_hours} hours (±15 min)")

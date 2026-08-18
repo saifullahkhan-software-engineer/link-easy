@@ -194,16 +194,21 @@ async def start_campaign(
         lead.current_step = first_step.step_order
         lead.next_action_at = scheduled_at
 
-    # Enqueue a single account session task instead of per-lead tasks.
+    # Commit the active status before publishing the task.  A fast worker can
+    # receive a countdown task before the request handler returns; publishing
+    # first used to make that worker see a draft campaign and silently skip it.
+    campaign.status = CampaignStatus.ACTIVE
+    campaign.started_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    # Enqueue a single account session task instead of one message per lead.
+    # The database timestamps remain the source of truth and Beat will recover
+    # the work after a worker/Redis restart.
     celery_app.send_task(
         "tasks.run_account_session",
         args=[campaign.account_email],
         countdown=session_delay_seconds,
     )
-
-    campaign.status = CampaignStatus.ACTIVE
-    campaign.started_at = datetime.now(timezone.utc)
-    await db.commit()
 
     return {"message": f"Campaign started. Account session queued for {campaign.account_email}.", "account_email": campaign.account_email}
 

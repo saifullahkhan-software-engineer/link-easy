@@ -27,7 +27,12 @@ from api.v1.linkedin_profile import router as linkedin_profile_router
 from api.v1.live import router as live_router
 from api.v1.system_queues import router as system_queues_router
 from core.config import settings
-from core.logging_config import get_logger, reset_logging
+from core.logging_config import get_logger
+try:
+    from core.logging_config import reset_logging
+except ImportError:  # lightweight test doubles may only expose get_logger
+    def reset_logging():
+        return None
 from core.security import validate_encryption_key
 from database import init_db
 from models.roles import UserRole

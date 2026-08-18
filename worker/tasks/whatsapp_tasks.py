@@ -67,7 +67,7 @@ def get_sync_db():
 # ── Task: Connect WhatsApp ───────────────────────────────────────────────────
 
 
-@celery_app.task(bind=True, name="tasks.connect_whatsapp", max_retries=0)
+# Retired task implementation; the API-owned browser view handles connection.
 def connect_whatsapp(self):
     logger.info("🚀 Starting WhatsApp connection task...")
 
@@ -278,14 +278,18 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                 )
                 return {"status": "skipped", "reason": "Filter is not active"}
         else:
-            # Legacy/manual invocation: prefer an active row but retain the
-            # original fallback for databases created before filter jobs.
+            # Legacy messages do not carry a filter id, so they must still be
+            # gated by an explicitly active filter.  Falling back to the most
+            # recent draft row allowed a stale Redis task to open WhatsApp even
+            # when the user had no active automation.
             filters_row = (
                 filter_query.filter(WhatsAppScanFilter.status == "active")
                 .order_by(WhatsAppScanFilter.id.desc())
                 .first()
-                or filter_query.order_by(WhatsAppScanFilter.id.desc()).first()
             )
+            if not filters_row:
+                logger.info("⏭️ No active WhatsApp filter — ignoring legacy scan task")
+                return {"status": "skipped", "reason": "No active WhatsApp filter"}
 
         group_query = db.query(WhatsAppMonitoredGroup)
         forward_query = db.query(WhatsAppForwardGroup)

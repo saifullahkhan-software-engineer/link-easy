@@ -157,15 +157,22 @@ PANE_SIDE_SELECTOR = '#pane-side'
 
 # The main chat list sidebar
 CHAT_LIST_SELECTOR = (
-    '#pane-side, div[aria-label="Chat list"], div[role="grid"][aria-label], '
+    '#pane-side, #side, div[aria-label="Chat list"], div[role="grid"][aria-label], '
     'div[data-testid="chat-list"]'
 )
 
-# Individual chat rows inside the sidebar
-CHAT_ROW_SELECTOR = 'div[role="row"], div[data-testid="cell-frame-container"]'
+# Individual chat rows inside the sidebar.  WhatsApp has used both ``row``
+# and ``listitem`` for the virtualized sidebar across recent rollouts.
+CHAT_ROW_SELECTOR = (
+    'div[role="row"], div[role="listitem"], '
+    'div[data-testid="cell-frame-container"]'
+)
 
 # Chat name/title inside a row
-CHAT_NAME_SELECTOR = 'span[data-testid="cell-frame-title"], span[dir="auto"]'
+CHAT_NAME_SELECTOR = (
+    'span[data-testid="cell-frame-title"], span[dir="auto"], '
+    '[role="gridcell"] span[dir="auto"]'
+)
 
 # Search box for finding groups
 SEARCH_BOX_SELECTOR = 'div[data-testid="chat-list-search"], div[contenteditable="true"][data-tab="3"]'
@@ -234,7 +241,8 @@ LOADING_SELECTOR = 'div[data-testid="progress-bar"], span[data-testid="loading"]
 # selector; the data-testid fallbacks support older builds.
 MAIN_PANE_SELECTOR = (
     '#main, div[data-testid="conversation-panel-wrapper"], '
-    'div[data-testid="conversation-panel"]'
+    'div[data-testid="conversation-panel"], '
+    '[role="main"][data-testid]'
 )
 
 # Candidate selectors that indicate "you are logged in" (the main interface).
@@ -242,6 +250,7 @@ MAIN_PANE_SELECTOR = (
 # entries are kept as fallbacks for older web builds.
 LOGGED_IN_SELECTORS = (
     PANE_SIDE_SELECTOR,
+    '#side',
     'div[aria-label="Chat list"]',
     'div[data-testid="chat-list"]',
     'header[data-testid="chatlist-header"]',
@@ -372,11 +381,50 @@ async def is_showing_qr(page: Page) -> bool:
             for selector in LOGGED_IN_SELECTORS:
                 el = await page.query_selector(selector)
                 if el is not None:
-                    return False
+                    try:
+                        if await el.is_visible():
+                            return False
+                    except Exception:
+                        # A mounted selector that cannot report visibility is
+                        # safer to treat as a login marker than to call a
+                        # half-hydrated canvas a fresh QR code.
+                        return False
             return True
     except Exception:
         pass
     return False
+
+
+async def wait_for_whatsapp_surface(
+    page: Page, timeout_seconds: float = 45.0
+) -> str:
+    """Wait until WhatsApp has rendered either QR or the full logged-in UI.
+
+    ``domcontentloaded`` only means the shell HTML arrived.  On a cold
+    Chromium profile the React chat application can take another 10–30
+    seconds to mount.  Starting another browser during that gap makes the
+    connection look broken and leaves live chat with an empty sidebar.  This
+    helper distinguishes the expected QR surface from the authenticated app
+    without treating a slow page as a logged-out session.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            if await is_logged_in(page):
+                # Let the main pane settle before callers snapshot state or
+                # hand the persistent profile to another browser.
+                try:
+                    await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=5000)
+                except Exception:
+                    pass
+                return "connected"
+            if await is_showing_qr(page):
+                return "qr"
+        except Exception:
+            # Navigation and React hydration can detach selectors temporarily.
+            pass
+        await asyncio.sleep(0.75)
+    return "timeout"
 
 
 async def wait_for_qr_scan(page: Page, max_wait_seconds: int = 120) -> bool:

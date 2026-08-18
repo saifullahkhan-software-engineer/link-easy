@@ -252,7 +252,7 @@ export const whatsappApi = {
 //   - POST /open    — searching for / clicking the chat (~15s, search-then-click)
 //   - POST /send    — paced send (up to WHATSAPP_FORWARD_DELAY_SECONDS inside)
 const WHATSAPP_LIVE_TIMEOUT = 60_000;
-const WHATSAPP_LIVE_START_TIMEOUT = 60_000;
+const WHATSAPP_LIVE_START_TIMEOUT = 120_000;
 
 export const whatsappLiveApi = {
   start: () =>

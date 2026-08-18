@@ -215,7 +215,7 @@ function AutomationPreview() {
 export default function Landing() {
   const { isAuthenticated } = useAuth();
   const primaryPath = isAuthenticated ? '/app' : '/signup';
-  const primaryLabel = isAuthenticated ? 'Open dashboard' : 'Start automating free';
+  const primaryLabel = isAuthenticated ? 'Open App' : 'Start automating free';
 
   return (
     <div className="min-h-screen overflow-hidden bg-surface-950 text-zinc-100">
@@ -237,15 +237,13 @@ export default function Landing() {
           </nav>
 
           <div className="flex items-center gap-2.5">
-            {!isAuthenticated && (
-              <Link to="/login" className="hidden px-3 py-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100 sm:inline-flex">
-                Log in
-              </Link>
-            )}
-            <Link to={primaryPath} className="btn-primary">
-              {isAuthenticated ? 'Dashboard' : 'Get started'}
-              <ArrowIcon />
+            <Link to="/app" className="rounded-lg border border-surface-700 bg-surface-900 px-3.5 py-2 text-sm font-semibold text-zinc-300 transition hover:border-surface-600 hover:bg-surface-800 hover:text-zinc-100">
+              App
             </Link>
+            <Link to="/dashboard" className="btn-primary">Dashboard <ArrowIcon /></Link>
+            {!isAuthenticated && (
+              <Link to="/signup" className="hidden px-3 py-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100 sm:inline-flex">Get started</Link>
+            )}
           </div>
         </div>
       </header>
@@ -273,8 +271,12 @@ export default function Landing() {
             </p>
 
             <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Link to={primaryPath} className="btn-primary px-6 py-3.5 text-base shadow-lg shadow-accent-500/15">
-                {primaryLabel}
+              <Link to="/app" className="btn-primary px-6 py-3.5 text-base shadow-lg shadow-accent-500/15" data-testid="landing-app-button">
+                Open App
+                <ArrowIcon />
+              </Link>
+              <Link to="/dashboard" className="btn-secondary px-6 py-3.5 text-base" data-testid="landing-dashboard-button">
+                Open Dashboard
                 <ArrowIcon />
               </Link>
               <a href="#how-it-works" className="inline-flex items-center justify-center gap-2 rounded-lg px-5 py-3.5 text-sm font-semibold text-zinc-300 transition hover:bg-white/5 hover:text-white">

@@ -122,7 +122,7 @@ export default function BrowserViewPanel() {
   );
 
   return (
-    <div className="flex h-full flex-col rounded-xl border border-surface-700 bg-surface-800 p-5">
+    <div className="flex min-h-[720px] flex-col rounded-xl border border-surface-700 bg-surface-800 p-5">
       {/* Header */}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
@@ -170,7 +170,7 @@ export default function BrowserViewPanel() {
       </div>
 
       {/* Viewport */}
-      <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-surface-700 bg-surface-950">
+      <div className="relative flex min-h-[560px] flex-1 items-center justify-center overflow-hidden rounded-lg border border-surface-700 bg-surface-950">
         {frame ? (
           <>
             <img
@@ -180,7 +180,7 @@ export default function BrowserViewPanel() {
               draggable={false}
               onPointerDown={handleClick}
               onWheel={handleWheel}
-              className={`w-full select-none ${interactive && status === 'running' ? 'cursor-crosshair' : 'cursor-default'}`}
+              className={`h-full max-h-[78vh] w-full object-contain object-top select-none ${interactive && status === 'running' ? 'cursor-crosshair' : 'cursor-default'}`}
             />
             {status === 'running' && (
               <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-1.5 rounded-full bg-black/50 px-2 py-0.5 text-[10px] text-green-300 backdrop-blur">
@@ -212,8 +212,8 @@ export default function BrowserViewPanel() {
                 <span className="text-3xl">🖥️</span>
                 <p className="mt-3 text-sm text-zinc-300">The Playwright browser runs on the server and streams its screen here.</p>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Click <span className="text-accent-300">Start</span> (or “Connect WhatsApp”) to open WhatsApp Web — the QR code
-                  will appear here for you to scan.
+                  Click <span className="text-accent-300">Start</span> (or “Connect WhatsApp”) to open the complete WhatsApp Web surface —
+                  the QR code and the post-login screen are streamed here for you to use.
                 </p>
                 <button
                   onClick={handleStart}

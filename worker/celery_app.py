@@ -5,6 +5,8 @@ FILE: worker/celery_app.py
 Start the worker with:
     celery -A worker.celery_app worker --loglevel=info --concurrency=2 --pool=prefork -Q linkedin_sessions,default
 """
+import os
+
 from celery import Celery
 from core.config import settings
 from core.security import validate_encryption_key
@@ -45,6 +47,14 @@ celery_app.conf.update(
     # Result expiry
     result_expires           = 86400,   # Keep results for 24 hours
 
+    # Never reuse a checked-in/local Beat database.  A persistent Beat file
+    # contains old task names and can resurrect schedules after code is
+    # deleted.  Use an ephemeral path by default; operators can override it
+    # when they explicitly want a durable Beat database.
+    beat_schedule_filename   = os.getenv(
+        "CELERY_BEAT_SCHEDULE_FILE", "/tmp/linkeasy-celerybeat-schedule"
+    ),
+
     # Celery Beat schedule for periodic tasks
     beat_schedule = {
         # Database-backed dispatch: survives worker restarts unlike long ETA
@@ -57,10 +67,10 @@ celery_app.conf.update(
             'task': 'tasks.dispatch_due_feed_scans',
             'schedule': 60.0,  # Every minute
         },
-        'reconcile-stalled-leads': {
-            'task': 'tasks.reconcile_stalled_leads',
-            'schedule': 900.0,  # Every 15 minutes (900 seconds)
-        },
+        # ``dispatch_due_account_sessions`` now covers the durable initial
+        # lead schedule as well as delayed steps.  The old reconciliation Beat
+        # entry only created noisy no-op tasks when no campaign was active and
+        # could revive legacy lead rows, so it is intentionally not scheduled.
         # Filter jobs are dispatched from their database-backed next_scan_at,
         # just like Feed Scroll jobs.  The task itself re-checks status before
         # touching the WhatsApp profile, so pause/resume is safe across restarts.

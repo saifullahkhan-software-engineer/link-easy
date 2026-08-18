@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { systemQueuesApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
@@ -230,7 +231,8 @@ export default function SystemQueuesPage() {
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-50">Redis & Queue Jobs</h1>
+          <Link to="/dashboard" className="text-xs font-medium text-zinc-500 transition hover:text-zinc-300">← Dashboard</Link>
+          <h1 className="mt-1 text-2xl font-bold text-zinc-50">Redis & Queue Jobs</h1>
           <p className="mt-1 text-sm text-zinc-400">
             Inspect remaining, paused, and faulty jobs in Redis and Postgres — delete unnecessary ones to unblock workers.
           </p>
@@ -725,27 +727,6 @@ export default function SystemQueuesPage() {
             </div>
           </div>
         )}
-      </div>
-
-      {/* Logs explanation */}
-      <div className="card p-5 border border-blue-500/20 bg-blue-500/5">
-        <h3 className="text-sm font-semibold text-blue-300">Why logs were not visible in terminal</h3>
-        <p className="mt-2 text-xs leading-relaxed text-zinc-400">
-          <b className="text-zinc-300">Root cause:</b> <code className="bg-surface-800 px-1 rounded">migrations/env.py</code> called <code className="bg-surface-800 px-1 rounded">logging.config.fileConfig(alembic.ini)</code>
-          {' '}on every startup. <code className="bg-surface-800 px-1 rounded">fileConfig</code> by default disables all existing loggers and sets root level to WARNING (from alembic.ini), wiping our flushing stdout handler that printed INFO logs after migrations.
-          The startup therefore stopped after "Will assume transactional DDL." with no visible traceback.
-        </p>
-        <p className="mt-2 text-xs leading-relaxed text-zinc-400">
-          <b className="text-zinc-300">Fix applied:</b>
-        </p>
-        <ul className="mt-1 list-disc pl-5 text-xs text-zinc-400 space-y-1">
-          <li><code>migrations/env.py</code> now uses <code>fileConfig(..., disable_existing_loggers=False)</code> to preserve existing handlers.</li>
-          <li><code>alembic.ini</code> root logger level changed from WARNING → INFO.</li>
-          <li><code>core/logging_config.py</code> made resilient: if fileConfig still wipes handlers, the next <code>get_logger()</code> call reinstalls the flushing stdout handler and re-enforces INFO level; new <code>reset_logging()</code> helper forces reinstall.</li>
-          <li><code>main.py</code> lifespan now calls <code>reset_logging()</code> right after migrations finish and prints a final "Service startup complete" line with <code>flush=True</code>, so terminal logs remain visible.</li>
-          <li>Uvicorn loggers (uvicorn, uvicorn.error, uvicorn.access) are set to propagate to root with INFO level, ensuring API call logs still show.</li>
-        </ul>
-        <p className="mt-2 text-xs text-zinc-500">If you still don't see logs in Docker, ensure container stdout is not buffered: Dockerfile already uses Python unbuffered via <code>-u</code>? Add <code>ENV PYTHONUNBUFFERED=1</code> if needed, and run uvicorn with <code>--log-level info</code>.</p>
       </div>
 
       {/* Purge modal */}
