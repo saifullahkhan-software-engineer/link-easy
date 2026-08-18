@@ -75,12 +75,18 @@ THREAD_PANEL_SELECTOR = (
     "main form.msg-form, "
     "main .msg-form"
 )
-MESSAGE_ROW_SELECTOR = (
-    "main li.msg-s-message-list__event, "
-    "main .msg-s-event-listitem, "
-    "main li.msg-s-message-listitem, "
-    "main [data-view-name='message-bubble']"
+# Do not query these as one comma-joined selector. In LinkedIn's classic DOM,
+# one logical message is represented by an outer ``li...__event`` containing an
+# inner ``.msg-s-event-listitem``. Treating both matches as rows renders every
+# message twice. Pick the first selector family present in the current build.
+MESSAGE_ROW_SELECTORS = (
+    "main li.msg-s-message-list__event",
+    "main li.msg-s-message-listitem",
+    "main [data-view-name='message-bubble']",
+    "main .msg-s-event-listitem",
 )
+# Kept as a public/debug constant; extraction uses MESSAGE_ROW_SELECTORS above.
+MESSAGE_ROW_SELECTOR = ", ".join(MESSAGE_ROW_SELECTORS)
 MESSAGE_TEXT_SELECTOR = (
     ".msg-s-event-listitem__body, "
     ".msg-s-message-listitem__body, "
@@ -422,6 +428,17 @@ class LinkedInLiveBrowserManager:
             self.active_chat_name = None
             return {"ok": True, "chat_id": None, "name": None}
 
+    async def _message_rows(self, page: Any) -> list[Any]:
+        """Return one DOM level of message rows, never outer + inner wrappers."""
+        for selector in MESSAGE_ROW_SELECTORS:
+            try:
+                rows = await page.query_selector_all(selector)
+            except Exception:
+                continue
+            if rows:
+                return rows
+        return []
+
     async def read_messages(self, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[dict]:
         limit = max(1, min(int(limit or DEFAULT_MESSAGE_LIMIT), 200))
         async with self._operation_lock:
@@ -435,14 +452,12 @@ class LinkedInLiveBrowserManager:
                     "The selected LinkedIn conversation is no longer open. Open it again."
                 )
 
-            try:
-                rows = await page.query_selector_all(MESSAGE_ROW_SELECTOR)
-            except Exception:
-                rows = []
+            rows = await self._message_rows(page)
 
             messages: list[dict] = []
             seen: set[str] = set()
-            for index, row in enumerate(rows[-limit:]):
+            fallback_occurrences: dict[str, int] = {}
+            for row in rows[-limit:]:
                 text = await _short_text(await _first(row, MESSAGE_TEXT_SELECTOR), 4000)
                 if not text:
                     continue
@@ -463,10 +478,16 @@ class LinkedInLiveBrowserManager:
                     if message_id:
                         break
                 if not message_id:
+                    # Build a poll-stable fallback. Including the list index made
+                    # every key change when the 50-message window advanced. An
+                    # occurrence suffix still preserves legitimate repeated
+                    # messages with identical visible text and timestamps.
                     digest = hashlib.sha256(
-                        f"{sender}\n{text}\n{timestamp}\n{index}".encode("utf-8")
+                        f"{sender}\n{text}\n{timestamp}\n{is_outgoing}".encode("utf-8")
                     ).hexdigest()[:20]
-                    message_id = f"dom-{digest}"
+                    occurrence = fallback_occurrences.get(digest, 0) + 1
+                    fallback_occurrences[digest] = occurrence
+                    message_id = f"dom-{digest}-{occurrence}"
                 if message_id in seen:
                     continue
                 seen.add(message_id)

@@ -16,6 +16,11 @@ class WhatsAppConnectResponse(BaseModel):
     status: str  # waiting_qr | connected | error
 
 
+class WhatsAppDisconnectResponse(BaseModel):
+    message: str
+    status: str = "disconnected"
+
+
 class WhatsAppStatusResponse(BaseModel):
     status: str  # disconnected | waiting_qr | connected | error
     is_active: bool
