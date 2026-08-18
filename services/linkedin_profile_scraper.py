@@ -131,6 +131,13 @@ async def _expand_profile_sections(page) -> None:
                     const text = (control.innerText || control.getAttribute('aria-label') || '')
                         .replace(/\s+/g, ' ').trim();
                     if (!wanted.test(text) || control.dataset.linkeasyExpanded === '1') continue;
+                    // "Show all experiences/skills" is often a navigation
+                    // link to /details/... rather than an in-place expander.
+                    // Clicking it here used to leave the profile page before
+                    // the other cards were scraped. Keep real buttons/role
+                    // controls (About/inline expanders) in-place and leave
+                    // section-level semantic fallbacks below.
+                    if (control.tagName === 'A' && control.getAttribute('href')) continue;
                     control.dataset.linkeasyExpanded = '1';
                     control.click();
                     clicked += 1;
@@ -155,7 +162,11 @@ async def _lazy_render_profile(page) -> None:
             )
         except Exception:
             break
-        await asyncio.sleep(0.35)
+        # Experience, Education, and Skills often mount their own "Show all"
+        # control only after the card enters the viewport. Expanding once at
+        # the top therefore scraped About but left every lower section empty.
+        await _expand_profile_sections(page)
+        await asyncio.sleep(0.55)
     # SDUI can append more rows after the fixed positions above.  One bottom
     # pass catches those rows without an unbounded scroll loop.
     try:
@@ -170,6 +181,77 @@ async def _lazy_render_profile(page) -> None:
     except Exception:
         pass
     await asyncio.sleep(0.35)
+
+
+async def _profile_detail_urls(page) -> dict[str, str]:
+    """Find LinkedIn's optional full-section links without clicking them."""
+    try:
+        links = await page.evaluate(
+            """() => {
+                const found = {};
+                for (const anchor of document.querySelectorAll('main a[href]')) {
+                    const href = anchor.href || '';
+                    const path = href.toLowerCase();
+                    for (const section of ['experience', 'education', 'skills']) {
+                        if (!found[section] && path.includes(`/details/${section}`)) {
+                            found[section] = href;
+                        }
+                    }
+                }
+                return found;
+            }"""
+        )
+    except Exception:
+        return {}
+    return links if isinstance(links, dict) else {}
+
+
+async def _scrape_profile_detail_sections(
+    page,
+    profile_url: str,
+    detail_urls: dict[str, str],
+    experience: list[dict],
+    education: list[dict],
+    skills: list[str],
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Use LinkedIn's full-section pages when profile cards expose them.
+
+    Profile cards are frequently virtualized and show only a preview. The
+    ``/details/experience`` and similar links contain the complete list, but
+    clicking them would navigate away before the other cards are read. Visit
+    each link deliberately, scrape it, and restore the profile between visits.
+    """
+    for section in ("experience", "education", "skills"):
+        detail_url = detail_urls.get(section)
+        if not detail_url:
+            continue
+        try:
+            await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                await page.wait_for_selector("main", timeout=15000)
+            except Exception:
+                pass
+            rows = await _evaluate_sdui_rows(page, section)
+            if section == "experience":
+                experience = _dedupe_dict_list(
+                    experience + _parse_sdui_experience_rows(rows)
+                )[:20]
+            elif section == "education":
+                education = _dedupe_dict_list(
+                    education + _parse_sdui_education_rows(rows)
+                )[:20]
+            else:
+                skills = list(dict.fromkeys(skills + _parse_sdui_skills(rows)))[:20]
+        except Exception as exc:
+            logger.debug("Could not scrape LinkedIn %s detail page: %s", section, exc)
+        finally:
+            try:
+                await page.goto(
+                    profile_url, wait_until="domcontentloaded", timeout=30000
+                )
+            except Exception as exc:
+                logger.debug("Could not restore profile after %s details: %s", section, exc)
+    return experience, education, skills
 
 
 # ── Public entry point ───────────────────────────────────────────────────
@@ -227,15 +309,36 @@ async def scrape_profile(profile_url: str) -> dict[str, Any]:
                     for part in (first_role.get("title"), first_role.get("company"))
                     if part
                 )
+            about = await _scrape_about(page)
+            education = await _scrape_education(page)
+            skills = await _scrape_skills(page)
+            detail_urls = await _profile_detail_urls(page)
+            if detail_urls:
+                experience, education, skills = await _scrape_profile_detail_sections(
+                    page,
+                    profile_url,
+                    detail_urls,
+                    experience,
+                    education,
+                    skills,
+                )
             data: dict[str, Any] = {
                 "basics": basics,
-                "about": await _scrape_about(page),
+                "about": about,
                 "experience": experience,
-                "education": await _scrape_education(page),
-                "skills": await _scrape_skills(page),
+                "education": education,
+                "skills": skills,
                 "scraped_at": time.time(),
                 "source_url": profile_url,
             }
+            logger.info(
+                "LinkedIn profile scan sections: name=%s about=%s experience=%d education=%d skills=%d",
+                bool(basics.get("name")),
+                bool(about),
+                len(experience),
+                len(education),
+                len(skills),
+            )
         finally:
             # Restore the exact thread URL, not merely /messaging/. This keeps
             # a selected live conversation open after a profile preview.
@@ -366,50 +469,82 @@ async def _scrape_about(page) -> str:
 
 
 async def _evaluate_sdui_rows(page, section: str) -> list[list[str]]:
-    """Extract semantic row lines from LinkedIn's classless SDUI cards.
+    """Extract visible row text from LinkedIn's classless SDUI cards.
 
     The newer profile surface gives cards generated IDs and removes the old
-    ``pv-*`` classes.  Section headings/IDs and list semantics are much more
-    stable, so use a small DOM-only fallback when the classic selectors found
-    no rows.  It returns plain data and never exposes a Playwright element.
+    ``pv-*`` classes.  This fallback deliberately reads each row's
+    ``innerText`` (rather than every nested span separately): nested spans
+    repeat the same company/date text and the old implementation accidentally
+    used one global ``seen`` set, causing all rows after the first one to lose
+    their fields.
     """
     try:
         rows = await page.evaluate(
             """(sectionName) => {
                 const key = String(sectionName || '').toLowerCase();
-                const text = (el) => (el?.innerText || '').replace(/\s+/g, ' ').trim();
+                const aliases = {
+                    experience: ['experience', 'work experience'],
+                    education: ['education'],
+                    skills: ['skills', 'top skills'],
+                }[key] || [key];
+                const clean = (value) => String(value || '')
+                    .replace(/\\u00a0/g, ' ')
+                    .split(/\\n+/)
+                    .map((line) => line.replace(/\\s+/g, ' ').trim())
+                    .filter(Boolean);
                 const marker = (el) => [
                     el.id,
                     el.getAttribute('data-section'),
                     el.getAttribute('data-view-name'),
                     el.getAttribute('aria-label'),
                 ].filter(Boolean).join(' ').toLowerCase();
-                const roots = Array.from(document.querySelectorAll('main section, main [id], main [data-section]'));
-                const root = roots.find((el) => {
-                    if (marker(el).includes(key)) return true;
-                    return Array.from(el.querySelectorAll(':scope > h2, :scope > h3, :scope > div > h2, :scope > div > h3'))
-                        .some((heading) => text(heading).toLowerCase() === key);
-                });
-                if (!root) return [];
-                let candidates = Array.from(root.querySelectorAll(
-                    'li, [role="listitem"], [data-view-name*="entity" i]'
+                const headingMatch = (el) => aliases.includes(
+                    clean(el.innerText).join(' ').toLowerCase()
+                );
+                const roots = Array.from(document.querySelectorAll(
+                    'main section, main [role="region"], main [data-section], main [id]'
                 ));
-                if (!candidates.length) candidates = [root];
-                const unique = [];
-                const seen = new Set();
-                for (const candidate of candidates) {
-                    const values = Array.from(candidate.querySelectorAll('h3, h4, p, a, span'))
-                        .map(text).filter(Boolean);
-                    const lines = [];
-                    for (const value of values) {
-                        if (!seen.has(value)) {
-                            seen.add(value);
-                            lines.push(value);
-                        }
-                    }
-                    if (lines.length) unique.push(lines.slice(0, 12));
+                let root = roots.find((el) => aliases.some((alias) => marker(el).includes(alias)));
+                if (!root) {
+                    const heading = Array.from(document.querySelectorAll(
+                        'main h1, main h2, main h3, main h4'
+                    )).find(headingMatch);
+                    if (heading) root = heading.closest('section, [role="region"], [data-view-name]') || heading.parentElement;
                 }
-                return unique.slice(0, 12);
+                if (!root) return [];
+
+                const selector = [
+                    'li',
+                    '[role="listitem"]',
+                    '[data-view-name*="entity" i]',
+                    '[data-view-name*="profile-component-entity" i]',
+                    'div.pvs-list__item--line-separated',
+                ].join(',');
+                let candidates = Array.from(root.querySelectorAll(selector));
+                // Prefer the deepest logical rows; an outer li and its entity
+                // child frequently both match the selector.
+                const leaves = candidates.filter((candidate) => !candidates.some(
+                    (other) => other !== candidate && candidate.contains(other)
+                ));
+                candidates = leaves.length ? leaves : candidates;
+                if (!candidates.length) candidates = [root];
+
+                const output = [];
+                const seenRows = new Set();
+                for (const candidate of candidates) {
+                    const lines = clean(candidate.innerText);
+                    const deduped = [];
+                    for (const line of lines) {
+                        if (!deduped.includes(line)) deduped.push(line);
+                    }
+                    const row = deduped.slice(0, 16);
+                    const identity = row.join('\\u001f');
+                    if (row.length && !seenRows.has(identity)) {
+                        seenRows.add(identity);
+                        output.push(row);
+                    }
+                }
+                return output.slice(0, 20);
             }""",
             section,
         )
@@ -424,34 +559,102 @@ async def _evaluate_sdui_rows(page, section: str) -> list[list[str]]:
     ]
 
 
+_SDUI_CONTROL_RE = re.compile(
+    r"^(?:show all|see all|see more|show less)\b"
+    r"|^(?:contact info|skills|experience|education)(?:\s+\d+)?$",
+    re.I,
+)
+_DATE_RE = re.compile(r"\b(?:19|20)\d{2}\b|\bpresent\b", re.I)
+_EMPLOYMENT_TYPE_RE = re.compile(
+    r"^(?:full[- ]time|part[- ]time|contract|freelance|internship|self[- ]employed|temporary)$",
+    re.I,
+)
+
+
+def _clean_sdui_lines(lines: list[str], section: str) -> list[str]:
+    """Remove headings, controls, and repeated accessibility text."""
+    cleaned: list[str] = []
+    for value in lines:
+        line = _collapse_whitespace(value)
+        if not line or _SDUI_CONTROL_RE.match(line):
+            continue
+        if section == "skills" and re.fullmatch(
+            r"[\d,]+(?:\s+endorsements?)?", line, re.I
+        ):
+            continue
+        if line not in cleaned:
+            cleaned.append(line)
+    return cleaned
+
+
 def _parse_sdui_experience_rows(rows: list[list[str]]) -> list[dict]:
     out = []
-    for lines in rows:
+    for raw_lines in rows:
+        lines = _clean_sdui_lines(raw_lines, "experience")
         if not lines:
             continue
-        dates = _line_matching(lines[1:], r"\b(?:19|20)\d{2}\b|\bpresent\b")
-        location = next((line[:120] for line in lines[2:] if ',' in line and line != dates), '')
+        dates = _line_matching(lines[1:], _DATE_RE.pattern)
+        dates_index = lines.index(dates) if dates in lines else None
+        company_candidates = [
+            line for index, line in enumerate(lines[1:], start=1)
+            if index != dates_index and not _EMPLOYMENT_TYPE_RE.fullmatch(line)
+        ]
+        location = next(
+            (
+                line[:120]
+                for index, line in enumerate(lines[1:], start=1)
+                if index != dates_index
+                and ("," in line or re.search(r"\b(remote|hybrid|on[- ]site)\b", line, re.I))
+                and line not in company_candidates[:1]
+            ),
+            "",
+        )
         out.append({
-            'title': lines[0][:160],
-            'company': (lines[1] if len(lines) > 1 and lines[1] != dates else '')[:160],
-            'dates': dates[:120],
-            'location': location,
+            "title": lines[0][:160],
+            "company": (company_candidates[0] if company_candidates else "")[:160],
+            "dates": dates[:120],
+            "location": location,
         })
     return _dedupe_dict_list(out)
 
 
 def _parse_sdui_education_rows(rows: list[list[str]]) -> list[dict]:
     out = []
-    for lines in rows:
+    for raw_lines in rows:
+        lines = _clean_sdui_lines(raw_lines, "education")
         if not lines:
             continue
-        dates = _line_matching(lines[1:], r"\b(?:19|20)\d{2}\b|\bpresent\b")
+        dates = _line_matching(lines[1:], _DATE_RE.pattern)
+        dates_index = lines.index(dates) if dates in lines else None
+        degree = next(
+            (
+                line for index, line in enumerate(lines[1:], start=1)
+                if index != dates_index
+            ),
+            "",
+        )
         out.append({
-            'school': lines[0][:140],
-            'degree': (lines[1] if len(lines) > 1 and lines[1] != dates else '')[:200],
-            'dates': dates[:120],
+            "school": lines[0][:140],
+            "degree": degree[:200],
+            "dates": dates[:120],
         })
     return _dedupe_dict_list(out)
+
+
+def _parse_sdui_skills(rows: list[list[str]], max_items: int = 20) -> list[str]:
+    skills: list[str] = []
+    for raw_lines in rows:
+        for candidate in _clean_sdui_lines(raw_lines, "skills"):
+            if candidate.casefold() in {"skills", "show all skills"}:
+                continue
+            if re.fullmatch(r"[\d,]+(?: endorsements?)?", candidate, re.I):
+                continue
+            if candidate not in skills:
+                skills.append(candidate[:160])
+            break
+        if len(skills) >= max_items:
+            break
+    return skills[:max_items]
 
 
 async def _row_lines(row) -> list[str]:
@@ -523,16 +726,19 @@ async def _scrape_experience(page) -> list[dict]:
             if not any(item.values()):
                 continue
             out.append(item)
-            if len(out) >= 6:
+            if len(out) >= 20:
                 break
         except Exception:
             continue
     out = _dedupe_dict_list(out)
-    if out:
-        return out
-    # Current SDUI profile cards can omit every legacy row selector.  Fall
-    # back to semantic section extraction rather than returning About only.
-    return _parse_sdui_experience_rows(await _evaluate_sdui_rows(page, "experience"))[:6]
+    # Always merge the semantic fallback. LinkedIn can expose one classic row
+    # while the remaining virtualized rows only exist in the SDUI card; using
+    # ``if out: return out`` was the reason scans often contained About plus a
+    # single/empty Experience section.
+    semantic = _parse_sdui_experience_rows(
+        await _evaluate_sdui_rows(page, "experience")
+    )
+    return _dedupe_dict_list(out + semantic)[:20]
 
 
 async def _scrape_education(page) -> list[dict]:
@@ -578,17 +784,18 @@ async def _scrape_education(page) -> list[dict]:
             if not any(item.values()):
                 continue
             out.append(item)
-            if len(out) >= 6:
+            if len(out) >= 20:
                 break
         except Exception:
             continue
     out = _dedupe_dict_list(out)
-    if out:
-        return out
-    return _parse_sdui_education_rows(await _evaluate_sdui_rows(page, "education"))[:6]
+    semantic = _parse_sdui_education_rows(
+        await _evaluate_sdui_rows(page, "education")
+    )
+    return _dedupe_dict_list(out + semantic)[:20]
 
 
-async def _scrape_skills(page, max_items: int = 8) -> list[str]:
+async def _scrape_skills(page, max_items: int = 20) -> list[str]:
     skills: list[str] = []
     els = await page.query_selector_all(
         "main section:has(#skills) "
@@ -621,22 +828,26 @@ async def _scrape_skills(page, max_items: int = 8) -> list[str]:
                     break
         except Exception:
             continue
-    if not skills:
-        for lines in await _evaluate_sdui_rows(page, "skills"):
-            if not lines:
-                continue
-            # The first semantic heading in a Skills entity is the skill name;
-            # endorsement counts and "show all" controls are not skills.
-            candidate = lines[0]
-            if re.fullmatch(r"[\d,]+(?: endorsements?)?", candidate, re.I):
-                continue
-            if candidate.casefold() in {"skills", "show all skills"}:
-                continue
-            if candidate not in skills:
-                skills.append(candidate[:160])
-            if len(skills) >= max_items:
-                break
-    return skills
+    # Merge semantic rows even when a legacy selector found a partial list.
+    # The first visible eight skills are often classic DOM nodes while the
+    # remaining entries arrive only after the Skills card is expanded.
+    for lines in await _evaluate_sdui_rows(page, "skills"):
+        if not lines:
+            continue
+        candidate = next(
+            (
+                value for value in _clean_sdui_lines(lines, "skills")
+                if value.casefold() not in {"skills", "show all skills"}
+            ),
+            "",
+        )
+        if not candidate or re.fullmatch(r"[\d,]+(?: endorsements?)?", candidate, re.I):
+            continue
+        if candidate not in skills:
+            skills.append(candidate[:160])
+        if len(skills) >= max_items:
+            break
+    return skills[:max_items]
 
 
 # ── Tiny utilities ──────────────────────────────────────────────────────

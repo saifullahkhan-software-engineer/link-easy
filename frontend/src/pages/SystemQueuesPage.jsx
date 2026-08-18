@@ -159,6 +159,21 @@ export default function SystemQueuesPage() {
     }
   };
 
+  const handleCleanupStale = async () => {
+    if (!confirm('Revoke queued or scheduled automation tasks whose campaign, feed scan, or WhatsApp filter is no longer active? Running browser tasks are not terminated.')) return;
+    try {
+      setActionLoading('cleanup');
+      const { data } = await systemQueuesApi.cleanupStale();
+      toast.success(`Cleaned ${data.revoked_count || 0} stale task(s) and ${data.deleted_lease_count || 0} lease(s)`);
+      loadOverview();
+      loadKeys(keysPattern, 0);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Stale task cleanup failed'));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handleClearRateLimits = async () => {
     if (!confirm('Clear ALL rate:* keys? This resets daily limits.')) return;
     try {
@@ -259,6 +274,14 @@ export default function SystemQueuesPage() {
             <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} className="rounded" />
             Auto-refresh 5s
           </label>
+          <button
+            onClick={handleCleanupStale}
+            disabled={actionLoading === 'cleanup'}
+            className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-1.5 text-xs font-semibold text-amber-300 transition hover:bg-amber-500/10 disabled:opacity-50"
+            title="Revoke queued/scheduled automation that no longer has an active database job"
+          >
+            {actionLoading === 'cleanup' ? 'Cleaning…' : 'Clean stale automation'}
+          </button>
           <button onClick={() => { loadOverview(); loadKeys(keysPattern, 0); }} className="btn-secondary text-xs">
             ↻ Refresh
           </button>

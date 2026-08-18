@@ -332,6 +332,7 @@ export const linkedinProfileApi = {
 /* ------------------------------ system / redis queues ------------------------------ */
 export const systemQueuesApi = {
   overview: () => api.get('/system/queues/overview'),
+  cleanupStale: () => api.post('/system/queues/cleanup-stale', null, { timeout: 45_000 }),
   redisInfo: () => api.get('/system/queues/redis-info'),
   celeryInspect: () => api.get('/system/queues/celery-inspect'),
   dbStats: () => api.get('/system/queues/db-stats'),

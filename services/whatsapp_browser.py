@@ -232,7 +232,11 @@ SEND_BUTTON_SELECTOR = (
 )
 
 # Chat header / group name in conversation
-CHAT_HEADER_SELECTOR = 'div[data-testid="conversation-header"], header span[dir="auto"]'
+CHAT_HEADER_SELECTOR = (
+    'div[data-testid="conversation-header"], '
+    '#main header, '
+    'header span[dir="auto"]'
+)
 
 # Loading / spinner indicators
 LOADING_SELECTOR = 'div[data-testid="progress-bar"], span[data-testid="loading"]'
@@ -395,6 +399,44 @@ async def is_showing_qr(page: Page) -> bool:
     return False
 
 
+async def wait_for_full_whatsapp_surface(
+    page: Page, timeout_seconds: float = 60.0
+) -> bool:
+    """Wait for both the sidebar and the conversation shell to be visible.
+
+    ``#pane-side`` alone appears before WhatsApp finishes hydrating.  Reusing
+    the profile at that point is a race: the next live-chat browser inherits a
+    half-loaded IndexedDB/app shell and chat rows cannot be opened.  This
+    helper is intentionally visibility-based and is used after QR login and
+    before live chat starts.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            if not await is_logged_in(page):
+                await asyncio.sleep(0.75)
+                continue
+            sidebar_visible = False
+            for selector in LOGGED_IN_SELECTORS:
+                sidebar = await page.query_selector(selector)
+                if sidebar is not None and await sidebar.is_visible():
+                    sidebar_visible = True
+                    break
+            main_visible = False
+            for selector in MAIN_PANE_SELECTOR.split(","):
+                candidate = await page.query_selector(selector.strip())
+                if candidate is not None and await candidate.is_visible():
+                    main_visible = True
+                    break
+            if sidebar_visible and main_visible:
+                return True
+        except Exception:
+            # Navigation/React hydration may detach one of the nodes briefly.
+            pass
+        await asyncio.sleep(0.75)
+    return False
+
+
 async def wait_for_whatsapp_surface(
     page: Page, timeout_seconds: float = 45.0
 ) -> str:
@@ -411,13 +453,10 @@ async def wait_for_whatsapp_surface(
     while time.monotonic() < deadline:
         try:
             if await is_logged_in(page):
-                # Let the main pane settle before callers snapshot state or
-                # hand the persistent profile to another browser.
-                try:
-                    await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=5000)
-                except Exception:
-                    pass
-                return "connected"
+                remaining = max(0.5, deadline - time.monotonic())
+                return "connected" if await wait_for_full_whatsapp_surface(
+                    page, timeout_seconds=remaining
+                ) else "timeout"
             if await is_showing_qr(page):
                 return "qr"
         except Exception:
@@ -438,9 +477,11 @@ async def wait_for_qr_scan(page: Page, max_wait_seconds: int = 120) -> bool:
     while time.monotonic() < deadline:
         try:
             if await is_logged_in(page):
-                logger.info("✅ WhatsApp Web logged in — chat list detected")
-                await asyncio.sleep(2)  # let the UI fully settle
-                return True
+                if await wait_for_full_whatsapp_surface(page, timeout_seconds=45):
+                    logger.info("✅ WhatsApp Web logged in — full chat surface detected")
+                    await asyncio.sleep(2)  # let the UI fully settle
+                    return True
+                logger.info("⏳ WhatsApp sidebar is ready; waiting for the conversation shell")
 
             # Check if we're still on the landing / QR page
             current_url = page.url

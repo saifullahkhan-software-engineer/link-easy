@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from core.config import settings
 from core.logging_config import get_logger
 from worker.celery_app import celery_app
+from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 
 logger = get_logger(__name__)
 
@@ -172,8 +173,8 @@ def dispatch_due_whatsapp_scans() -> dict:
 
     The database timestamp is the source of truth, so pausing a job survives
     worker restarts and a queued task simply exits after checking its status.
-    ``next_scan_at`` is advanced before dispatch to avoid duplicate queueing
-    while a browser scan is still running.
+    A token-owned Redis lease prevents duplicate queueing while a browser scan
+    is still running; ``next_scan_at`` is updated only after the scan finishes.
     """
     now = datetime.now(timezone.utc)
     due_ids = []
@@ -191,38 +192,70 @@ def dispatch_due_whatsapp_scans() -> dict:
             )
             .all()
         )
-        for filter_row in due_filters:
-            # Reserve the next interval before putting work on the queue. The
-            # worker writes the precise completion time when it finishes.
-            filter_row.next_scan_at = now + timedelta(
-                hours=float(filter_row.interval_hours or 1.0)
-            )
-            due_ids.append(filter_row.id)
+        # Do not advance next_scan_at here.  The worker writes the next due
+        # timestamp after a real scan. A Redis lease prevents duplicate Beat
+        # messages while preserving the database's due/not-due meaning.
+        due_ids = [filter_row.id for filter_row in due_filters]
 
+    import redis
+
+    redis_client = redis.from_url(settings.REDIS_URL)
+    dispatched = 0
     for filter_id in due_ids:
-        celery_app.send_task("tasks.check_whatsapp_messages", args=[filter_id])
+        dispatch_key = f"linkeasy:scheduler:whatsapp:{filter_id}"
+        lease_token = claim_dispatch_lease(redis_client, dispatch_key, timeout=7200)
+        if not lease_token:
+            continue
+        try:
+            celery_app.send_task(
+                "tasks.check_whatsapp_messages",
+                args=[filter_id, lease_token],
+            )
+            dispatched += 1
+        except Exception:
+            release_dispatch_lease(redis_client, dispatch_key, lease_token)
+            raise
 
-    if due_ids:
-        logger.info("📅 Dispatched %s due WhatsApp filter scan(s)", len(due_ids))
-    return {"scans_dispatched": len(due_ids), "filter_ids": due_ids}
+    if dispatched:
+        logger.info("📅 Dispatched %s due WhatsApp filter scan(s)", dispatched)
+    return {"scans_dispatched": dispatched, "filter_ids": due_ids}
 
 
 @celery_app.task(bind=True, name="tasks.check_whatsapp_messages", max_retries=2)
-def check_whatsapp_messages(self, filter_id: int | None = None) -> dict:
+def check_whatsapp_messages(
+    self,
+    filter_id: int | None = None,
+    dispatch_token: str | None = None,
+    force: bool = False,
+) -> dict:
     logger.info("📱 Starting WhatsApp message check for filter=%s...", filter_id)
+    dispatch_key = f"linkeasy:scheduler:whatsapp:{filter_id}"
+    import redis
 
+    redis_client = redis.from_url(settings.REDIS_URL)
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_check_whatsapp_messages_async(filter_id))
+        result = loop.run_until_complete(
+            _check_whatsapp_messages_async(
+                filter_id,
+                force=force,
+            )
+        )
         loop.close()
         return result
     except Exception as e:
         logger.error(f"WhatsApp message check failed: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
+    finally:
+        release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
 
 
-async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
+async def _check_whatsapp_messages_async(
+    filter_id: int | None = None,
+    *,
+    force: bool = False,
+) -> dict:
     from services.whatsapp_browser import (
         launch_whatsapp_persistent,
         is_showing_qr,
@@ -277,6 +310,15 @@ async def _check_whatsapp_messages_async(filter_id: int | None = None) -> dict:
                     filters_row.status,
                 )
                 return {"status": "skipped", "reason": "Filter is not active"}
+            next_scan_at = filters_row.next_scan_at
+            if (
+                not force
+                and next_scan_at is not None
+                and (next_scan_at if next_scan_at.tzinfo else next_scan_at.replace(tzinfo=timezone.utc))
+                > datetime.now(timezone.utc)
+            ):
+                logger.info("⏭️ WhatsApp filter %s is not due yet; stale task ignored", filter_id)
+                return {"status": "skipped", "reason": "Filter is not due"}
         else:
             # Legacy messages do not carry a filter id, so they must still be
             # gated by an explicitly active filter.  Falling back to the most

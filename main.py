@@ -256,4 +256,4 @@ if __name__ == "__main__":
     # `python main.py` without --log-level.  Uvicorn's default INFO level
     # hides lifespan tracebacks; we force it to show them.
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

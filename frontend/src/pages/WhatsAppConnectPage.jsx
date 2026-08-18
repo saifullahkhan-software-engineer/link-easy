@@ -20,12 +20,34 @@ export default function WhatsAppConnectPage() {
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  // Keep the embedded browser mounted briefly after QR login succeeds. The
+  // watcher now waits for the full WhatsApp surface before saving the session,
+  // so users can actually see that transition instead of seeing only a QR
+  // frame and then an abruptly blank panel.
+  const [showBrowserView, setShowBrowserView] = useState(false);
+  const connectionStartedRef = useRef(false);
+  const hideBrowserTimerRef = useRef(null);
   const prevStatus = useRef(null);
+
+  useEffect(() => () => {
+    if (hideBrowserTimerRef.current) clearTimeout(hideBrowserTimerRef.current);
+  }, []);
 
   const loadStatus = useCallback(async () => {
     try {
       const { data } = await whatsappApi.getStatus();
-      setStatus(data.status || 'disconnected');
+      const nextStatus = data.status || 'disconnected';
+      setStatus(nextStatus);
+      if (nextStatus === 'waiting_qr') {
+        setShowBrowserView(true);
+      } else if (nextStatus === 'connected' && connectionStartedRef.current) {
+        setShowBrowserView(true);
+        connectionStartedRef.current = false;
+        if (hideBrowserTimerRef.current) clearTimeout(hideBrowserTimerRef.current);
+        hideBrowserTimerRef.current = setTimeout(() => setShowBrowserView(false), 12000);
+      } else if (nextStatus === 'disconnected' || nextStatus === 'error') {
+        setShowBrowserView(false);
+      }
     } catch {
       // Silently ignore — backend may be briefly unreachable.
     } finally {
@@ -55,10 +77,14 @@ export default function WhatsAppConnectPage() {
   const handleConnect = async () => {
     try {
       setConnecting(true);
+      connectionStartedRef.current = true;
+      setShowBrowserView(true);
       const { data } = await whatsappApi.connect();
       toast.success(data?.message || 'WhatsApp connection started — scan the QR code');
       setStatus(data?.status || 'waiting_qr');
     } catch (err) {
+      connectionStartedRef.current = false;
+      setShowBrowserView(false);
       toast.error(getErrorMessage(err, 'Failed to start connection'));
     } finally {
       setConnecting(false);
@@ -74,6 +100,8 @@ export default function WhatsAppConnectPage() {
     try {
       setDisconnecting(true);
       const { data } = await whatsappApi.disconnect();
+      connectionStartedRef.current = false;
+      setShowBrowserView(false);
       setStatus('disconnected');
       toast.success(data?.message || 'WhatsApp disconnected successfully');
     } catch (err) {
@@ -162,8 +190,8 @@ export default function WhatsAppConnectPage() {
         )}
       </div>
 
-      {/* ── Live browser view (QR scan / 2FA) ───────────────────── */}
-      {!loading && status !== 'connected' && <BrowserViewPanel />}
+      {/* ── Live browser view (QR scan / full WhatsApp render) ───── */}
+      {!loading && (status !== 'connected' || showBrowserView) && <BrowserViewPanel controls={false} />}
     </div>
   );
 }

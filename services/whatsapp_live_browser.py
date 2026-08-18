@@ -47,6 +47,7 @@ from services.whatsapp_browser import (
     is_logged_in,
     navigate_to_whatsapp,
     wait_for_login,
+    wait_for_full_whatsapp_surface,
     safe_close,
     scrape_messages_from_current_chat,
 )
@@ -132,7 +133,11 @@ class LiveBrowserManager:
             from worker.profile_lock import ProfileInUseError, acquire_profile_lock
 
             try:
-                profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=2)
+                # The QR watcher closes the connection browser immediately
+                # after the full surface is rendered. Give that graceful close
+                # a little time instead of reporting a misleading "busy"
+                # error when the user opens Live Chat right away.
+                profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=30)
             except ProfileInUseError:
                 # Should not happen often — we hold the only locks — but make
                 # the error user-readable, not a traceback.
@@ -187,21 +192,20 @@ class LiveBrowserManager:
                 await context.add_init_script(STEALTH_SCRIPT)
                 await navigate_to_whatsapp(page)
 
-                # ``domcontentloaded`` is not the WhatsApp app.  Wait for
-                # the visible chat list for a full cold-start window so live
-                # chat never starts against the QR/loading shell.
+                # ``domcontentloaded`` is not the WhatsApp app. Wait for the
+                # visible chat list AND conversation shell for a full cold-start
+                # window so live chat never starts against the QR/loading shell.
                 if not await wait_for_login(page, timeout_seconds=45):
                     raise RuntimeError(
                         "WhatsApp did not reach the chat list after 45 seconds — "
                         "the saved session may have expired. Reconnect via the "
                         "WhatsApp Scanner connect flow."
                     )
-                try:
-                    await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=15000)
-                except Exception:
-                    # Some builds render the sidebar before the empty main pane;
-                    # list/open operations will perform their own readiness check.
-                    pass
+                if not await wait_for_full_whatsapp_surface(page, timeout_seconds=60):
+                    raise RuntimeError(
+                        "WhatsApp chat list loaded but the full conversation surface "
+                        "did not render. Reconnect and try again."
+                    )
                 await asyncio.sleep(1.0)
 
                 self.active_chat_id = None
@@ -343,12 +347,18 @@ class LiveBrowserManager:
                 await row.click()
                 # ``#main`` is the stable selector in current WhatsApp Web;
                 # data-testid values are retained as legacy fallbacks.
-                await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=8000)
+                try:
+                    await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=8000)
+                except Exception:
+                    # Keep the normal path fast, but allow a cold WhatsApp
+                    # render another 30 seconds before declaring the click
+                    # failed.
+                    await page.wait_for_selector(MAIN_PANE_SELECTOR, timeout=30000)
                 # Waiting only for ``#main`` is insufficient: it is mounted
                 # behind the empty-state screen before a row click completes.
                 # The header is the reliable signal that the selected chat is
                 # actually open.
-                await page.wait_for_selector(CHAT_HEADER_SELECTOR, timeout=15000)
+                await page.wait_for_selector(CHAT_HEADER_SELECTOR, timeout=45000)
             except Exception as exc:
                 logger.warning("Could not open WhatsApp chat %s: %s", chat_id, exc)
                 return {"ok": False, "error": "Chat did not open. Refresh the list and try again."}

@@ -24,6 +24,7 @@ from worker.profile_lock import (
     acquire_profile_lock,
     release_profile_lock,
 )
+from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 from automation.browser import launch_persistent_browser
 from automation.session import verify_session, LinkedInSessionStatus
 from automation.actions.visit_profile import (
@@ -349,7 +350,8 @@ def execute_campaign_step(self, lead_id: str, campaign_id: str, step_order: int)
             job.error_message = str(exc)
             lead.status = LeadStatus.FAILED
             db.commit()
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
 
 
 def _account_has_due_work(account_email: str) -> bool:
@@ -450,23 +452,22 @@ def dispatch_due_account_sessions():
         if redis_client.exists(f"session_lock:{account_email}"):
             logger.debug("⏭️ Session already active for %s; no duplicate dispatch", account_email)
             continue
+        # Keep a lease for the whole browser session, not just for the 60
+        # seconds between Beat ticks.  The task releases its own token in a
+        # finally block.  This removes the old once-per-minute duplicate task
+        # stream without making the database timestamp less durable.
         dispatch_key = f"linkeasy:scheduler:account:{account_email}"
-        try:
-            claimed = bool(redis_client.set(dispatch_key, "1", nx=True, ex=120))
-        except Exception:
-            # If Redis is unavailable the task itself will fail clearly; do not
-            # hide the dispatch from a deployment that is recovering Redis.
-            claimed = True
-        if not claimed:
+        lease_token = claim_dispatch_lease(redis_client, dispatch_key, timeout=7200)
+        if not lease_token:
             continue
         try:
-            celery_app.send_task("tasks.run_account_session", args=[account_email])
+            celery_app.send_task(
+                "tasks.run_account_session",
+                args=[account_email, lease_token],
+            )
             dispatched += 1
         except Exception:
-            try:
-                redis_client.delete(dispatch_key)
-            except Exception:
-                pass
+            release_dispatch_lease(redis_client, dispatch_key, lease_token)
             raise
 
     if dispatched:
@@ -780,7 +781,8 @@ def step1_visit_and_like(self, lead_id: str, campaign_id: str):
             job.status = JobStatus.FAILED
             job.error_message = str(exc)
             lead.status = LeadStatus.FAILED
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -935,7 +937,8 @@ def step2_send_connection(self, lead_id: str, campaign_id: str):
             
 
         except Exception as exc:
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -1025,7 +1028,8 @@ def step3_send_message(self, lead_id: str, campaign_id: str):
             
 
         except Exception as exc:
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -1075,7 +1079,8 @@ def step4_followup_if_pending(self, lead_id: str, campaign_id: str):
             
 
         except Exception as exc:
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -1121,7 +1126,8 @@ def step5_thanks_if_accepted(self, lead_id: str, campaign_id: str):
             
 
         except Exception as exc:
-            raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+            logger.error("Retired campaign action failed: %s", exc)
+            return {"status": "failed", "error": str(exc)}
  
     return result
  
@@ -1163,30 +1169,32 @@ async def _run_message(account, lead, message_text: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @celery_app.task(bind=True, name="tasks.run_account_session")
-def run_account_session(self, account_email: str):
+def run_account_session(
+    self,
+    account_email: str,
+    dispatch_token: str | None = None,
+):
     """
     Single task per account that processes all due leads across all campaigns.
     Opens one browser/context, processes leads with human-like timing, and saves state.
+
+    ``dispatch_token`` belongs to the Beat lease.  It is optional so messages
+    from older deployments remain compatible, but new dispatches keep the lease
+    until this task exits instead of creating a second task on every tick.
     """
     import redis
     from core.config import settings
-    
+
+    dispatch_key = f"linkeasy:scheduler:account:{account_email}"
     # Redis lock to prevent overlapping sessions for the same account
     redis_client = redis.from_url(settings.REDIS_URL)
     lock_key = f"session_lock:{account_email}"
     lock = redis_client.lock(lock_key, timeout=7200)  # 2 hour timeout
-    
+
     if not lock.acquire(blocking=False):
         logger.warning(f"⚠️ Session already running for account {account_email}, skipping")
+        release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
         return {"status": "skipped", "reason": "session_already_running"}
-
-    # Beat uses this short lease only while a task is waiting in the broker.
-    # Once the worker owns the durable session lock, release the lease so a
-    # future due time can be dispatched normally.
-    try:
-        redis_client.delete(f"linkeasy:scheduler:account:{account_email}")
-    except Exception:
-        pass
 
     try:
         with get_sync_db() as db:
@@ -1274,40 +1282,26 @@ def run_account_session(self, account_email: str):
     
     except ProfileInUseError as exc:
         # Another code path (manual verify-session, interactive login, ...)
-        # currently holds this account's browser profile. Do NOT attempt to
-        # launch anyway — fail cleanly and keep the self-rescheduling chain
-        # alive by re-enqueueing the next session shortly.
+        # currently holds this account's browser profile. Beat will try again
+        # on its next tick; do not create a 30-minute ETA task that survives a
+        # campaign pause or delete.
         logger.warning(f"⚠️ Profile busy for account {account_email}: {exc}")
-        # Never keep a retry chain alive after the campaign was paused or
-        # deleted while this task was waiting for the profile.
-        if _account_has_due_work(account_email):
-            self.apply_async(args=[account_email], countdown=1800)
-            logger.info(f"📅 Retrying session for {account_email} in 30 minutes (profile was in use)")
-            return {"status": "skipped", "reason": "account_profile_in_use"}
-        logger.info("⏭️ No active due work remains for %s; not retrying the session", account_email)
-        return {"status": "skipped", "reason": "no_active_campaign_work"}
+        return {"status": "skipped", "reason": "account_profile_in_use"}
 
     except Exception as exc:
-        logger.error(f"❌ Session failed for account {account_email}: {exc}")
-        # A browser/network exception must not create an endless retry chain
-        # after the owner pauses or deletes the last campaign.  If there is no
-        # due row left, the database dispatcher will handle any future work.
-        try:
-            has_due_work = _account_has_due_work(account_email)
-        except Exception:
-            # Preserve the old retry behavior when the re-check itself cannot
-            # reach Postgres; the scheduler can recover once it is available.
-            has_due_work = True
-        if not has_due_work:
-            return {"status": "skipped", "reason": "no_active_campaign_work"}
-        raise self.retry(exc=exc, countdown=random.randint(600, 1800))
+        logger.error(f"❌ Session failed for account {account_email}: {exc}", exc_info=True)
+        # The durable dispatcher is the retry mechanism.  Returning here is
+        # intentional: Celery ETA retries used to leave stale messages in
+        # Redis after the last campaign was removed.
+        return {"status": "error", "reason": "session_failed", "message": str(exc)}
 
     finally:
         try:
             lock.release()
         except Exception:
-            # Lock may have expired or been released already (e.g., during retry)
+            # Lock may have expired or been released already.
             pass
+        release_dispatch_lease(redis_client, dispatch_key, dispatch_token)
 
 
 async def _process_leads_session(account, due_leads, per_action_seconds, db,
