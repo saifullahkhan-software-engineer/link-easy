@@ -4,6 +4,7 @@ import {
   getAccessToken,
   getUserEmail,
   getUserName,
+  getUserRoles,
   storeSession,
 } from '../api/client';
 import { authApi } from '../api/endpoints';
@@ -14,6 +15,9 @@ export function AuthProvider({ children }) {
   const [token, setToken] = useState(() => getAccessToken());
   const [email, setEmail] = useState(() => getUserEmail());
   const [name, setName] = useState(() => getUserName());
+  // Roles come from the access token, so they refresh whenever the token does
+  // and cannot drift out of sync with a separately stored copy.
+  const [roles, setRoles] = useState(() => getUserRoles());
 
   const login = useCallback(async (loginEmail, password) => {
     const { data } = await authApi.login(loginEmail, password);
@@ -21,6 +25,7 @@ export function AuthProvider({ children }) {
     setToken(data.access_token);
     setEmail(loginEmail);
     setName(getUserName());
+    setRoles(getUserRoles());
     return data;
   }, []);
 
@@ -40,6 +45,13 @@ export function AuthProvider({ children }) {
     setToken(null);
     setEmail(null);
     setName(null);
+    setRoles([]);
+  }, []);
+
+  // Re-read roles from a token refreshed by the axios interceptor.
+  const syncRoles = useCallback(() => {
+    setToken(getAccessToken());
+    setRoles(getUserRoles());
   }, []);
 
   const value = useMemo(
@@ -47,12 +59,16 @@ export function AuthProvider({ children }) {
       isAuthenticated: Boolean(token),
       email,
       name,
+      roles,
+      isAdmin: roles.includes('admin'),
+      hasRole: (role) => roles.includes(String(role).toLowerCase()),
+      syncRoles,
       login,
       completeSignup,
       setName: setNameOnly,
       logout,
     }),
-    [token, email, name, login, completeSignup, setNameOnly, logout]
+    [token, email, name, roles, syncRoles, login, completeSignup, setNameOnly, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

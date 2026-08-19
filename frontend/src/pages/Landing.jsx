@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useAdminAccess } from '../hooks/useAdminAccess';
 
 const features = [
   {
@@ -214,6 +215,7 @@ function AutomationPreview() {
 
 export default function Landing() {
   const { isAuthenticated } = useAuth();
+  const { canSeeAdmin } = useAdminAccess();
   const primaryPath = isAuthenticated ? '/app' : '/signup';
   const primaryLabel = isAuthenticated ? 'Open App' : 'Start automating free';
 
@@ -240,7 +242,11 @@ export default function Landing() {
             <Link to="/app" className="rounded-lg border border-surface-700 bg-surface-900 px-3.5 py-2 text-sm font-semibold text-zinc-300 transition hover:border-surface-600 hover:bg-surface-800 hover:text-zinc-100">
               App
             </Link>
-            <Link to="/dashboard" className="btn-primary">Dashboard <ArrowIcon /></Link>
+            {canSeeAdmin && (
+              <Link to="/admin" className="btn-primary" data-testid="header-admin-button">
+                Admin <ArrowIcon />
+              </Link>
+            )}
             {!isAuthenticated && (
               <Link to="/signup" className="hidden px-3 py-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100 sm:inline-flex">Get started</Link>
             )}
@@ -271,14 +277,19 @@ export default function Landing() {
             </p>
 
             <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
+              {/* Every signed-in user gets the app; the admin button appears
+                  only for admins (or for everyone while the backend is still
+                  in bootstrap mode and no roles have been assigned yet). */}
               <Link to="/app" className="btn-primary px-6 py-3.5 text-base shadow-lg shadow-accent-500/15" data-testid="landing-app-button">
-                Open App
+                App Dashboard
                 <ArrowIcon />
               </Link>
-              <Link to="/dashboard" className="btn-secondary px-6 py-3.5 text-base" data-testid="landing-dashboard-button">
-                Open Dashboard
-                <ArrowIcon />
-              </Link>
+              {canSeeAdmin && (
+                <Link to="/admin" className="btn-secondary px-6 py-3.5 text-base" data-testid="landing-admin-button">
+                  Admin Dashboard
+                  <ArrowIcon />
+                </Link>
+              )}
               <a href="#how-it-works" className="inline-flex items-center justify-center gap-2 rounded-lg px-5 py-3.5 text-sm font-semibold text-zinc-300 transition hover:bg-white/5 hover:text-white">
                 See how it works
               </a>

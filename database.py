@@ -7,6 +7,11 @@ Base = declarative_base()
 
 from models.linkedin_account import LinkedInAccount  # noqa: F401
 from models.whatsapp import WhatsAppSession, WhatsAppMonitoredGroup, WhatsAppForwardGroup, WhatsAppRawMessage, WhatsAppScanFilter  # noqa: F401
+# RBAC, admin settings, and the Postgres rate limiter must be imported here so
+# ``Base.metadata.create_all`` sees them on a brand-new database (the same
+# reason the models above are imported).
+from models.rbac import AppSetting, Role, UserRoleLink  # noqa: F401
+from models.rate_limit import RateLimitCounter  # noqa: F401
 
 engine = create_async_engine(
     settings.DATABASE_URL,

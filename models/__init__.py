@@ -1,5 +1,7 @@
 from .user import User, PasswordResetToken
 from .roles import UserRole
+from .rbac import AppSetting, Role, UserRoleLink
+from .rate_limit import RateLimitCounter
 from .linkedin_account import LinkedInAccount
 from .campaign import Campaign, CampaignStep
 from .lead import Lead, LeadSource
@@ -18,6 +20,7 @@ from .whatsapp import (
 
 __all__ = [
     "User", "PasswordResetToken", "UserRole", "LinkedInAccount",
+    "Role", "UserRoleLink", "AppSetting", "RateLimitCounter",
     "Campaign", "CampaignStep", "Lead", "LeadSource", "CampaignJob",
     "FeedScrollJob", "FeedScrollMode", "FeedScrollJobStatus", "FeedScrollResult",
     "FeedScrollAppliedPost", "FeedLead", "FeedLeadStatus", "FEED_LEAD_SOURCE",

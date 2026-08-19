@@ -50,6 +50,50 @@ export function storeSession({ access_token, refresh_token, email, name }) {
   } catch {}
 }
 
+/**
+ * Decode the payload of a JWT without verifying it.
+ *
+ * This is only ever used to decide what to *render*. The backend re-verifies
+ * the signature on every request, so a tampered token buys nothing but a
+ * broken-looking menu.
+ */
+export function decodeToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    // base64url -> base64, then decode as UTF-8 so non-ASCII names survive.
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+    const json = decodeURIComponent(
+      atob(padded)
+        .split('')
+        .map((ch) => `%${`00${ch.charCodeAt(0).toString(16)}`.slice(-2)}`)
+        .join('')
+    );
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Roles for the signed-in user, read from the access token.
+ *
+ * Falls back to the legacy single ``role`` claim so tokens minted before
+ * multi-role support still work, and defaults to ``customer`` so an
+ * authenticated user is never locked out of the app dashboard.
+ */
+export function getUserRoles() {
+  const payload = decodeToken(getAccessToken());
+  if (!payload) return [];
+  if (Array.isArray(payload.roles) && payload.roles.length) {
+    return payload.roles.map((r) => String(r).toLowerCase());
+  }
+  if (payload.role) return [String(payload.role).toLowerCase()];
+  return ['customer'];
+}
+
 export function clearSession() {
   try {
     Object.values(TOKEN_KEYS).forEach((k) => localStorage.removeItem(k));

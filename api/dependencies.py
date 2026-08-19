@@ -74,6 +74,13 @@ async def get_current_user(
 
 
 def require_roles(allowed_roles: Iterable[UserRole]):
+    """Legacy single-column role gate.
+
+    Kept for existing call sites. New admin surfaces should use
+    :func:`require_admin`, which reads the ``user_roles`` join table and so
+    understands a user holding several roles at once.
+    """
+
     def role_checker(current_user: User = Depends(get_current_user)) -> User:
         logger.debug(
             "Role check for user=%s role=%s allowed_roles=%s",
@@ -91,6 +98,45 @@ def require_roles(allowed_roles: Iterable[UserRole]):
     return role_checker
 
 
+async def get_current_roles(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[str]:
+    """Every role the caller holds (multi-role aware)."""
+    from services.user_roles import get_user_roles
+
+    return await get_user_roles(db, current_user.email)
 
 
+async def require_admin(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Gate an endpoint to admins, honouring the bootstrap flag.
 
+    While ``ADMIN_API_ENFORCED`` is false (the default during bootstrap) any
+    authenticated user may reach admin endpoints, so a brand-new deployment
+    can assign the first admin through the UI without being locked out. The
+    attempt is logged either way, and flipping ``ADMIN_API_ENFORCED=true``
+    turns this into a hard 403 with no code change.
+    """
+    from services.user_roles import is_admin
+
+    admin = await is_admin(db, current_user.email)
+    if admin:
+        return current_user
+
+    if not settings.ADMIN_API_ENFORCED:
+        logger.warning(
+            "⚠️  Admin endpoint reached by non-admin %s — allowed because "
+            "ADMIN_API_ENFORCED is false (bootstrap mode). Set it to true "
+            "once roles are assigned.",
+            current_user.email,
+        )
+        return current_user
+
+    logger.info("⛔ Admin endpoint denied for %s", current_user.email)
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Administrator access is required for this action",
+    )

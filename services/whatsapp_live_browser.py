@@ -137,7 +137,16 @@ class LiveBrowserManager:
                 # after the full surface is rendered. Give that graceful close
                 # a little time instead of reporting a misleading "busy"
                 # error when the user opens Live Chat right away.
-                profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=30)
+                #
+                # ``acquire_profile_lock`` is a *synchronous* Redis call that
+                # blocks for up to ``blocking_timeout`` seconds. Called
+                # directly it froze the entire API event loop for 30s, so the
+                # status/chat pollers could not run and the whole UI appeared
+                # hung while starting. Run it in a worker thread — the same
+                # pattern api/v1/whatsapp_scanner.py already uses.
+                profile_lock = await asyncio.to_thread(
+                    acquire_profile_lock, "whatsapp", blocking_timeout=30
+                )
             except ProfileInUseError:
                 # Should not happen often — we hold the only locks — but make
                 # the error user-readable, not a traceback.

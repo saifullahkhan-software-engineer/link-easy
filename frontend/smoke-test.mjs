@@ -15,11 +15,78 @@ const assetsDir = join(root, 'dist', 'assets');
 const bundleName = readdirSync(assetsDir).find((f) => f.startsWith('index-') && f.endsWith('.js'));
 if (!bundleName) throw new Error('dist bundle not found — run `npm run build` first');
 
+/**
+ * Build a structurally valid (unsigned) JWT. The frontend only *decodes* the
+ * token to decide what to render — the backend verifies the signature — so a
+ * fake signature is exactly what a UI-level test needs.
+ */
+const makeToken = (payload) => {
+  const b64 = (obj) =>
+    Buffer.from(JSON.stringify(obj))
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  return `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64(payload)}.sig`;
+};
+
 const AUTH_TOKENS = {
-  'le.access_token': 'fake-access-token',
+  'le.access_token': makeToken({ sub: 'owner@test.dev', role: 'customer', roles: ['customer'] }),
   'le.refresh_token': 'fake-refresh-token',
   'le.user_email': 'owner@test.dev',
   'le.user_name': 'Test Owner',
+};
+
+// Same session, but the token carries both roles.
+const ADMIN_TOKENS = {
+  ...AUTH_TOKENS,
+  'le.access_token': makeToken({
+    sub: 'owner@test.dev',
+    role: 'admin',
+    roles: ['admin', 'customer'],
+  }),
+};
+
+const ADMIN_ME = { email: 'owner@test.dev', roles: ['admin', 'customer'], is_admin: true, admin_api_enforced: true };
+const CUSTOMER_ME = { email: 'owner@test.dev', roles: ['customer'], is_admin: false, admin_api_enforced: true };
+
+const ADMIN_OVERVIEW = {
+  users: { total: 4, verified: 3, unverified: 1, admins: 1 },
+  accounts: { linkedin_total: 2, linkedin_by_status: { active: 2 }, whatsapp_total: 1, whatsapp_connected: 1 },
+  jobs: { by_status: { done: 7, queued: 2 }, total: 9, last_24h: 3, campaigns_by_status: { active: 1 }, campaigns_total: 1 },
+  rate_limits: { active_windows_last_hour: 2, counters_with_traffic_24h: 1, enabled: true },
+  generated_at: '2026-08-20T09:00:00Z',
+};
+
+const ADMIN_USERS = {
+  count: 2,
+  users: [
+    { email: 'dev@example.com', first_name: 'Dev', last_name: 'Owner', is_verified: true, roles: ['admin', 'customer'], primary_role: 'admin', linkedin_accounts: 1, campaigns: 1, created_at: '2026-07-01T10:00:00Z' },
+    { email: 'sara@example.com', first_name: 'Sara', last_name: 'Ahmed', is_verified: true, roles: ['customer'], primary_role: 'customer', linkedin_accounts: 0, campaigns: 0, created_at: '2026-07-02T10:00:00Z' },
+  ],
+};
+
+const ADMIN_SETTINGS = {
+  settings: [
+    { key: 'campaign.daily_connection_limit', value: 15, default: 15, value_type: 'int', category: 'campaign', description: 'Connection requests per account per day', minimum: 0, maximum: 15 },
+    { key: 'jobs.max_concurrent_browsers', value: 2, default: 2, value_type: 'int', category: 'jobs', description: 'Concurrent browser sessions', minimum: 1, maximum: 10 },
+  ],
+};
+
+const ADMIN_RATE_LIMITS = {
+  enabled: true,
+  rules: {},
+  counters: [
+    { identity: 'ip:203.0.113.9', bucket: 'auth:login', request_count: 4, window_started_at: '2026-08-20T09:00:00Z' },
+  ],
+};
+
+const ADMIN_API_STUBS = {
+  'GET /api/v1/admin/me': (res) => json(res, 200, ADMIN_ME),
+  'GET /api/v1/admin/overview': (res) => json(res, 200, ADMIN_OVERVIEW),
+  'GET /api/v1/admin/users': (res) => json(res, 200, ADMIN_USERS),
+  'GET /api/v1/admin/settings': (res) => json(res, 200, ADMIN_SETTINGS),
+  'GET /api/v1/admin/rate-limits': (res) => json(res, 200, ADMIN_RATE_LIMITS),
 };
 
 const ACTIVE_ACCOUNT = {
@@ -100,6 +167,51 @@ const CASES = [
   {
     path: '/',
     mustContain: ['Connect your tools.', 'Automate your day.', 'Connect your social tools', 'Build campaigns in minutes'],
+  },
+  {
+    name: 'landing (admin token) — shows BOTH App Dashboard and Admin Dashboard',
+    path: '/',
+    storage: ADMIN_TOKENS,
+    api: { 'GET /api/v1/admin/me': (res) => json(res, 200, ADMIN_ME) },
+    mustContain: ['App Dashboard', 'Admin Dashboard'],
+  },
+  {
+    name: 'landing (customer token) — App Dashboard only, no Admin button',
+    path: '/',
+    storage: AUTH_TOKENS,
+    api: { 'GET /api/v1/admin/me': (res) => json(res, 200, CUSTOMER_ME) },
+    mustContain: ['App Dashboard'],
+    mustNotContain: ['Admin Dashboard'],
+  },
+  {
+    name: 'admin dashboard — users, jobs, accounts, settings and rate limits render',
+    path: '/admin',
+    storage: ADMIN_TOKENS,
+    api: ADMIN_API_STUBS,
+    mustContain: [
+      'Admin Dashboard',
+      'Users and roles',
+      'sara@example.com',
+      'Campaign parameters, jobs and limits',
+      'campaign.daily_connection_limit'.split('.').slice(1).join('.'),
+      'Rate limits (database-backed)',
+      'ip:203.0.113.9',
+      'auth:login',
+    ],
+  },
+  {
+    name: 'admin dashboard — a customer is redirected away from /admin',
+    path: '/admin',
+    storage: AUTH_TOKENS,
+    api: {
+      ...ADMIN_API_STUBS,
+      'GET /api/v1/admin/me': (res) => json(res, 200, CUSTOMER_ME),
+      'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }),
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
+    },
+    // Redirected to /app/account, so the accounts hub renders instead.
+    mustContain: ['Accounts'],
+    mustNotContain: ['Users and roles', 'Rate limits (database-backed)'],
   },
   { path: '/login', mustContain: ['Log in', 'Forgot password?'] },
   { path: '/signup', mustContain: ['Create your account', 'At least 8 characters'] },

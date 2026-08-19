@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from api.dependencies import get_current_user, get_db
+from api.rate_limit_deps import rate_limit
 from core.logging_config import get_logger
 from models.user import User
 from models.whatsapp import WhatsAppSession
@@ -89,7 +90,11 @@ def _snapshot_response() -> LiveStartResponse:
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
 
-@router.post("/start", response_model=LiveStartResponse)
+@router.post(
+    "/start",
+    response_model=LiveStartResponse,
+    dependencies=[Depends(rate_limit("live:start"))],
+)
 async def start_live_chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -101,8 +106,16 @@ async def start_live_chat(
     result = await live_browser.start()
     resp = LiveStartResponse(**result)
     if resp.status == "error":
-        # Surface a 503 for a clean client-side error message.
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=resp)
+        # Surface a 503 with a *string* detail. Passing the Pydantic model
+        # itself made Starlette's JSONResponse raise "Object of type
+        # LiveStartResponse is not JSON serializable", so every failed start
+        # turned into an opaque 500 "Internal Server Error" and the real
+        # reason (not connected / profile busy / session expired) never
+        # reached the user. getErrorMessage() renders this string directly.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=resp.message or resp.error or "Failed to start live chat.",
+        )
     return resp
 
 

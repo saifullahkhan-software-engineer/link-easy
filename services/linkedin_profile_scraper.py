@@ -19,6 +19,15 @@ Sections are stable, public surface:
 The scraper never throws on missing fields; the public
 ``scrape_profile`` always yields a dict with the section keys present
 (empty list / empty string means the field was unavailable).
+
+.. important::
+   Every JavaScript snippet passed to ``page.evaluate`` must be a **raw**
+   string (``r\"\"\"...\"\"\"``) whenever it contains a backslash. In a normal
+   Python string ``\\b`` becomes a backspace (0x08), ``\\f`` a form feed, and
+   so on, so the browser receives corrupted source. That silently broke the
+   "Show all"/"See more" expander regex and made scans return only the
+   basics and About sections. ``tests/test_live_chat_and_profile_scan_fixes.py``
+   asserts no injected snippet ships a control character.
 """
 from __future__ import annotations
 
@@ -121,7 +130,12 @@ async def _expand_profile_sections(page) -> None:
     """
     try:
         await page.evaluate(
-            """() => {
+            # NOTE: raw string. Without the ``r`` prefix Python turns the
+            # ``\b`` word-boundary into a literal backspace (0x08) character,
+            # so the regex below became /^(show all|see more)<BS>/i and never
+            # matched a real control. Every "Show all"/"See more" expander was
+            # then skipped, which is why scans returned only About/basics.
+            r"""() => {
                 const wanted = /^(show all|see more)\b/i;
                 let clicked = 0;
                 const controls = Array.from(document.querySelectorAll(

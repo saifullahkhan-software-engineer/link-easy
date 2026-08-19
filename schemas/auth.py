@@ -73,4 +73,7 @@ class RefreshTokenRequest(BaseModel):
 class TokenPayload(BaseModel):
     sub: EmailStr
     role: UserRole
+    # Multi-role claim. Optional so refresh tokens minted before this change
+    # still validate; ``role`` remains the single highest-privilege role.
+    roles: list[str] = []
     token_type: str | None = None

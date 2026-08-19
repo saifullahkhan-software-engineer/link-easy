@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, HttpUrl
 
 from api.dependencies import get_current_user
+from api.rate_limit_deps import rate_limit
 from core.logging_config import get_logger
 from models.user import User
 from services.linkedin_live_browser import linkedin_live_browser
@@ -37,7 +38,11 @@ def _pdf_filename(report: dict[str, Any]) -> str:
     return f"{slug or 'linkedin-profile'}-scan.pdf"
 
 
-@router.post("/scan", response_model=ProfileScanResponse)
+@router.post(
+    "/scan",
+    response_model=ProfileScanResponse,
+    dependencies=[Depends(rate_limit("profile:scan"))],
+)
 async def scan_profile_pdf(
     payload: ProfileScanRequest,
     current_user: User = Depends(get_current_user),

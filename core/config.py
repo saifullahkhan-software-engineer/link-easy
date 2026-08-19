@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     # spam/blocking filter, so the scanner waits this long between forwards.
     # Override with the WHATSAPP_FORWARD_DELAY_SECONDS env var.
     WHATSAPP_FORWARD_DELAY_SECONDS: float = 10.0
+
+    # Hard-enforce admin-only APIs. Left false during bootstrap so the first
+    # admin can be assigned through the UI without being locked out; the
+    # frontend already hides admin surfaces from non-admins. Flip to true
+    # (ADMIN_API_ENFORCED=true) once roles are assigned to make every admin
+    # endpoint return 403 for non-admins.
+    ADMIN_API_ENFORCED: bool = False
+
+    # Postgres-backed API rate limiting. Redis on this deployment is busy with
+    # Celery job traffic, so limits live in the database instead.
+    RATE_LIMIT_ENABLED: bool = True
     
     @property
     def cors_origins(self) -> list[str]:

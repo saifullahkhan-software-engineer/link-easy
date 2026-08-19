@@ -1,6 +1,7 @@
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
+import { useAdminAccess } from '../hooks/useAdminAccess';
 
 // Grouped sidebar: a single Account link plus per-product groups
 // (LinkedIn, WhatsApp) with nested items. Visual padding indents the
@@ -132,6 +133,7 @@ const whatsappGroup = {
 
 export default function DashboardLayout() {
   const { email, name, logout } = useAuth();
+  const { canSeeAdmin } = useAdminAccess();
   const navigate = useNavigate();
 
   function handleLogout() {
@@ -172,6 +174,26 @@ export default function DashboardLayout() {
             </svg>
             Dashboard
           </NavLink>
+
+          {canSeeAdmin && (
+            <NavLink
+              to="/admin"
+              end
+              data-testid="sidebar-admin-link"
+              className={({ isActive }) =>
+                `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition ${
+                  isActive
+                    ? 'bg-accent-500/10 text-accent-300 ring-1 ring-inset ring-accent-500/20'
+                    : 'text-zinc-300 hover:bg-surface-800 hover:text-zinc-100'
+                }`
+              }
+            >
+              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 3.5l7 3v5c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9v-5l7-3z" />
+              </svg>
+              Admin
+            </NavLink>
+          )}
 
           {/* Standalone Account link (top of the workspace). */}
           <div>

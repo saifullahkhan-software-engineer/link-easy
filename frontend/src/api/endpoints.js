@@ -351,6 +351,25 @@ export const systemQueuesApi = {
   bulkDeleteCampaignJobs: (payload) => api.post('/system/queues/db/campaign-jobs/bulk-delete', payload),
 };
 
+/* ----------------------------------- admin --------------------------------- */
+
+export const adminApi = {
+  // Available to any signed-in user — it is what tells the UI whether to
+  // offer the Admin Dashboard button at all.
+  me: () => api.get('/admin/me'),
+  overview: () => api.get('/admin/overview'),
+  listUsers: ({ q, limit = 100 } = {}) =>
+    api.get('/admin/users', { params: { ...(q ? { q } : {}), limit } }),
+  setUserRoles: (email, roles) => api.put(`/admin/users/${encodeURIComponent(email)}/roles`, { roles }),
+  getSettings: () => api.get('/admin/settings'),
+  updateSettings: (values) => api.put('/admin/settings', { values }),
+  rateLimits: ({ limit = 100 } = {}) => api.get('/admin/rate-limits', { params: { limit } }),
+  resetRateLimit: ({ identity, bucket } = {}) =>
+    api.post('/admin/rate-limits/reset', null, {
+      params: { ...(identity ? { identity } : {}), ...(bucket ? { bucket } : {}) },
+    }),
+};
+
 /* --------------------------------- live debug ------------------------------ */
 // EventSource cannot send Authorization headers, so the live streams accept
 // the access token as a query parameter (?token=...) instead.
