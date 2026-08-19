@@ -52,7 +52,8 @@ celery_app.conf.update(
     # deleted.  Use an ephemeral path by default; operators can override it
     # when they explicitly want a durable Beat database.
     beat_schedule_filename   = os.getenv(
-        "CELERY_BEAT_SCHEDULE_FILE", "/tmp/linkeasy-celerybeat-schedule"
+        "CELERY_BEAT_SCHEDULE_FILE",
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "celerybeat-schedule")
     ),
 
     # Celery Beat schedule for periodic tasks
