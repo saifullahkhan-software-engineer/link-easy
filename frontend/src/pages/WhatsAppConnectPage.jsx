@@ -128,20 +128,19 @@ export default function WhatsAppConnectPage() {
   const connected = status === 'connected';
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div>
-        <Link
-          to="/app/account"
-          className="text-xs font-medium text-zinc-500 transition hover:text-zinc-300"
-        >
+    <div className="max-w-3xl">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-zinc-50">WhatsApp Account</h1>
+          <p className="mt-1 text-sm text-zinc-400">
+            Link WhatsApp Web by scanning the QR code with your phone. The session is
+            kept in a dedicated browser profile on our side, so it stays connected
+            across restarts and scanner operations.
+          </p>
+        </div>
+        <Link to="/app/account" className="btn-secondary text-xs">
           ← Accounts
         </Link>
-        <h1 className="mt-1 text-2xl font-bold text-zinc-100">WhatsApp Connection</h1>
-        <p className="mt-1 text-sm text-zinc-400">
-          Link WhatsApp Web by scanning the QR code with your phone. The session is
-          kept in a dedicated browser profile on our side, so it stays connected
-          across restarts and scanner operations.
-        </p>
       </div>
 
       {connected ? (
