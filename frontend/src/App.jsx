@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './context/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
+import AdminRoute from './components/AdminRoute';
 import DashboardLayout from './components/DashboardLayout';
 import Landing from './pages/Landing';
 import Login from './pages/Login';
@@ -28,6 +29,7 @@ import LinkedInLiveChatPage from './pages/LinkedInLiveChatPage';
 import LinkedInProfileScanPage from './pages/LinkedInProfileScanPage';
 import SystemQueuesPage from './pages/SystemQueuesPage';
 import DashboardPage from './pages/DashboardPage';
+import AdminDashboardPage from './pages/admin/AdminDashboardPage';
 
 export default function App() {
   return (
@@ -67,6 +69,18 @@ export default function App() {
           >
             <Route index element={<DashboardPage />} />
             <Route path="redis-queues" element={<SystemQueuesPage />} />
+          </Route>
+
+          {/* admin area — admins only (see AdminRoute) */}
+          <Route
+            path="/admin"
+            element={
+              <AdminRoute>
+                <DashboardLayout />
+              </AdminRoute>
+            }
+          >
+            <Route index element={<AdminDashboardPage />} />
           </Route>
 
           {/* app shell */}

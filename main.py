@@ -26,6 +26,7 @@ from api.v1.linkedin_live import router as linkedin_live_router
 from api.v1.linkedin_profile import router as linkedin_profile_router
 from api.v1.live import router as live_router
 from api.v1.system_queues import router as system_queues_router
+from api.v1.admin import router as admin_router
 from core.config import settings
 from core.logging_config import get_logger
 try:
@@ -225,6 +226,7 @@ app.include_router(linkedin_live_router)
 app.include_router(linkedin_profile_router)
 app.include_router(live_router)
 app.include_router(system_queues_router)
+app.include_router(admin_router)
 
 
 @app.get("/")

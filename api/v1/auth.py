@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from api.dependencies import get_current_user, get_db
+from api.rate_limit_deps import rate_limit
 from core.config import settings
 from core.email import (
     EmailDeliveryError,
@@ -36,6 +37,7 @@ from schemas.auth import (
     UserRegister,
     VerifyEmail,
 )
+from services.user_roles import get_user_roles, primary_role
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -57,7 +59,13 @@ def _ensure_aware(value: datetime | None) -> datetime | None:
     return value
 
 
-@router.post("/register", response_model=RegisterResponse,response_model_exclude_none=True, status_code=status.HTTP_201_CREATED,)
+@router.post(
+    "/register",
+    response_model=RegisterResponse,
+    response_model_exclude_none=True,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("auth:register"))],
+)
 async def register( user_in: UserRegister, response: Response, db: AsyncSession = Depends(get_db),):
     result = await db.execute(select(User).where(User.email == user_in.email))
     existing_user = result.scalars().first()
@@ -102,7 +110,7 @@ async def register( user_in: UserRegister, response: Response, db: AsyncSession 
     return {"message": "Verification code sent to email"}
 
 
-@router.post("/verify-email")
+@router.post("/verify-email", dependencies=[Depends(rate_limit("auth:verify-email"))])
 async def verify_email(data: VerifyEmail, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == data.email))
     user = result.scalars().first()
@@ -146,7 +154,10 @@ async def verify_email(data: VerifyEmail, db: AsyncSession = Depends(get_db)):
     return {"message": "Account verified successfully"}
 
 
-@router.post("/resend-verification")
+@router.post(
+    "/resend-verification",
+    dependencies=[Depends(rate_limit("auth:resend-verification"))],
+)
 async def resend_verification(
     data: ResendVerificationRequest, db: AsyncSession = Depends(get_db)
 ):
@@ -181,7 +192,11 @@ async def resend_verification(
     return {"message": "Verification code sent to email"}
 
 
-@router.post("/login", response_model=Token)
+@router.post(
+    "/login",
+    response_model=Token,
+    dependencies=[Depends(rate_limit("auth:login"))],
+)
 async def login(credentials: UserLogin, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == credentials.email))
     user = result.scalars().first()
@@ -192,9 +207,14 @@ async def login(credentials: UserLogin, db: AsyncSession = Depends(get_db)):
     if not user.is_verified:
         raise HTTPException(status_code=403, detail="Please verify your email first")
 
+    # ``role`` stays for backwards compatibility with older clients and the
+    # legacy require_roles dependency; ``roles`` is the real list, so a user who
+    # is both an admin and a customer keeps both in the token.
+    roles = await get_user_roles(db, user.email)
     subject = {
         "sub": user.email,
-        "role": user.role.value if hasattr(user.role, "value") else user.role,
+        "role": primary_role(roles),
+        "roles": roles,
     }
     access_token = create_access_token(subject)
     refresh_token = create_refresh_token(subject)
@@ -206,7 +226,10 @@ async def login(credentials: UserLogin, db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/forgot-password")
+@router.post(
+    "/forgot-password",
+    dependencies=[Depends(rate_limit("auth:forgot-password"))],
+)
 async def forgot_password(data: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == data.email))
     user = result.scalars().first()
@@ -244,7 +267,10 @@ async def resend_password_reset(
 ):
     return await forgot_password(data, db)
 
-@router.post("/reset-password")
+@router.post(
+    "/reset-password",
+    dependencies=[Depends(rate_limit("auth:reset-password"))],
+)
 async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     try:
         payload = jwt.decode(
@@ -303,9 +329,13 @@ async def refresh_token(data: RefreshTokenRequest, db: AsyncSession = Depends(ge
     if user is None or not user.is_verified:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
+    # Re-read roles on refresh so a grant/revoke takes effect without forcing
+    # the user to log out and back in.
+    roles = await get_user_roles(db, user.email)
     subject = {
         "sub": user.email,
-        "role": user.role.value if hasattr(user.role, "value") else user.role,
+        "role": primary_role(roles),
+        "roles": roles,
     }
 
     return {

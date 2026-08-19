@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from api.dependencies import get_current_user, get_db
+from api.rate_limit_deps import rate_limit
 from core.logging_config import get_logger
 from models.user import User
 from models.whatsapp import WhatsAppSession
@@ -89,7 +90,11 @@ def _snapshot_response() -> LiveStartResponse:
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
 
-@router.post("/start", response_model=LiveStartResponse)
+@router.post(
+    "/start",
+    response_model=LiveStartResponse,
+    dependencies=[Depends(rate_limit("live:start"))],
+)
 async def start_live_chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
