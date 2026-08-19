@@ -85,7 +85,9 @@ export default function App() {
               </AdminRoute>
             }
           >
-            <Route index element={<Navigate to="/admin/accounts" replace />} />
+            <Route index element={<Navigate to="/admin/dashboard" replace />} />
+            <Route path="dashboard" element={<DashboardPage basePath="/admin" />} />
+            <Route path="redis-queues" element={<SystemQueuesPage basePath="/admin" />} />
             <Route path="accounts" element={<AdminAccountsPage />} />
             <Route path="users" element={<AdminUsersPage />} />
             <Route path="linkedin" element={<AdminLinkedInPage />} />

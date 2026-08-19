@@ -39,7 +39,7 @@ function Badge({ children, tone = 'zinc' }) {
   );
 }
 
-export default function SystemQueuesPage() {
+export default function SystemQueuesPage({ basePath = '/dashboard' }) {
   const [loading, setLoading] = useState(true);
   const [overview, setOverview] = useState(null);
   const [keysData, setKeysData] = useState(null);
@@ -246,7 +246,7 @@ export default function SystemQueuesPage() {
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <Link to="/dashboard" className="text-xs font-medium text-zinc-500 transition hover:text-zinc-300">← Dashboard</Link>
+          <Link to={basePath} className="text-xs font-medium text-zinc-500 transition hover:text-zinc-300">← Dashboard</Link>
           <h1 className="mt-1 text-2xl font-bold text-zinc-50">Redis & Queue Jobs</h1>
           <p className="mt-1 text-sm text-zinc-400">
             Inspect remaining, paused, and faulty jobs in Redis and Postgres — delete unnecessary ones to unblock workers.
