@@ -5,17 +5,40 @@ import { useAuth } from '../context/AuthContext';
 /**
  * Admin module shell — a dashboard completely separate from the app.
  *
- * Its sidebar contains the four admin areas:
- *   1. Accounts            — LinkedIn accounts + WhatsApp sessions
- *   2. Users               — users and roles
- *   3. LinkedIn            — LinkedIn jobs and campaign parameters
- *   4. WhatsApp            — WhatsApp jobs and parameters
+ * Its sidebar starts with the operations dashboard, followed by the four
+ * admin areas:
+ *   1. Operations          — system overview + Redis queues
+ *   2. Accounts            — LinkedIn accounts + WhatsApp sessions
+ *   3. Users               — users and roles
+ *   4. LinkedIn            — LinkedIn jobs and campaign parameters
+ *   5. WhatsApp            — WhatsApp jobs and parameters
  *
  * This lives under /admin, guarded by AdminRoute, and shares nothing with the
  * app's sidebar (/app) or the operations dashboard (/dashboard).
  */
 
 const adminNav = [
+  {
+    to: '/admin/dashboard',
+    label: 'Dashboard',
+    sub: 'System overview',
+    end: false,
+    icon: (
+      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75h6.5v6.5h-6.5zM13.75 3.75h6.5v6.5h-6.5zM3.75 13.75h6.5v6.5h-6.5zM13.75 13.75h6.5v6.5h-6.5z" />
+      </svg>
+    ),
+  },
+  {
+    to: '/admin/redis-queues',
+    label: 'Redis Queues',
+    sub: 'Queues, locks & jobs',
+    icon: (
+      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0-4-4m4 4-4 4m0 6H4m0 0 4 4m-4-4 4-4" />
+      </svg>
+    ),
+  },
   {
     to: '/admin/accounts',
     label: 'Accounts',
@@ -98,6 +121,7 @@ export default function AdminLayout() {
             <NavLink
               key={item.to}
               to={item.to}
+              end={item.end}
               className={({ isActive }) =>
                 `flex items-start gap-3 rounded-lg px-3 py-2.5 transition ${
                   isActive

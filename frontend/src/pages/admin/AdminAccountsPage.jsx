@@ -27,6 +27,7 @@ export default function AdminAccountsPage() {
   const [overview, setOverview] = useState(null);
   const [accounts, setAccounts] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [removingSession, setRemovingSession] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -43,6 +44,20 @@ export default function AdminAccountsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  async function removeWhatsAppSession(row) {
+    if (!window.confirm(`Remove WhatsApp session #${row.id}? This disconnects it and deletes its saved credentials.`)) return;
+    setRemovingSession(row.id);
+    try {
+      await adminApi.deleteWhatsAppSession(row.id);
+      toast.success(`WhatsApp session #${row.id} removed`);
+      await load();
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not remove WhatsApp session'));
+    } finally {
+      setRemovingSession(null);
+    }
+  }
 
   if (loading && !accounts) {
     return (
@@ -109,7 +124,8 @@ export default function AdminAccountsPage() {
                 <th className="py-2 pr-4">Label</th>
                 <th className="py-2 pr-4">Status</th>
                 <th className="py-2 pr-4">Added</th>
-                <th className="py-2">Last updated</th>
+                <th className="py-2 pr-4">Last updated</th>
+                <th className="py-2">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -122,7 +138,8 @@ export default function AdminAccountsPage() {
                     <span className="capitalize text-zinc-300">{row.status || '—'}</span>
                   </td>
                   <td className="py-3 pr-4 text-xs text-zinc-500">{formatDate(row.created_at)}</td>
-                  <td className="py-3 text-xs text-zinc-500">{formatDate(row.updated_at)}</td>
+                  <td className="py-3 pr-4 text-xs text-zinc-500">{formatDate(row.updated_at)}</td>
+                  <td className="py-3"><button type="button" onClick={() => removeWhatsAppSession(row)} disabled={removingSession === row.id} className="rounded-lg border border-red-500/20 bg-red-500/10 px-2.5 py-1.5 text-xs font-semibold text-red-300 transition hover:bg-red-500/20 disabled:opacity-50">{removingSession === row.id ? 'Removing…' : 'Remove'}</button></td>
                 </tr>
               ))}
               {!linkedin.length && (
@@ -164,7 +181,7 @@ export default function AdminAccountsPage() {
               ))}
               {!whatsapp.length && (
                 <tr>
-                  <td colSpan={5} className="py-6 text-center text-zinc-500">No WhatsApp sessions yet.</td>
+                  <td colSpan={6} className="py-6 text-center text-zinc-500">No WhatsApp sessions yet.</td>
                 </tr>
               )}
             </tbody>

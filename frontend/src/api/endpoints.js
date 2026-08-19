@@ -370,6 +370,7 @@ export const adminApi = {
     }),
   // Per-section admin views (own sidebar, separate from the app module).
   accounts: () => api.get('/admin/accounts'),
+  deleteWhatsAppSession: (sessionId) => api.delete(`/admin/accounts/whatsapp/${sessionId}`),
   linkedinJobs: () => api.get('/admin/jobs/linkedin'),
   whatsappJobs: () => api.get('/admin/jobs/whatsapp'),
 };

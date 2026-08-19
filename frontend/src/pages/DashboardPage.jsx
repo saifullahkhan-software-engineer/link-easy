@@ -26,7 +26,7 @@ function countStatus(value, status) {
   return Number(value?.[status] || 0);
 }
 
-export default function DashboardPage() {
+export default function DashboardPage({ basePath = '/dashboard' }) {
   const [overview, setOverview] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -79,7 +79,7 @@ export default function DashboardPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           <Link to="/app" className="btn-primary">Open App <span aria-hidden="true">→</span></Link>
-          <Link to="/dashboard/redis-queues" className="btn-secondary">Redis &amp; Queues</Link>
+          <Link to={`${basePath}/redis-queues`} className="btn-secondary">Redis &amp; Queues</Link>
         </div>
       </div>
 
@@ -165,7 +165,7 @@ export default function DashboardPage() {
               <span className="font-mono text-zinc-200">{Number(celery.reserved_count || 0)}</span>
             </div>
           </div>
-          <Link to="/dashboard/redis-queues" className="mt-5 inline-flex text-sm font-semibold text-accent-300 transition hover:text-accent-200">
+          <Link to={`${basePath}/redis-queues`} className="mt-5 inline-flex text-sm font-semibold text-accent-300 transition hover:text-accent-200">
             Manage Redis, queues, locks, and jobs <span className="ml-1" aria-hidden="true">→</span>
           </Link>
         </section>
@@ -177,7 +177,7 @@ export default function DashboardPage() {
             <h2 className="text-sm font-semibold text-accent-200">Need to manage a stuck task?</h2>
             <p className="mt-1 text-sm text-zinc-500">Use the dashboard operations page to inspect active, queued, paused, and failed work without putting queue controls in the main app.</p>
           </div>
-          <Link to="/dashboard/redis-queues" className="btn-secondary text-xs">Open operations</Link>
+          <Link to={`${basePath}/redis-queues`} className="btn-secondary text-xs">Open operations</Link>
         </div>
       </section>
     </div>

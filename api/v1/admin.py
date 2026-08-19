@@ -210,6 +210,24 @@ async def admin_overview(
 # ── Accounts ─────────────────────────────────────────────────────────────────
 
 
+@router.delete("/accounts/whatsapp/{session_id}", status_code=204)
+async def admin_delete_whatsapp_session(
+    session_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Remove a WhatsApp session and its persisted credentials."""
+    session = await db.scalar(select(WhatsAppSession).where(WhatsAppSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="WhatsApp session not found")
+    session.cookies_json = None
+    session.storage_state_json = None
+    session.is_active = False
+    session.status = "disconnected"
+    await db.delete(session)
+    await db.commit()
+
+
 @router.get("/accounts", response_model=AdminAccountsResponse)
 async def admin_accounts(
     _admin: User = Depends(require_admin),
