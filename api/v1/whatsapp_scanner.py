@@ -488,6 +488,8 @@ async def get_whatsapp_status(
     return WhatsAppStatusResponse(
         status=session.status,
         is_active=session.is_active,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
     )
 
 

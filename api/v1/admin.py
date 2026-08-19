@@ -33,11 +33,18 @@ from models.linkedin_account import LinkedInAccount
 from models.rate_limit import RateLimitCounter
 from models.roles import UserRole
 from models.user import User
-from models.whatsapp import WhatsAppSession
+from models.whatsapp import WhatsAppRawMessage, WhatsAppScanFilter, WhatsAppSession
 from schemas.admin import (
+    AdminAccountsResponse,
+    AdminLinkedInAccountRow,
+    AdminLinkedInJobRow,
+    AdminLinkedInJobsResponse,
     AdminOverviewResponse,
     AdminUserRow,
     AdminUsersResponse,
+    AdminWhatsAppJobRow,
+    AdminWhatsAppJobsResponse,
+    AdminWhatsAppSessionRow,
     MyRolesResponse,
     SettingsResponse,
     UpdateSettingsRequest,
@@ -198,6 +205,170 @@ async def admin_overview(
         },
         generated_at=now,
     )
+
+
+# ── Accounts ─────────────────────────────────────────────────────────────────
+
+
+@router.get("/accounts", response_model=AdminAccountsResponse)
+async def admin_accounts(
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminAccountsResponse:
+    """Every LinkedIn account and WhatsApp session across all users."""
+    li_result = await _safe_execute(
+        db,
+        select(LinkedInAccount).order_by(LinkedInAccount.created_at.desc()).limit(500),
+    )
+    li_rows = li_result.scalars().all() if li_result is not None else []
+
+    wa_result = await _safe_execute(
+        db,
+        select(WhatsAppSession).order_by(WhatsAppSession.id.desc()).limit(500),
+    )
+    wa_rows = wa_result.scalars().all() if wa_result is not None else []
+
+    linkedin = [
+        AdminLinkedInAccountRow(
+            id=row.id,
+            owner_email=row.owner_email,
+            linkedin_email=row.linkedin_email,
+            label=row.label,
+            status=row.status.value if hasattr(row.status, "value") else row.status,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+        for row in li_rows
+    ]
+    whatsapp = [
+        AdminWhatsAppSessionRow(
+            id=row.id,
+            status=row.status,
+            is_active=bool(row.is_active),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+        for row in wa_rows
+    ]
+
+    return AdminAccountsResponse(
+        linkedin=linkedin,
+        whatsapp=whatsapp,
+        counts={
+            "linkedin_total": len(linkedin),
+            "linkedin_active": sum(
+                1 for row in linkedin if (row.status or "") in ("active", "valid")
+            ),
+            "whatsapp_total": len(whatsapp),
+            "whatsapp_connected": sum(1 for row in whatsapp if row.status == "connected"),
+        },
+    )
+
+
+# ── LinkedIn jobs (campaign audit log) ───────────────────────────────────────
+
+
+@router.get("/jobs/linkedin", response_model=AdminLinkedInJobsResponse)
+async def admin_linkedin_jobs(
+    limit: int = Query(200, ge=1, le=1000),
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminLinkedInJobsResponse:
+    """Recent campaign (LinkedIn) jobs across all users, newest first."""
+    result = await _safe_execute(
+        db,
+        select(CampaignJob, Campaign.name)
+        .join(Campaign, Campaign.id == CampaignJob.campaign_id, isouter=True)
+        .order_by(CampaignJob.created_at.desc())
+        .limit(limit),
+    )
+    rows = result.all() if result is not None else []
+
+    jobs = [
+        AdminLinkedInJobRow(
+            id=job.id,
+            campaign_id=job.campaign_id,
+            campaign_name=campaign_name,
+            step_type=job.step_type,
+            status=job.status.value if hasattr(job.status, "value") else job.status,
+            action_message=job.action_message,
+            error_message=job.error_message,
+            scheduled_at=job.scheduled_at,
+            started_at=job.started_at,
+            completed_at=job.completed_at,
+            created_at=job.created_at,
+        )
+        for job, campaign_name in rows
+    ]
+    return AdminLinkedInJobsResponse(jobs=jobs, count=len(jobs))
+
+
+# ── WhatsApp jobs (filter jobs) ──────────────────────────────────────────────
+
+
+@router.get("/jobs/whatsapp", response_model=AdminWhatsAppJobsResponse)
+async def admin_whatsapp_jobs(
+    limit: int = Query(200, ge=1, le=1000),
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminWhatsAppJobsResponse:
+    """WhatsApp filter jobs across all users with their message counters."""
+    result = await _safe_execute(
+        db,
+        select(WhatsAppScanFilter).order_by(WhatsAppScanFilter.id.desc()).limit(limit),
+    )
+    rows = result.scalars().all() if result is not None else []
+
+    jobs: list[AdminWhatsAppJobRow] = []
+    for row in rows:
+        total = await _scalar(
+            db,
+            select(func.count()).select_from(WhatsAppRawMessage).where(
+                WhatsAppRawMessage.filter_id == row.id
+            ),
+        )
+        matched = await _scalar(
+            db,
+            select(func.count()).select_from(WhatsAppRawMessage).where(
+                WhatsAppRawMessage.filter_id == row.id,
+                WhatsAppRawMessage.status == "matched",
+            ),
+        )
+        rejected = await _scalar(
+            db,
+            select(func.count()).select_from(WhatsAppRawMessage).where(
+                WhatsAppRawMessage.filter_id == row.id,
+                WhatsAppRawMessage.status == "rejected",
+            ),
+        )
+        forwarded = await _scalar(
+            db,
+            select(func.count()).select_from(WhatsAppRawMessage).where(
+                WhatsAppRawMessage.filter_id == row.id,
+                WhatsAppRawMessage.forwarded == True,  # noqa: E712
+            ),
+        )
+        jobs.append(
+            AdminWhatsAppJobRow(
+                id=row.id,
+                name=row.name or "WhatsApp Filter",
+                status=row.status or "draft",
+                role=row.role,
+                job_title=row.job_title,
+                keywords=row.keywords or [],
+                interval_hours=float(row.interval_hours or 1.0),
+                next_scan_at=row.next_scan_at,
+                last_scan_at=row.last_scan_at,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                total_count=total,
+                matched_count=matched,
+                rejected_count=rejected,
+                forwarded_count=forwarded,
+            )
+        )
+
+    return AdminWhatsAppJobsResponse(jobs=jobs, count=len(jobs))
 
 
 # ── Users ────────────────────────────────────────────────────────────────────

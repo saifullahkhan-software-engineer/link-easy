@@ -508,8 +508,24 @@ export default function LinkedInAccountPage() {
             </div>
           )}
 
+          {/* Early-version note: live chat requires jobs to be stopped. */}
+          <div className="mt-5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            <p className="font-medium">⚠️ In early versions, running jobs need to be stopped before using Live Chat</p>
+            <p className="mt-1 text-amber-200/80">
+              Campaigns and live chat share the same LinkedIn session. Pause or stop your
+              campaigns (or wait for them to finish) before opening Live Chat, otherwise
+              jobs will pause automatically while chat is open.
+            </p>
+          </div>
+
           <div className="mt-6 flex flex-wrap gap-3">
-            <button onClick={refreshSession} className="btn-primary" disabled={refreshing}>
+            <Link to="/app/feed-scroll" className="btn-primary">
+              LinkedIn Scan
+            </Link>
+            <Link to="/app/linkedin-live" className="btn-primary">
+              Live Chat
+            </Link>
+            <button onClick={refreshSession} className="btn-secondary" disabled={refreshing}>
               {refreshing && <Spinner />}
               {refreshing ? 'Checking…' : 'Refresh session'}
             </button>

@@ -85,3 +85,78 @@ class AdminOverviewResponse(BaseModel):
     jobs: dict[str, Any]
     rate_limits: dict[str, Any]
     generated_at: datetime
+
+
+# ── Accounts (LinkedIn + WhatsApp sessions) ──────────────────────────────────
+
+
+class AdminLinkedInAccountRow(BaseModel):
+    id: str
+    owner_email: Optional[str] = None
+    linkedin_email: str
+    label: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class AdminWhatsAppSessionRow(BaseModel):
+    id: int
+    status: str
+    is_active: bool
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class AdminAccountsResponse(BaseModel):
+    linkedin: list[AdminLinkedInAccountRow]
+    whatsapp: list[AdminWhatsAppSessionRow]
+    counts: dict[str, Any] = Field(default_factory=dict)
+
+
+# ── LinkedIn jobs (campaign job audit log) ───────────────────────────────────
+
+
+class AdminLinkedInJobRow(BaseModel):
+    id: str
+    campaign_id: str
+    campaign_name: Optional[str] = None
+    step_type: str
+    status: str
+    action_message: Optional[str] = None
+    error_message: Optional[str] = None
+    scheduled_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
+class AdminLinkedInJobsResponse(BaseModel):
+    jobs: list[AdminLinkedInJobRow]
+    count: int
+
+
+# ── WhatsApp jobs (filter jobs) ──────────────────────────────────────────────
+
+
+class AdminWhatsAppJobRow(BaseModel):
+    id: int
+    name: str
+    status: str
+    role: Optional[str] = None
+    job_title: Optional[str] = None
+    keywords: Optional[list[str]] = None
+    interval_hours: float = 1.0
+    next_scan_at: Optional[datetime] = None
+    last_scan_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    total_count: int = 0
+    matched_count: int = 0
+    rejected_count: int = 0
+    forwarded_count: int = 0
+
+
+class AdminWhatsAppJobsResponse(BaseModel):
+    jobs: list[AdminWhatsAppJobRow]
+    count: int

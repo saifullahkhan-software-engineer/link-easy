@@ -90,6 +90,19 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
         "jobs.feed_scroll_max_posts", 40, "int", "jobs",
         "Posts inspected per feed scan", 1, 200,
     ),
+    # WhatsApp parameters — used by the WhatsApp filter scheduler.
+    SettingSpec(
+        "whatsapp.max_monitored_groups", 3, "int", "whatsapp",
+        "Groups monitored per WhatsApp filter job", 1, 3,
+    ),
+    SettingSpec(
+        "whatsapp.latest_messages_limit", 20, "int", "whatsapp",
+        "Newest messages inspected per group per scan", 5, 100,
+    ),
+    SettingSpec(
+        "whatsapp.forward_delay_seconds", 10.0, "float", "whatsapp",
+        "Pause between WhatsApp forwards (anti-block)", 1, 300,
+    ),
     # Rate limiting — overrides services/rate_limiter.py defaults.
     SettingSpec(
         "rate_limit.auth:login.max_requests", 10, "int", "rate_limit",

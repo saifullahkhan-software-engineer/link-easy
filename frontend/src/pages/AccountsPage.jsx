@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import toast from 'react-hot-toast';
 import { linkedinApi, whatsappApi } from '../api/endpoints';
-import { getErrorMessage } from '../api/client';
 import { AccountStatusBadge } from '../components/Badge';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
 import { Spinner } from '../components/Spinner';
@@ -18,14 +16,16 @@ function NotConnectedBadge() {
 
 /**
  * Accounts hub — one card per connection (LinkedIn + WhatsApp).
- * Each card shows the live status and links to its manage/connect page.
+ *
+ * Each card only shows the account and its status. All details — when it was
+ * added, session health, disconnect, and the Scan / Live Chat shortcuts —
+ * live on each account's manage page.
  */
 export default function AccountsPage() {
   const [liLoading, setLiLoading] = useState(true);
   const [liAccount, setLiAccount] = useState(null);
   const [waLoading, setWaLoading] = useState(true);
   const [waStatus, setWaStatus] = useState('disconnected');
-  const [waDisconnecting, setWaDisconnecting] = useState(false);
 
   const loadLinkedIn = useCallback(async () => {
     setLiLoading(true);
@@ -56,24 +56,6 @@ export default function AccountsPage() {
     loadWhatsApp();
   }, [loadLinkedIn, loadWhatsApp]);
 
-  const handleWhatsAppDisconnect = async () => {
-    const confirmed = window.confirm(
-      'Disconnect WhatsApp? You will need to scan a new QR code before filters or live chat can use it again.',
-    );
-    if (!confirmed) return;
-
-    try {
-      setWaDisconnecting(true);
-      const { data } = await whatsappApi.disconnect();
-      setWaStatus('disconnected');
-      toast.success(data?.message || 'WhatsApp disconnected successfully');
-    } catch (err) {
-      toast.error(getErrorMessage(err, 'Failed to disconnect WhatsApp'));
-    } finally {
-      setWaDisconnecting(false);
-    }
-  };
-
   return (
     <div className="max-w-4xl">
       <h1 className="text-2xl font-bold text-zinc-50">Accounts</h1>
@@ -93,41 +75,16 @@ export default function AccountsPage() {
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-zinc-100">LinkedIn</h2>
-                <p className="text-xs text-zinc-500">Campaigns &amp; outreach</p>
+                {liLoading ? (
+                  <p className="mt-0.5 h-4 w-28 animate-pulse rounded bg-surface-700" />
+                ) : liAccount ? (
+                  <p className="mt-0.5 text-sm text-zinc-400">{liAccount.linkedin_email}</p>
+                ) : (
+                  <p className="mt-0.5 text-sm text-zinc-500">No account connected</p>
+                )}
               </div>
             </div>
-            {liLoading ? (
-              <Spinner />
-            ) : liAccount ? (
-              <AccountStatusBadge status={liAccount.status} />
-            ) : (
-              <NotConnectedBadge />
-            )}
-          </div>
-
-          <div className="mt-4 flex-1">
-            {liLoading ? (
-              <div className="animate-pulse space-y-2">
-                <div className="h-4 w-48 rounded bg-surface-700" />
-                <div className="h-3 w-32 rounded bg-surface-700" />
-              </div>
-            ) : liAccount ? (
-              <>
-                <p className="text-sm font-medium text-zinc-200">{liAccount.linkedin_email}</p>
-                {liAccount.label && (
-                  <p className="mt-0.5 text-sm text-zinc-500">{liAccount.label}</p>
-                )}
-                <p className="mt-2 text-xs leading-relaxed text-zinc-500">
-                  Your campaigns run from this LinkedIn profile. Refresh or update its
-                  credentials any time.
-                </p>
-              </>
-            ) : (
-              <p className="text-sm leading-relaxed text-zinc-500">
-                No LinkedIn account connected yet. Connect one to create and run
-                campaigns.
-              </p>
-            )}
+            {liLoading ? <Spinner /> : liAccount ? <AccountStatusBadge status={liAccount.status} /> : <NotConnectedBadge />}
           </div>
 
           <div className="mt-5 flex flex-wrap gap-3 border-t border-surface-700 pt-4">
@@ -148,57 +105,22 @@ export default function AccountsPage() {
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-zinc-100">WhatsApp</h2>
-                <p className="text-xs text-zinc-500">Job filters &amp; group monitoring</p>
+                {waLoading ? (
+                  <p className="mt-0.5 h-4 w-28 animate-pulse rounded bg-surface-700" />
+                ) : waStatus === 'connected' ? (
+                  <p className="mt-0.5 text-sm text-zinc-400">Connected</p>
+                ) : (
+                  <p className="mt-0.5 text-sm text-zinc-500">No account connected</p>
+                )}
               </div>
             </div>
             {waLoading ? <Spinner /> : <WhatsAppStatusBadge status={waStatus} />}
-          </div>
-
-          <div className="mt-4 flex-1">
-            {waLoading ? (
-              <div className="animate-pulse space-y-2">
-                <div className="h-4 w-40 rounded bg-surface-700" />
-                <div className="h-3 w-56 rounded bg-surface-700" />
-              </div>
-            ) : waStatus === 'connected' ? (
-              <p className="text-sm leading-relaxed text-zinc-500">
-                WhatsApp is connected and ready — your filters can monitor
-                groups and forward matches.
-              </p>
-            ) : waStatus === 'waiting_qr' ? (
-              <p className="text-sm leading-relaxed text-yellow-400/90">
-                A connection is in progress — finish scanning the QR code to link
-                WhatsApp.
-              </p>
-            ) : (
-              <p className="text-sm leading-relaxed text-zinc-500">
-                Not connected. Link WhatsApp by scanning a QR code to enable the job
-                scanner.
-              </p>
-            )}
           </div>
 
           <div className="mt-5 flex flex-wrap gap-3 border-t border-surface-700 pt-4">
             <Link to="/app/account/whatsapp" className="btn-primary">
               {waStatus === 'connected' ? 'Manage WhatsApp connection' : 'Connect WhatsApp'}
             </Link>
-            {waStatus === 'connected' && (
-              <>
-                <Link to="/app/whatsapp-scanner" className="btn-secondary">
-                  Open scanner →
-                </Link>
-                <button
-                  type="button"
-                  onClick={handleWhatsAppDisconnect}
-                  disabled={waDisconnecting}
-                  className="inline-flex items-center gap-2 rounded-lg border border-red-700/50 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                  data-testid="accounts-whatsapp-disconnect"
-                >
-                  {waDisconnecting ? <Spinner /> : null}
-                  {waDisconnecting ? 'Disconnecting…' : 'Disconnect WhatsApp'}
-                </button>
-              </>
-            )}
           </div>
         </div>
       </div>

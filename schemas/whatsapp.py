@@ -24,6 +24,10 @@ class WhatsAppDisconnectResponse(BaseModel):
 class WhatsAppStatusResponse(BaseModel):
     status: str  # disconnected | waiting_qr | connected | error
     is_active: bool
+    # Metadata for the manage-account card (mirrors LinkedInAccount): when the
+    # connection was added / last updated. Null when no session row exists.
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 # ── Groups ────────────────────────────────────────────────────────────────────
