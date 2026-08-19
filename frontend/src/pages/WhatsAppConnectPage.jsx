@@ -7,23 +7,32 @@ import { Spinner } from '../components/Spinner';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
 import BrowserViewPanel from '../components/live/BrowserViewPanel';
 
+function formatDate(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 /**
  * WhatsApp connectivity page (linked from the Accounts hub).
  *
- * This is the ONLY place where the QR connect flow lives — the scanner page
- * just shows the connected status. The connection is kept in a durable
- * server-side browser profile, so it no longer breaks when the scanner
- * opens afterwards.
+ * Disconnected / waiting for QR → status card + embedded QR browser.
+ * Connected → the same manage-account card design as LinkedIn: status badge,
+ * "Added" / "Last updated", plus the two product shortcuts (WhatsApp Scan and
+ * Live Chat) with the early-version note that running jobs must be stopped
+ * before live chat can be used.
  */
 export default function WhatsAppConnectPage() {
   const [status, setStatus] = useState('disconnected');
+  const [sessionMeta, setSessionMeta] = useState({ created_at: null, updated_at: null, is_active: false });
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
-  // Keep the embedded browser mounted briefly after QR login succeeds. The
-  // watcher now waits for the full WhatsApp surface before saving the session,
-  // so users can actually see that transition instead of seeing only a QR
-  // frame and then an abruptly blank panel.
   const [showBrowserView, setShowBrowserView] = useState(false);
   const connectionStartedRef = useRef(false);
   const hideBrowserTimerRef = useRef(null);
@@ -38,6 +47,11 @@ export default function WhatsAppConnectPage() {
       const { data } = await whatsappApi.getStatus();
       const nextStatus = data.status || 'disconnected';
       setStatus(nextStatus);
+      setSessionMeta({
+        created_at: data.created_at || null,
+        updated_at: data.updated_at || null,
+        is_active: Boolean(data.is_active),
+      });
       if (nextStatus === 'waiting_qr') {
         setShowBrowserView(true);
       } else if (nextStatus === 'connected' && connectionStartedRef.current) {
@@ -111,6 +125,8 @@ export default function WhatsAppConnectPage() {
     }
   };
 
+  const connected = status === 'connected';
+
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
@@ -128,14 +144,65 @@ export default function WhatsAppConnectPage() {
         </p>
       </div>
 
-      {/* ── Status card ─────────────────────────────────────────── */}
-      <div className="rounded-xl border border-surface-700 bg-surface-800 p-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <h2 className="text-lg font-semibold text-zinc-100">Connection status</h2>
-            {loading ? <Spinner /> : <WhatsAppStatusBadge status={status} />}
+      {connected ? (
+        /* ── Account card (mirrors the LinkedIn manage card) ────── */
+        <div className="card mt-6 p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-green-500/10 text-2xl font-bold text-green-300">
+                <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 9.75a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375m-13.5 3.01c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.184-4.183a1.14 1.14 0 0 1 .778-.332 48.294 48.294 0 0 0 5.83-.498c1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
+                </svg>
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h2 className="text-lg font-semibold text-zinc-100">WhatsApp</h2>
+                  <WhatsAppStatusBadge status={status} />
+                </div>
+                <p className="mt-0.5 text-sm text-zinc-400">Linked via WhatsApp Web</p>
+              </div>
+            </div>
+            <button onClick={loadStatus} className="btn-secondary text-xs">
+              ↻ Refresh
+            </button>
           </div>
-          {status === 'connected' ? (
+
+          <dl className="mt-5 grid grid-cols-1 gap-4 border-t border-surface-700 pt-5 text-sm sm:grid-cols-2">
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Added</dt>
+              <dd className="mt-0.5 text-zinc-300">{formatDate(sessionMeta.created_at)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Last updated</dt>
+              <dd className="mt-0.5 text-zinc-300">{formatDate(sessionMeta.updated_at)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Status details</dt>
+              <dd className="mt-0.5 text-zinc-300 capitalize">{status.replace('_', ' ')}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Session active</dt>
+              <dd className="mt-0.5 text-zinc-300">{sessionMeta.is_active ? 'Yes' : 'No'}</dd>
+            </div>
+          </dl>
+
+          {/* Early-version note: live chat requires jobs to be stopped. */}
+          <div className="mt-5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            <p className="font-medium">⚠️ In early versions, running jobs need to be stopped before using Live Chat</p>
+            <p className="mt-1 text-amber-200/80">
+              The scanner and live chat share the same WhatsApp session. Pause or stop your
+              filter jobs (or wait for them to finish) before opening Live Chat, otherwise
+              the scan will pause automatically while chat is open.
+            </p>
+          </div>
+
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Link to="/app/whatsapp-scanner" className="btn-primary">
+              WhatsApp Scan
+            </Link>
+            <Link to="/app/whatsapp-live" className="btn-primary">
+              Live Chat
+            </Link>
             <button
               type="button"
               onClick={handleDisconnect}
@@ -146,52 +213,64 @@ export default function WhatsAppConnectPage() {
               {disconnecting ? <Spinner /> : null}
               {disconnecting ? 'Disconnecting…' : 'Disconnect WhatsApp'}
             </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleConnect}
-              disabled={connecting}
-              title={
-                status === 'waiting_qr'
-                  ? 'Already scanned but nothing happened? Restart to get a fresh QR code and a fresh watcher.'
-                  : undefined
-              }
-              className="inline-flex items-center gap-2 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
-            >
-              {connecting ? <Spinner /> : null}
-              {status === 'waiting_qr' ? 'Restart connection' : 'Connect WhatsApp'}
-            </button>
-          )}
-        </div>
-
-        {status === 'waiting_qr' && (
-          <p className="mt-3 text-sm text-yellow-400">
-            The browser is open below — scan the WhatsApp Web QR code with your phone
-            to connect. (It streams live from the server; if it isn't showing yet,
-            wait a moment or press Start in the Live Browser View.) If you already
-            scanned and the status didn't change, press "Restart connection" to get a
-            fresh QR code.
-          </p>
-        )}
-
-        {status === 'connected' && (
-          <div className="mt-4 rounded-lg border border-green-500/30 bg-green-500/10 px-4 py-3 text-sm text-green-200">
-            WhatsApp is connected. You can now pick the groups to monitor in the
-            scanner.
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Link to="/app/whatsapp-scanner" className="btn-primary text-xs">
-                Open WhatsApp filters →
-              </Link>
-              <Link to="/app/account" className="btn-secondary text-xs">
-                Back to Accounts
-              </Link>
-            </div>
+            <Link to="/app/account" className="btn-secondary">
+              ← Back to Accounts
+            </Link>
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <>
+          {/* ── Status card (connect flow) ───────────────────────── */}
+          <div className="rounded-xl border border-surface-700 bg-surface-800 p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <h2 className="text-lg font-semibold text-zinc-100">Connection status</h2>
+                {loading ? <Spinner /> : <WhatsAppStatusBadge status={status} />}
+              </div>
+              {status === 'connected' ? (
+                <button
+                  type="button"
+                  onClick={handleDisconnect}
+                  disabled={disconnecting}
+                  className="inline-flex items-center gap-2 rounded-lg border border-red-700/50 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  data-testid="whatsapp-disconnect"
+                >
+                  {disconnecting ? <Spinner /> : null}
+                  {disconnecting ? 'Disconnecting…' : 'Disconnect WhatsApp'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleConnect}
+                  disabled={connecting}
+                  title={
+                    status === 'waiting_qr'
+                      ? 'Already scanned but nothing happened? Restart to get a fresh QR code and a fresh watcher.'
+                      : undefined
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
+                >
+                  {connecting ? <Spinner /> : null}
+                  {status === 'waiting_qr' ? 'Restart connection' : 'Connect WhatsApp'}
+                </button>
+              )}
+            </div>
 
-      {/* ── Live browser view (QR scan / full WhatsApp render) ───── */}
-      {!loading && (status !== 'connected' || showBrowserView) && <BrowserViewPanel controls={false} />}
+            {status === 'waiting_qr' && (
+              <p className="mt-3 text-sm text-yellow-400">
+                The browser is open below — scan the WhatsApp Web QR code with your phone
+                to connect. (It streams live from the server; if it isn't showing yet,
+                wait a moment or press Start in the Live Browser View.) If you already
+                scanned and the status didn't change, press "Restart connection" to get a
+                fresh QR code.
+              </p>
+            )}
+          </div>
+
+          {/* ── Live browser view (QR scan) ──────────────────────── */}
+          {!loading && status !== 'connected' && <BrowserViewPanel controls={false} />}
+        </>
+      )}
     </div>
   );
 }

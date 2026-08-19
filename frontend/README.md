@@ -39,10 +39,18 @@ For production, serve `dist/` behind a reverse proxy that also forwards
 | Route | What it does |
 | --- | --- |
 | `/` | Multi-channel landing page with separate **App** and **Dashboard** entry buttons |
-| `/dashboard` | Operations dashboard with automation health and service status |
+| `/dashboard` | Operations dashboard with automation health and service status (separate module + sidebar) |
 | `/dashboard/redis-queues` | Redis, Celery queues, locks, and database job management |
 | `/login` `/signup` `/verify-email` `/forgot-password` `/reset-password` | Full JWT auth lifecycle; live password-rule checklist mirrors the backend |
-| `/app/account` | Connect LinkedIn (Playwright login), 2FA code modal, session refresh, edit, disconnect |
+| `/app/*` | **App module** — sidebar contains only Account → LinkedIn → WhatsApp. Landing: `/app/account` |
+| `/app/account` | Accounts hub — one card per connection (LinkedIn + WhatsApp) showing only the account and its status |
+| `/app/account/linkedin` | Manage LinkedIn (Playwright login), 2FA code modal, session refresh, edit, disconnect + Scan / Live Chat shortcuts |
+| `/app/account/whatsapp` | Manage WhatsApp — QR connect flow; connected card shows Added / Last updated + WhatsApp Scan / Live Chat shortcuts |
+| `/admin/*` | **Admin module** — own sidebar: Accounts → Users → LinkedIn (jobs & campaign parameters) → WhatsApp (jobs & parameters) |
+| `/admin/accounts` | Every LinkedIn account and WhatsApp session, with status tables |
+| `/admin/users` | Users and roles |
+| `/admin/linkedin` | LinkedIn campaign job audit log + campaign/job parameters |
+| `/admin/whatsapp` | WhatsApp filter jobs + WhatsApp/job parameters |
 | `/app/campaigns` | Two-panel campaign + leads workspace: campaign form collapses to a summary card; lead tabs (manual / CSV with Papaparse preview + per-row error list); leads table; start campaign |
 
 ## Notes on backend quirks this UI handles

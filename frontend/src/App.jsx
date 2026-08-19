@@ -4,6 +4,8 @@ import { AuthProvider } from './context/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
 import DashboardLayout from './components/DashboardLayout';
+import AppLayout from './components/AppLayout';
+import AdminLayout from './components/AdminLayout';
 import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
@@ -29,7 +31,10 @@ import LinkedInLiveChatPage from './pages/LinkedInLiveChatPage';
 import LinkedInProfileScanPage from './pages/LinkedInProfileScanPage';
 import SystemQueuesPage from './pages/SystemQueuesPage';
 import DashboardPage from './pages/DashboardPage';
-import AdminDashboardPage from './pages/admin/AdminDashboardPage';
+import AdminAccountsPage from './pages/admin/AdminAccountsPage';
+import AdminUsersPage from './pages/admin/AdminUsersPage';
+import AdminLinkedInPage from './pages/admin/AdminLinkedInPage';
+import AdminWhatsAppPage from './pages/admin/AdminWhatsAppPage';
 
 export default function App() {
   return (
@@ -58,7 +63,7 @@ export default function App() {
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
 
-          {/* operations dashboard */}
+          {/* operations dashboard — separate module with its own sidebar */}
           <Route
             path="/dashboard"
             element={
@@ -71,24 +76,28 @@ export default function App() {
             <Route path="redis-queues" element={<SystemQueuesPage />} />
           </Route>
 
-          {/* admin area — admins only (see AdminRoute) */}
+          {/* admin area — separate module with its own sidebar (admins only) */}
           <Route
             path="/admin"
             element={
               <AdminRoute>
-                <DashboardLayout />
+                <AdminLayout />
               </AdminRoute>
             }
           >
-            <Route index element={<AdminDashboardPage />} />
+            <Route index element={<Navigate to="/admin/accounts" replace />} />
+            <Route path="accounts" element={<AdminAccountsPage />} />
+            <Route path="users" element={<AdminUsersPage />} />
+            <Route path="linkedin" element={<AdminLinkedInPage />} />
+            <Route path="whatsapp" element={<AdminWhatsAppPage />} />
           </Route>
 
-          {/* app shell */}
+          {/* app shell — app module: Account, LinkedIn, WhatsApp only */}
           <Route
             path="/app"
             element={
               <ProtectedRoute>
-                <DashboardLayout />
+                <AppLayout />
               </ProtectedRoute>
             }
           >

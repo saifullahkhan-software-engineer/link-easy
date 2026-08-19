@@ -70,6 +70,8 @@ const ADMIN_SETTINGS = {
   settings: [
     { key: 'campaign.daily_connection_limit', value: 15, default: 15, value_type: 'int', category: 'campaign', description: 'Connection requests per account per day', minimum: 0, maximum: 15 },
     { key: 'jobs.max_concurrent_browsers', value: 2, default: 2, value_type: 'int', category: 'jobs', description: 'Concurrent browser sessions', minimum: 1, maximum: 10 },
+    { key: 'whatsapp.max_monitored_groups', value: 3, default: 3, value_type: 'int', category: 'whatsapp', description: 'Groups monitored per WhatsApp filter job', minimum: 1, maximum: 3 },
+    { key: 'whatsapp.forward_delay_seconds', value: 10, default: 10, value_type: 'float', category: 'whatsapp', description: 'Pause between WhatsApp forwards (anti-block)', minimum: 1, maximum: 300 },
   ],
 };
 
@@ -87,6 +89,32 @@ const ADMIN_API_STUBS = {
   'GET /api/v1/admin/users': (res) => json(res, 200, ADMIN_USERS),
   'GET /api/v1/admin/settings': (res) => json(res, 200, ADMIN_SETTINGS),
   'GET /api/v1/admin/rate-limits': (res) => json(res, 200, ADMIN_RATE_LIMITS),
+  'GET /api/v1/admin/accounts': (res) =>
+    json(res, 200, {
+      counts: { linkedin_total: 2, linkedin_active: 1, whatsapp_total: 1, whatsapp_connected: 1 },
+      linkedin: [
+        { id: 'li-1', owner_email: 'dev@example.com', linkedin_email: 'li@test.dev', label: 'Work account', status: 'active', created_at: '2026-07-01T10:00:00Z', updated_at: '2026-07-20T10:00:00Z' },
+        { id: 'li-2', owner_email: 'sara@example.com', linkedin_email: 'sara@linkedin.dev', label: null, status: 'pending_verification', created_at: '2026-08-01T10:00:00Z', updated_at: '2026-08-01T10:00:00Z' },
+      ],
+      whatsapp: [
+        { id: 3, status: 'connected', is_active: true, created_at: '2026-07-15T09:00:00Z', updated_at: '2026-08-10T09:00:00Z' },
+      ],
+    }),
+  'GET /api/v1/admin/jobs/linkedin': (res) =>
+    json(res, 200, {
+      count: 2,
+      jobs: [
+        { id: 'job-aaa111', campaign_id: 'camp-1', campaign_name: 'Q3 Founders', step_type: 'send_connection', status: 'done', action_message: 'Connection sent', error_message: null, scheduled_at: '2026-08-10T08:00:00Z', started_at: '2026-08-10T08:01:00Z', completed_at: '2026-08-10T08:02:00Z', created_at: '2026-08-10T08:00:00Z' },
+        { id: 'job-bbb222', campaign_id: 'camp-2', campaign_name: null, step_type: 'visit_profile', status: 'queued', action_message: null, error_message: null, scheduled_at: '2026-08-11T08:00:00Z', started_at: null, completed_at: null, created_at: '2026-08-11T08:00:00Z' },
+      ],
+    }),
+  'GET /api/v1/admin/jobs/whatsapp': (res) =>
+    json(res, 200, {
+      count: 1,
+      jobs: [
+        { id: 1, name: 'Dubai Engineering Jobs', status: 'active', role: 'Engineer', job_title: 'Backend Developer', keywords: ['python'], interval_hours: 1, next_scan_at: '2026-08-20T10:00:00Z', last_scan_at: '2026-08-20T09:00:00Z', created_at: '2026-08-01T10:00:00Z', updated_at: '2026-08-05T08:00:00Z', total_count: 9, matched_count: 2, rejected_count: 3, forwarded_count: 1 },
+      ],
+    }),
 };
 
 const ACTIVE_ACCOUNT = {
@@ -184,19 +212,53 @@ const CASES = [
     mustNotContain: ['Admin Dashboard'],
   },
   {
-    name: 'admin dashboard — users, jobs, accounts, settings and rate limits render',
+    name: 'admin accounts — every LinkedIn account and WhatsApp session renders',
     path: '/admin',
     storage: ADMIN_TOKENS,
     api: ADMIN_API_STUBS,
     mustContain: [
-      'Admin Dashboard',
-      'Users and roles',
-      'sara@example.com',
-      'Campaign parameters, jobs and limits',
-      'campaign.daily_connection_limit'.split('.').slice(1).join('.'),
-      'Rate limits (database-backed)',
-      'ip:203.0.113.9',
-      'auth:login',
+      'Accounts',
+      'LinkedIn accounts',
+      'WhatsApp sessions',
+      'li@test.dev',
+      'sara@linkedin.dev',
+      'LinkedIn accounts by status',
+    ],
+  },
+  {
+    name: 'admin users — users and roles table renders',
+    path: '/admin/users',
+    storage: ADMIN_TOKENS,
+    api: ADMIN_API_STUBS,
+    mustContain: ['Users', 'Users and roles', 'sara@example.com', 'role-toggle'],
+  },
+  {
+    name: 'admin linkedin — jobs audit log and campaign parameters render',
+    path: '/admin/linkedin',
+    storage: ADMIN_TOKENS,
+    api: ADMIN_API_STUBS,
+    mustContain: [
+      'LinkedIn — Jobs',
+      'LinkedIn jobs (campaign audit log)',
+      'Q3 Founders',
+      'send_connection',
+      'Campaign parameters and job limits',
+      'daily_connection_limit',
+      'max_concurrent_browsers',
+    ],
+  },
+  {
+    name: 'admin whatsapp — filter jobs and whatsapp parameters render',
+    path: '/admin/whatsapp',
+    storage: ADMIN_TOKENS,
+    api: ADMIN_API_STUBS,
+    mustContain: [
+      'WhatsApp — Jobs',
+      'WhatsApp jobs (filter jobs)',
+      'Dubai Engineering Jobs',
+      'WhatsApp parameters and job limits',
+      'max_monitored_groups',
+      'forward_delay_seconds',
     ],
   },
   {
@@ -233,9 +295,12 @@ const CASES = [
     storage: AUTH_TOKENS,
     api: {
       'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT),
-      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true }),
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true, created_at: '2026-07-15T09:00:00Z', updated_at: '2026-08-10T09:00:00Z' }),
     },
-    mustContain: ['li@test.dev', 'Manage LinkedIn account', 'Manage WhatsApp connection', 'Open scanner', 'Disconnect WhatsApp'],
+    // The hub only shows the account + its status; details live on the
+    // manage pages.
+    mustContain: ['li@test.dev', 'Manage LinkedIn account', 'Manage WhatsApp connection', 'Connected'],
+    mustNotContain: ['Open scanner', 'Disconnect WhatsApp'],
   },
   {
     name: 'whatsapp connect page — disconnected shows connect flow + browser view',
@@ -245,11 +310,29 @@ const CASES = [
     mustContain: ['WhatsApp Connection', 'Connection status', 'Connect WhatsApp', 'Live Browser View'],
   },
   {
-    name: 'whatsapp connect page — connected account exposes disconnect',
+    name: 'whatsapp connect page — connected account shows manage card with dates, scan and live chat',
     path: '/app/account/whatsapp',
     storage: AUTH_TOKENS,
-    api: { 'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true }) },
-    mustContain: ['WhatsApp Connection', 'WhatsApp is connected', 'Disconnect WhatsApp', 'Open WhatsApp filters'],
+    api: {
+      'GET /api/v1/whatsapp/status': (res) =>
+        json(res, 200, {
+          status: 'connected',
+          is_active: true,
+          created_at: '2026-07-15T09:00:00Z',
+          updated_at: '2026-08-10T09:00:00Z',
+        }),
+    },
+    mustContain: [
+      'WhatsApp Connection',
+      'Added',
+      'Jul 15, 2026',
+      'Status details',
+      'connected',
+      'WhatsApp Scan',
+      'Live Chat',
+      'jobs need to be stopped before using Live Chat',
+      'Disconnect WhatsApp',
+    ],
   },
   {
     name: 'whatsapp filters — list page replaces the scanner landing page',
