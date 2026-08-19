@@ -125,8 +125,18 @@ export default function WhatsAppLiveChatPage() {
       // The backend returns `{ chats, count, query }` — see schema.
       setChats(data.chats || []);
     } catch (err) {
-      // 409 = "live not running" (transitioning to idle mid-pol) — ignore.
-      toast.dismiss('whatsapp-live-chats');
+      // 409 = "live not running" (transitioning to idle mid-poll) — benign,
+      // and background polls must never spam toasts. Anything else on a
+      // user-initiated load is a real failure: surfacing it beats rendering an
+      // empty sidebar that looks like "WhatsApp has no chats".
+      const status = err?.response?.status;
+      if (!silent && status !== 409) {
+        toast.error(getErrorMessage(err, 'Could not load your chats.'), {
+          id: 'whatsapp-live-chats',
+        });
+      } else {
+        toast.dismiss('whatsapp-live-chats');
+      }
     } finally {
       if (!silent) setListLoading(false);
     }

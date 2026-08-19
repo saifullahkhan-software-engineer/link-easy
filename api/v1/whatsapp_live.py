@@ -101,8 +101,16 @@ async def start_live_chat(
     result = await live_browser.start()
     resp = LiveStartResponse(**result)
     if resp.status == "error":
-        # Surface a 503 for a clean client-side error message.
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=resp)
+        # Surface a 503 with a *string* detail. Passing the Pydantic model
+        # itself made Starlette's JSONResponse raise "Object of type
+        # LiveStartResponse is not JSON serializable", so every failed start
+        # turned into an opaque 500 "Internal Server Error" and the real
+        # reason (not connected / profile busy / session expired) never
+        # reached the user. getErrorMessage() renders this string directly.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=resp.message or resp.error or "Failed to start live chat.",
+        )
     return resp
 
 

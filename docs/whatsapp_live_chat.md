@@ -85,6 +85,21 @@ resource as soon as it is acquired, so a failed Chromium launch, navigation,
 or login check cleans up immediately instead of blocking retries until the
 lock TTL expires.
 
+## Error reporting
+
+`POST /live/start` returns **503 with a plain-string `detail`** when the
+browser cannot come up (not connected, profile busy, saved session expired).
+The detail previously carried the `LiveStartResponse` model itself, which
+Starlette could not JSON-encode — FastAPI then raised
+`TypeError: Object of type LiveStartResponse is not JSON serializable` and the
+client only ever saw a generic **500 Internal Server Error**. Keep this detail
+a string so `getErrorMessage()` can render the real reason.
+
+The profile lock is acquired with `asyncio.to_thread(...)`. `acquire_profile_lock`
+is a *synchronous* Redis call that blocks for up to its `blocking_timeout`
+(30s here); calling it inline stalled the whole API event loop, so status and
+chat polls could not be served and the UI looked frozen while starting.
+
 ## Limitations
 
 * **One live session at a time** — the profile lock is global to the
