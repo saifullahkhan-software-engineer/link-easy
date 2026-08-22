@@ -45,13 +45,24 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Patchright (stealth Playwright fork) Chromium browser + system deps.
 # `playwright` was replaced by `patchright` in requirements.txt, so the
 # matching CLI is `patchright`, not `playwright`.
+#
+# Browsers are installed into a FIXED shared path (PLAYWRIGHT_BROWSERS_PATH),
+# NOT the root user's ~/.cache/ms-playwright: the app runs as the non-root
+# `appuser` at runtime, and without this it cannot see the root-owned
+# browsers and fails on the first browser launch (WhatsApp connect /
+# LinkedIn session) with:
+#   Executable doesn't exist at /home/appuser/.cache/ms-playwright/...
+# `patchright install chromium` installs BOTH the full Chromium build and
+# the chromium-headless-shell (the one used for headless launches), so one
+# command is enough.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN patchright install chromium --with-deps
 
 # Copy application code
 COPY . .
 
 # Create a non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /ms-playwright
 USER appuser
 
 # Expose port

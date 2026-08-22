@@ -26,7 +26,7 @@ async def send_verification_email(email: str, code: str) -> None:
         response = await resend.Emails.send_async({
             "from": f"LinkeFlow <{settings.FROM_EMAIL}>",
             "to": [email],
-            "subject": "Verify your Linkeflow account",
+            "subject": "Verify your Link Easy account",
             "html": f"""
                 <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto;">
                     <h2>Welcome to Linkeflow!</h2>
@@ -56,7 +56,7 @@ async def send_password_reset_email(email: str, reset_link: str) -> None:
         response = await resend.Emails.send_async({
             "from": f"LinkeFlow <{settings.FROM_EMAIL}>",
             "to": [email],
-            "subject": "Reset your Linkeflow password",
+            "subject": "Reset your Link Easy password",
             "html": f"""
                 <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto;">
                     <h2>Password Reset Request</h2>
