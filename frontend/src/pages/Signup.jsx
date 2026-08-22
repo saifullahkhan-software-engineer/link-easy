@@ -35,7 +35,10 @@ export default function Signup() {
       const { data } = await authApi.register(payload);
       completeSignup(payload.email, `${payload.first_name} ${payload.last_name}`.trim());
       toast.success(data?.message || 'Account created — check your email for a verification code.');
-      navigate('/verify-email', { state: { email: payload.email } });
+      // Register returns 200 "User already exists" for existing accounts —
+      // no code is sent in that case, so don't claim one is on its way.
+      const codeSent = data?.message !== 'User already exists';
+      navigate('/verify-email', { state: { email: payload.email, codeSent } });
     } catch (err) {
       setError(getErrorMessage(err, 'Registration failed.'));
     } finally {

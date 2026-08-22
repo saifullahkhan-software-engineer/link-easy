@@ -102,6 +102,17 @@ export function clearSession() {
 }
 
 /**
+ * Strip trailing slashes from a configured base URL so an env var like
+ * ``https://api.example.com/api/v1/`` can never produce the double-slash
+ * path ``/api/v1//auth/refresh`` (which 404s on FastAPI).
+ */
+export function normalizeBaseUrl(value) {
+  return typeof value === 'string' ? value.replace(/\/+$/, '') : value;
+}
+
+export const API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL || '/api/v1');
+
+/**
  * Axios instance pointed at the FastAPI backend (`/api/v1`).
  * - Attaches `Authorization: Bearer <access_token>` to every request.
  * - On 401, performs a single-flight token refresh (POST /auth/refresh)
@@ -109,7 +120,7 @@ export function clearSession() {
  *   session is cleared and the user is bounced to /login.
  */
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
+  baseURL: API_BASE_URL,
   timeout: 30_000,
 });
 
@@ -160,6 +171,15 @@ api.interceptors.response.use(
         return api(original);
       } catch (refreshError) {
         refreshPromise = null;
+        // Log the exact URL + status so a deploy/env misconfiguration is
+        // obvious: e.g. a 404 from Vercel/Railway's edge (backend not
+        // deployed) or a 401 (JWT_SECRET changed since tokens were issued).
+        const status = refreshError?.response?.status;
+        const url = refreshError?.config?.url;
+        console.error(
+          `[auth] token refresh failed${status ? ` (HTTP ${status})` : ''} — ` +
+            `${url || 'unknown URL'}. Session cleared; redirected to /login.`
+        );
         clearSession();
         window.location.assign('/login');
         return Promise.reject(refreshError);
