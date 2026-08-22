@@ -37,13 +37,12 @@ None of the old encrypted sessions carry over to persistent profiles.
    assignment lives outside this repo; whatever tooling writes those columns
    must assign exactly one proxy per account for the account's lifetime.
 
-### Container follow-up (out of scope for this pass)
+### Container follow-up (now fixed)
 
-The Dockerfile still runs `playwright install chromium` /
+The Dockerfile previously ran `playwright install chromium` /
 `playwright install-deps chromium`. Since `playwright` was replaced by
-`patchright` in `requirements.txt`, these two lines must become
-`patchright install chromium` / `patchright install-deps chromium` when the
-container config is next touched.
+`patchright` in `requirements.txt`, the Dockerfile now runs
+`patchright install chromium --with-deps` instead.
 
 ## Operational notes
 
