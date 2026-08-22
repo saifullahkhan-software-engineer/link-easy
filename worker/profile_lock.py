@@ -109,5 +109,10 @@ def release_profile_lock(lock) -> None:
         # Already released / not owned by this token — benign (e.g. released
         # elsewhere after expiry). Never propagate.
         logger.debug("Profile lock was already released before release()")
+    except AttributeError:
+        # Lock object's internal state is corrupted (e.g. missing token).
+        # This can happen when the lock wasn't properly acquired or was
+        # partially initialized. Treat as already released.
+        logger.warning("⚠️ Profile lock object state corrupted, treating as released")
     except Exception:
         logger.warning("⚠️ Failed to release profile lock", exc_info=True)
