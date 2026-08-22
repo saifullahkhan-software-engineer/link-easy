@@ -31,7 +31,9 @@ export function SlowOperationNotice({ title, hint, elapsedSeconds }) {
         {typeof elapsedSeconds === 'number' && (
           <p className="mt-1 text-xs tabular-nums text-zinc-500">
             {elapsedSeconds}s elapsed
-            {elapsedSeconds > 25 ? ' — still working, LinkedIn can be slow' : ''}
+            {elapsedSeconds > 45
+              ? ' — still working, LinkedIn can be slow on the free beta'
+              : ' — normal, connections usually take 30–40s'}
           </p>
         )}
       </div>

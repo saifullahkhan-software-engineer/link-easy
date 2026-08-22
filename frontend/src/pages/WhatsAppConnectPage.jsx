@@ -157,7 +157,9 @@ export default function WhatsAppConnectPage() {
           <p className="mt-1 text-sm text-zinc-400">
             Link WhatsApp Web by scanning the QR code with your phone. The session is
             kept in a dedicated browser profile on our side, so it stays connected
-            across restarts and scanner operations.
+            across restarts and scanner operations. Starting that browser may take
+            30–40 seconds (longer on a free-beta cold start), so the QR code can take a
+            moment to appear.
           </p>
         </div>
         <Link to="/app/account" className="btn-secondary text-xs">
@@ -276,6 +278,21 @@ export default function WhatsAppConnectPage() {
                 </button>
               )}
             </div>
+
+            {connecting && (
+              <div className="mt-3 flex items-start gap-3 rounded-lg border border-accent-500/30 bg-accent-500/5 px-4 py-3">
+                <Spinner className="mt-0.5 h-5 w-5 text-accent-400" />
+                <div>
+                  <p className="text-sm font-medium text-accent-200">
+                    Starting a secure browser… this may take 30–40 seconds.
+                  </p>
+                  <p className="mt-0.5 text-xs text-zinc-400">
+                    The QR code will stream into the Live Browser View below once the browser
+                    is ready — please don't close the page.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {status === 'error' && (
               <p className="mt-3 text-sm text-red-300">

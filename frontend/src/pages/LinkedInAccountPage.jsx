@@ -300,7 +300,7 @@ export default function LinkedInAccountPage() {
           <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
           <p className="mt-1 text-sm text-zinc-400">
             Connect the LinkedIn profile your campaigns will run from. Login happens in a real browser
-            on our side, so it can take a moment.
+            on our side, so it may take 30–40 seconds to connect.
           </p>
         </div>
         <Link to="/app/account" className="btn-secondary text-xs">
@@ -401,8 +401,8 @@ export default function LinkedInAccountPage() {
 
             {connecting && (
               <SlowOperationNotice
-                title="Connecting to LinkedIn… this usually takes 10–20 seconds."
-                hint="We're logging in through a real browser session. If LinkedIn asks for a verification code, a code entry box will appear here."
+                title="Connecting to LinkedIn… this may take 30–40 seconds."
+                hint="We're logging in through a real browser session — on the free beta this can be slower than usual, so please don't close the page. If LinkedIn asks for a verification code, a code entry box will appear here."
                 elapsedSeconds={elapsed}
               />
             )}
@@ -419,7 +419,7 @@ export default function LinkedInAccountPage() {
                 {connecting && <Spinner />}
                 {connecting ? 'Connecting…' : 'Connect LinkedIn account'}
               </button>
-              <span className="text-xs text-zinc-500">Takes ~10-20s • Secure & encrypted</span>
+              <span className="text-xs text-zinc-500">Takes ~30–40s • Secure & encrypted</span>
             </div>
 
             <div className="rounded-lg bg-surface-800/60 p-3 text-xs leading-relaxed text-zinc-400">
@@ -502,7 +502,7 @@ export default function LinkedInAccountPage() {
             <div className="mt-5">
               <SlowOperationNotice
                 title="Checking LinkedIn session…"
-                hint="Validating saved cookies and re-logging in if they expired — this usually takes 10–20 seconds."
+                hint="Validating saved cookies and re-logging in if they expired — this may take 30–40 seconds."
                 elapsedSeconds={refreshElapsed}
               />
             </div>
