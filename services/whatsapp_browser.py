@@ -76,6 +76,69 @@ def whatsapp_profile_dir() -> str:
     return os.path.join(settings.PROFILE_STORAGE_DIR, WHATSAPP_PROFILE_SUBDIR)
 
 
+_CHROMIUM_SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+
+def clear_stale_chromium_singleton(profile_dir: str | None = None) -> bool:
+    """Remove Chromium Singleton* files when the locking process is dead.
+
+    A crashed Playwright process leaves ``SingletonLock`` behind. The next
+    ``launch_persistent_context`` then fails even though no WhatsApp session
+    is actually open. If the lock file points at a still-running PID we
+    leave it alone.
+    """
+    path = profile_dir or whatsapp_profile_dir()
+    lock_path = os.path.join(path, "SingletonLock")
+    if not os.path.lexists(lock_path):
+        return False
+
+    pid = None
+    if os.path.islink(lock_path):
+        try:
+            target = os.readlink(lock_path)
+        except OSError:
+            target = ""
+        if "-" in target:
+            try:
+                pid = int(target.rsplit("-", 1)[-1])
+            except ValueError:
+                pid = None
+    if pid is not None:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            # Process exists (possibly another user) — do not steal.
+            logger.info("Chromium SingletonLock pid %s is still alive — leaving it", pid)
+            return False
+        except OSError:
+            # Conservative: unknown error, do not delete a maybe-live lock.
+            return False
+        else:
+            logger.info("Chromium SingletonLock pid %s is still alive — leaving it", pid)
+            return False
+
+    removed = False
+    for name in _CHROMIUM_SINGLETON_FILES:
+        candidate = os.path.join(path, name)
+        try:
+            if os.path.isdir(candidate) and not os.path.islink(candidate):
+                import shutil
+
+                shutil.rmtree(candidate)
+            else:
+                os.unlink(candidate)
+            removed = True
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning("Could not remove stale Chromium %s: %s", name, exc)
+    if removed:
+        logger.warning("🧹 Cleared stale Chromium singleton files in %s", path)
+    return removed
+
+
 def ensure_whatsapp_profile_dir() -> str:
     """Create the WhatsApp profile dir with restrictive 0o700 permissions.
 

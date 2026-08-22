@@ -277,6 +277,14 @@ export default function WhatsAppConnectPage() {
               )}
             </div>
 
+            {status === 'error' && (
+              <p className="mt-3 text-sm text-red-300">
+                The last connection attempt failed. Press Connect WhatsApp to try
+                again — leftover browser locks from a previous session are cleared
+                automatically, even when no account is connected.
+              </p>
+            )}
+
             {status === 'waiting_qr' && (
               <>
                 <p className="mt-3 text-sm text-yellow-400">

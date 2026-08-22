@@ -62,6 +62,49 @@ def _lock_key(account_id: str) -> str:
     return f"profile_lock:{account_id}"
 
 
+def profile_in_use_message(account_id: str) -> str:
+    """Human-readable lock conflict. WhatsApp shares this helper too."""
+    if str(account_id) == "whatsapp":
+        return (
+            "WhatsApp is currently in use by another session "
+            "(its browser profile is locked). Please try again in a few minutes."
+        )
+    return (
+        f"LinkedIn account {account_id} is currently in use by another "
+        f"session (its browser profile is locked). Please try again in a "
+        f"few minutes."
+    )
+
+
+def is_profile_lock_held(account_id: str) -> bool:
+    """True when the Redis lock key exists (held or not-yet-expired crash leftover)."""
+    try:
+        return bool(_redis.exists(_lock_key(account_id)))
+    except Exception:
+        logger.warning("⚠️ Could not inspect profile lock for %s", account_id, exc_info=True)
+        return False
+
+
+def force_release_profile_lock(account_id: str) -> bool:
+    """Delete the Redis lock key without owning the token.
+
+    Use only when no living process holds the Chromium profile — a crashed
+    API worker or Celery task otherwise leaves ``profile_lock:{id}`` for the
+    full 30-minute TTL and every Connect/Start looks broken even though the
+    UI shows no active account.
+    """
+    try:
+        deleted = bool(_redis.delete(_lock_key(account_id)))
+    except Exception:
+        logger.warning(
+            "⚠️ Could not force-release profile lock for %s", account_id, exc_info=True
+        )
+        return False
+    if deleted:
+        logger.warning("🔓 Force-released stale profile lock for %s", account_id)
+    return deleted
+
+
 def acquire_profile_lock(account_id: str, blocking_timeout: int | float = PROFILE_LOCK_BLOCKING_TIMEOUT):
     """
     Acquire the per-account profile lock.
@@ -83,11 +126,7 @@ def acquire_profile_lock(account_id: str, blocking_timeout: int | float = PROFIL
 
     acquired = lock.acquire(blocking=bool(blocking_timeout))
     if not acquired:
-        raise ProfileInUseError(
-            f"LinkedIn account {account_id} is currently in use by another "
-            f"session (its browser profile is locked). Please try again in a "
-            f"few minutes."
-        )
+        raise ProfileInUseError(profile_in_use_message(account_id))
     logger.debug("🔒 Acquired profile lock for account %s", account_id)
     return lock
 

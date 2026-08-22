@@ -202,14 +202,13 @@ export default function BrowserViewPanel({ controls = true }) {
               <>
                 <p className="text-sm font-semibold text-red-300">Browser view failed to start</p>
                 <p className="mt-1 max-w-sm break-words text-xs text-zinc-500">{error || message}</p>
-                {controls && (
-                  <button
-                    onClick={handleStart}
-                    className="mt-4 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400"
-                  >
-                    Retry
-                  </button>
-                )}
+                <button
+                  onClick={handleStart}
+                  disabled={starting}
+                  className="mt-4 inline-flex items-center gap-2 rounded-lg bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:opacity-50"
+                >
+                  {starting ? <Spinner /> : 'Retry'}
+                </button>
               </>
             ) : (
               <>
