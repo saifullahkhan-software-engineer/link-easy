@@ -34,6 +34,8 @@ export default function WhatsAppConnectPage() {
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [showBrowserView, setShowBrowserView] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const [captureFailed, setCaptureFailed] = useState(false);
   const connectionStartedRef = useRef(false);
   const hideBrowserTimerRef = useRef(null);
   const prevStatus = useRef(null);
@@ -92,6 +94,7 @@ export default function WhatsAppConnectPage() {
     try {
       setConnecting(true);
       connectionStartedRef.current = true;
+      setCaptureFailed(false);
       setShowBrowserView(true);
       const { data } = await whatsappApi.connect();
       toast.success(data?.message || 'WhatsApp connection started — scan the QR code');
@@ -105,6 +108,24 @@ export default function WhatsAppConnectPage() {
     }
   };
 
+  const handleCaptureSession = async (force = false) => {
+    try {
+      setCapturing(true);
+      const { data } = await whatsappApi.captureSession(force);
+      connectionStartedRef.current = false;
+      setCaptureFailed(false);
+      setShowBrowserView(false);
+      setStatus(data?.status || 'connected');
+      toast.success(data?.message || 'WhatsApp session captured — you are connected');
+      await loadStatus();
+    } catch (err) {
+      setCaptureFailed(true);
+      toast.error(getErrorMessage(err, 'Could not capture the WhatsApp session'));
+    } finally {
+      setCapturing(false);
+    }
+  };
+
   const handleDisconnect = async () => {
     const confirmed = window.confirm(
       'Disconnect WhatsApp? Active scans and live chat will no longer be able to use this account until you scan a new QR code.',
@@ -115,6 +136,7 @@ export default function WhatsAppConnectPage() {
       setDisconnecting(true);
       const { data } = await whatsappApi.disconnect();
       connectionStartedRef.current = false;
+      setCaptureFailed(false);
       setShowBrowserView(false);
       setStatus('disconnected');
       toast.success(data?.message || 'WhatsApp disconnected successfully');
@@ -256,13 +278,55 @@ export default function WhatsAppConnectPage() {
             </div>
 
             {status === 'waiting_qr' && (
-              <p className="mt-3 text-sm text-yellow-400">
-                The browser is open below — scan the WhatsApp Web QR code with your phone
-                to connect. (It streams live from the server; if it isn't showing yet,
-                wait a moment or press Start in the Live Browser View.) If you already
-                scanned and the status didn't change, press "Restart connection" to get a
-                fresh QR code.
-              </p>
+              <>
+                <p className="mt-3 text-sm text-yellow-400">
+                  The browser is open below — scan the WhatsApp Web QR code with your phone
+                  to connect. (It streams live from the server; if it isn't showing yet,
+                  wait a moment or press Start in the Live Browser View.)
+                </p>
+
+                {/* Manual capture: WhatsApp Web keeps changing its DOM, so the
+                    automatic watcher can miss a perfectly good scan. This
+                    button snapshots the live session on demand. */}
+                <div className="mt-4 rounded-lg border border-accent-500/30 bg-accent-500/5 px-4 py-3">
+                  <p className="text-sm font-medium text-zinc-100">
+                    Already scanned and your chats are visible below?
+                  </p>
+                  <p className="mt-1 text-sm text-zinc-400">
+                    If the status is still stuck on “Waiting for QR”, press the button to
+                    capture the scanned session straight from the open browser.
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => handleCaptureSession(false)}
+                      disabled={capturing}
+                      className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      data-testid="whatsapp-capture-session"
+                    >
+                      {capturing ? <Spinner /> : null}
+                      {capturing ? 'Capturing session…' : "✅ I've scanned it — capture session"}
+                    </button>
+                    {captureFailed && (
+                      <button
+                        type="button"
+                        onClick={() => handleCaptureSession(true)}
+                        disabled={capturing}
+                        className="inline-flex items-center gap-2 rounded-lg border border-surface-600 bg-surface-700 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-surface-600 disabled:cursor-not-allowed disabled:opacity-50"
+                        data-testid="whatsapp-capture-session-force"
+                      >
+                        Capture anyway
+                      </button>
+                    )}
+                  </div>
+                  {captureFailed && (
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Still not detected? Use “Capture anyway” if WhatsApp is clearly
+                      logged in below, or press “Restart connection” for a fresh QR code.
+                    </p>
+                  )}
+                </div>
+              </>
             )}
           </div>
 
