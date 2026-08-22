@@ -38,8 +38,8 @@ import AdminWhatsAppPage from './pages/admin/AdminWhatsAppPage';
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
+    <BrowserRouter>
+      <AuthProvider>
         <Toaster
           position="top-right"
           toastOptions={{
@@ -131,7 +131,7 @@ export default function App() {
           {/* catch-all */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-      </BrowserRouter>
-    </AuthProvider>
+      </AuthProvider>
+    </BrowserRouter>
   );
 }

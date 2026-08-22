@@ -47,6 +47,23 @@ const ADMIN_TOKENS = {
   }),
 };
 
+const secondsNow = () => Math.floor(Date.now() / 1000);
+
+// A session whose access token expired an hour ago — what the app finds in
+// localStorage when a page is refreshed a while after logging in.
+const EXPIRED_SESSION = {
+  'le.access_token': makeToken({
+    sub: 'owner@test.dev',
+    role: 'customer',
+    roles: ['customer'],
+    token_type: 'access',
+    exp: secondsNow() - 3600,
+  }),
+  'le.refresh_token': 'stale-refresh-token',
+  'le.user_email': 'owner@test.dev',
+  'le.user_name': 'Test Owner',
+};
+
 const ADMIN_ME = { email: 'owner@test.dev', roles: ['admin', 'customer'], is_admin: true, admin_api_enforced: true };
 const CUSTOMER_ME = { email: 'owner@test.dev', roles: ['customer'], is_admin: false, admin_api_enforced: true };
 
@@ -279,6 +296,50 @@ const CASES = [
   { path: '/signup', mustContain: ['Create your account', 'At least 8 characters'] },
   { path: '/forgot-password', mustContain: ['Reset your password'] },
   { path: '/app', mustContain: ['Log in'] }, // unauthenticated → redirected to /login
+  {
+    name: 'page refresh — expired access token is renewed silently, no errors, page renders',
+    path: '/app/account',
+    storage: EXPIRED_SESSION,
+    api: {
+      'POST /api/v1/auth/refresh': (res) =>
+        json(res, 200, {
+          access_token: makeToken({
+            sub: 'owner@test.dev',
+            role: 'customer',
+            roles: ['customer'],
+            token_type: 'access',
+            exp: secondsNow() + 3600,
+          }),
+          refresh_token: 'fresh-refresh-token',
+          token_type: 'bearer',
+        }),
+      'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }),
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
+    },
+    mustContain: ['Accounts', 'LinkedIn', 'WhatsApp', 'Connect LinkedIn account', 'Not connected'],
+    mustNotContain: ['Session expired', 'Forgot password?'],
+  },
+  {
+    name: 'page refresh — invalid session shows the login popup and lands on /login',
+    path: '/app/account',
+    storage: EXPIRED_SESSION,
+    api: {
+      'POST /api/v1/auth/refresh': (res) => json(res, 401, { detail: 'Invalid refresh token' }),
+    },
+    mustContain: ['Session expired', 'Please log in again', 'Log in', 'Forgot password?'],
+  },
+  {
+    name: 'mid-session unrefreshable 401 — login popup and redirect to /login',
+    path: '/app/account',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/linkedin/account': (res) => json(res, 401, { detail: 'Could not validate credentials' }),
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
+      'POST /api/v1/auth/refresh': (res) => json(res, 401, { detail: 'Invalid refresh token' }),
+    },
+    mustContain: ['Session expired', 'Please log in again', 'Log in', 'Forgot password?'],
+    mustNotContain: ['Connect LinkedIn account'],
+  },
   {
     name: 'accounts hub — two cards (LinkedIn + WhatsApp) with connect actions',
     path: '/app/account',

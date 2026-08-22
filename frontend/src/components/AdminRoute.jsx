@@ -13,9 +13,20 @@ import { Spinner } from './Spinner';
  * screen the user cannot use.
  */
 export default function AdminRoute({ children }) {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isCheckingSession } = useAuth();
   const { canSeeAdmin, loading } = useAdminAccess();
   const location = useLocation();
+
+  // Same boot-time gate as ProtectedRoute: never bounce to /login while the
+  // session is still being validated/renewed after a page refresh.
+  if (isCheckingSession) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-surface-950 text-zinc-400">
+        <Spinner className="h-6 w-6 text-accent-400" />
+        <p className="text-sm">Restoring your session…</p>
+      </div>
+    );
+  }
 
   if (!isAuthenticated) {
     return <Navigate to="/login" state={{ from: location.pathname }} replace />;

@@ -94,6 +94,22 @@ export function getUserRoles() {
   return ['customer'];
 }
 
+/**
+ * Local-only expiry check for the boot-time session validation (page
+ * refresh): decodes the stored access token and compares its ``exp`` claim
+ * against the wall clock, with a leeway for clock skew.
+ *
+ * Returns ``false`` when the token carries no ``exp`` claim — in that case
+ * the app cannot decide locally, so it lets the backend be the authority
+ * (the normal 401 → refresh flow). Never throws.
+ */
+export function isAccessTokenExpired(leewaySeconds = 15) {
+  const payload = decodeToken(getAccessToken());
+  if (!payload || typeof payload.exp !== 'number') return false;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  return payload.exp <= nowSeconds + leewaySeconds;
+}
+
 export function clearSession() {
   try {
     Object.values(TOKEN_KEYS).forEach((k) => localStorage.removeItem(k));
@@ -135,6 +151,13 @@ let refreshPromise = null;
 
 const NO_REFRESH_PATHS = ['/auth/login', '/auth/refresh', '/auth/register'];
 
+/**
+ * Broadcast when the session is definitively dead (unrefreshable 401). The
+ * AuthProvider listens for it, clears its state, shows the login popup and
+ * sends the user to /login — no jarring full-page reload.
+ */
+export const SESSION_EXPIRED_EVENT = 'auth:session-expired';
+
 async function doRefresh() {
   const refreshToken = getRefreshToken();
   if (!refreshToken) throw new Error('No refresh token');
@@ -146,6 +169,33 @@ async function doRefresh() {
   );
   storeSession(data);
   return data.access_token;
+}
+
+/**
+ * Refresh the access token exactly once for all concurrent callers. Shared
+ * by the 401 interceptor and the boot-time session check so a page refresh
+ * never fires two refreshes at once.
+ */
+export function refreshSession() {
+  if (!refreshPromise) {
+    refreshPromise = doRefresh().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
+/**
+ * True only when the failure PROVES the session is dead: the refresh endpoint
+ * rejected the refresh token (401/403) or there is no refresh token at all.
+ * Network failures and 5xx are NOT proof — the session may be perfectly fine
+ * and the backend simply unreachable, so the user must not be logged out.
+ */
+export function isDefinitiveAuthFailure(error) {
+  const status = error?.response?.status;
+  if (status === 401 || status === 403) return true;
+  if (!status && error?.message === 'No refresh token') return true;
+  return false;
 }
 
 api.interceptors.response.use(
@@ -164,24 +214,30 @@ api.interceptors.response.use(
     ) {
       original._retried = true;
       try {
-        refreshPromise = refreshPromise || doRefresh();
-        const newToken = await refreshPromise;
-        refreshPromise = null;
+        const newToken = await refreshSession();
         original.headers.Authorization = `Bearer ${newToken}`;
         return api(original);
       } catch (refreshError) {
-        refreshPromise = null;
-        // Log the exact URL + status so a deploy/env misconfiguration is
-        // obvious: e.g. a 404 from Vercel/Railway's edge (backend not
-        // deployed) or a 401 (JWT_SECRET changed since tokens were issued).
-        const status = refreshError?.response?.status;
-        const url = refreshError?.config?.url;
-        console.error(
-          `[auth] token refresh failed${status ? ` (HTTP ${status})` : ''} — ` +
-            `${url || 'unknown URL'}. Session cleared; redirected to /login.`
-        );
-        clearSession();
-        window.location.assign('/login');
+        if (isDefinitiveAuthFailure(refreshError)) {
+          // Log the exact URL + status so a deploy/env misconfiguration is
+          // obvious: e.g. a 404 from Vercel/Railway's edge (backend not
+          // deployed) or a 401 (JWT_SECRET changed since tokens were issued).
+          const status = refreshError?.response?.status;
+          const url = refreshError?.config?.url;
+          console.warn(
+            `[auth] token refresh failed${status ? ` (HTTP ${status})` : ''} — ` +
+              `${url || 'unknown URL'}. Session cleared; redirecting to /login.`
+          );
+          clearSession();
+          if (typeof window !== 'undefined') {
+            // The AuthProvider shows the login popup and routes to /login.
+            window.dispatchEvent(new window.Event(SESSION_EXPIRED_EVENT));
+          }
+        } else {
+          console.warn(
+            '[auth] token refresh unavailable (network/server issue) — keeping the session intact.'
+          );
+        }
         return Promise.reject(refreshError);
       }
     }
