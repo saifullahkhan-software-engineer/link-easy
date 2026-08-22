@@ -76,7 +76,12 @@ if not _db_url:
     # We don't raise at import time when alembic is just --help, so only warn here.
     # The actual failure will happen in run_migrations_online() where we raise.
 else:
-    config.set_main_option("sqlalchemy.url", _db_url)
+    # Same scheme normalization as core.config: Railway's raw
+    # ${{Postgres.DATABASE_URL}} reference is postgresql://, which the async
+    # engine (async_engine_from_config below) rejects without a driver.
+    from core.config import normalize_database_url
+
+    config.set_main_option("sqlalchemy.url", normalize_database_url(_db_url))
 
 
 

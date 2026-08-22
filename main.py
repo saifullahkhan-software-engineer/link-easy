@@ -73,8 +73,14 @@ async def lifespan(app: FastAPI):
     try:
         await init_db()
         logger.info("Database init (create_all) completed")
-    except Exception:
-        logger.exception("Startup aborted: init_db() failed — check DATABASE_URL and that Postgres is reachable")
+    except Exception as exc:
+        # One concise line instead of logger.exception: init_db() already
+        # raises a short RuntimeError with a human diagnosis, and uvicorn
+        # re-prints every lifespan failure to stderr. Duplicating the raw
+        # ~70-frame asyncpg traceback on both streams every ~2s on a
+        # crash-looping deployment exceeded Railway's 500 logs/sec rate
+        # limit, which silently dropped the log lines that mattered.
+        logger.error("Startup aborted: init_db() failed: %s", exc)
         raise
 
     logger.info("Running database migrations on startup...")

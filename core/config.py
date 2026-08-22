@@ -5,6 +5,23 @@ from pydantic_settings import BaseSettings
 from pydantic import model_validator
 
 
+def normalize_database_url(url: str) -> str:
+    """Ensure Postgres URLs use the asyncpg driver SQLAlchemy's async engine needs.
+
+    Hosted platforms hand out plain ``postgresql://`` (or legacy Heroku-style
+    ``postgres://``) connection strings — e.g. Railway's raw
+    ``${{Postgres.DATABASE_URL}}`` reference.  ``create_async_engine`` refuses
+    those ("The asyncio extension requires an async driver"), so they are
+    rewritten to ``postgresql+asyncpg://``.  URLs that already carry a driver
+    (``postgresql+asyncpg://``) and non-Postgres URLs (``sqlite+aiosqlite://``)
+    pass through untouched.
+    """
+    for plain in ("postgresql://", "postgres://"):
+        if url.startswith(plain):
+            return "postgresql+asyncpg://" + url[len(plain):]
+    return url
+
+
 class Settings(BaseSettings):
     DATABASE_URL: str
     DEBUG: bool = False
@@ -35,6 +52,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _resolve_legacy_aliases(self):
+        # Accept both postgresql:// and postgres+asyncpg:// style URLs so a raw
+        # Railway/Heroku DATABASE_URL reference works without manual editing.
+        self.DATABASE_URL = normalize_database_url(self.DATABASE_URL)
         # JWT_SECRET <- JWT_SECRET_KEY fallback (docker-compose uses JWT_SECRET_KEY)
         if not self.JWT_SECRET and self.JWT_SECRET_KEY:
             self.JWT_SECRET = self.JWT_SECRET_KEY
