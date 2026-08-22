@@ -9,9 +9,6 @@ venv/
 ENV/
 env/
 
-# Environment variables
-.env
-
 # Git
 .git/
 .gitignore
@@ -41,5 +38,3 @@ like_action_debug.png
 session_verification_debug.png
 schema.sql
 
-# Alembic
-alembic.ini
