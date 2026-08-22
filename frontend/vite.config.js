@@ -8,6 +8,10 @@ const backendUrl = process.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
 export default defineConfig({
   plugins: [react()],
+  // SPA: unknown paths must serve index.html so a browser refresh on
+  // /app/account (etc.) does not 404. Vite's default appType is already
+  // 'spa'; we set it explicitly so preview/dev stay consistent.
+  appType: 'spa',
   server: {
     port: 5173,
     // Dev previews (e.g. sandboxed environments) reach the app through a
@@ -19,5 +23,9 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  preview: {
+    port: 4173,
+    allowedHosts: true,
   },
 });
