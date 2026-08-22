@@ -413,6 +413,23 @@ async def connect_whatsapp(
     connection, the browser is stopped. Logs are written to the terminal.
     """
     from services.browser_view import WHATSAPP_URL, browser_view
+    from services.whatsapp_live_browser import live_browser
+
+    # A leftover live-chat or error-state browser still holds
+    # profile_lock:whatsapp even when the UI shows no connected account.
+    # Stop both managers first so Connect can open a fresh QR view.
+    if live_browser.status in ("running", "starting", "error"):
+        try:
+            await live_browser.stop()
+        except Exception as exc:
+            logger.warning("Could not stop leftover live-chat browser before connect: %s", exc)
+    if browser_view.status == "error" or (
+        browser_view.status not in ("running", "starting") and browser_view.last_error
+    ):
+        try:
+            await browser_view.stop()
+        except Exception as exc:
+            logger.warning("Could not reset leftover browser view before connect: %s", exc)
 
     # Check if there's already a connection in progress
     result = await db.execute(
@@ -440,9 +457,10 @@ async def connect_whatsapp(
             existing.status = "error"
             existing.is_active = False
             await db.commit()
+            error = start_result.get("error") or start_result.get("message") or "unknown error"
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Could not open the browser view: {start_result.get('error')}",
+                detail=f"Could not open the browser view: {error}",
             )
         _spawn_qr_watcher(existing.id)
         return WhatsAppConnectResponse(
@@ -472,11 +490,21 @@ async def connect_whatsapp(
             "📱 WhatsApp connect failed to open browser view: %s",
             start_result.get("error"),
         )
+        error = start_result.get("error") or start_result.get("message") or "unknown error"
+        if "in use" in str(error).lower() or "profile is locked" in str(error).lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "WhatsApp's browser profile is still busy. There is no "
+                    "need for a LinkedIn account — wait a few seconds and "
+                    "press Connect WhatsApp again."
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=(
                 "Could not open the browser view: "
-                f"{start_result.get('error')}. "
+                f"{error}. "
                 "Check that Chromium is installed and the patchright browser "
                 "binaries are present."
             ),

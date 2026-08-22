@@ -134,7 +134,9 @@ class BrowserViewManager:
 
     async def ensure_started(self, url: str = WHATSAPP_URL) -> dict:
         """Start the browser if it is not already running (idempotent)."""
-        if self._page is not None and self.status in ("running", "starting"):
+        if self.status == "starting":
+            return self.snapshot()
+        if self._page is not None and self.status == "running":
             return self.snapshot()
         return await self.start(url=url)
 
@@ -149,7 +151,9 @@ class BrowserViewManager:
         Chromium allows only one process per user-data-dir.
         """
         async with self._lock:
-            if self._page is not None and self.status in ("running", "starting"):
+            if self.status == "starting":
+                return self.snapshot()
+            if self._page is not None and self.status == "running":
                 # Already up — (re)navigate if a different URL was requested.
                 if url and self._page.url.rstrip("/") != url.rstrip("/"):
                     try:
@@ -161,23 +165,30 @@ class BrowserViewManager:
                 return self.snapshot()
             await self._shutdown_locked()
 
-        # Reserve the shared WhatsApp profile before launching. If the scan
-        # task or a group fetch currently holds it, fail fast with a clear
-        # message instead of corrupting the profile on Chromium's SingletonLock.
-        from worker.profile_lock import ProfileInUseError, acquire_profile_lock
+            # Reserve the shared WhatsApp profile before launching. Stay inside
+            # ``self._lock`` so a second Connect cannot race us, steal the
+            # asyncio lock, and then fail on a Redis lock we have not stored
+            # on ``self`` yet.
+            from worker.profile_lock import ProfileInUseError
 
-        try:
-            profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=15)
-        except ProfileInUseError as exc:
-            self.last_error = str(exc)
-            self._set_status(
-                "error",
-                "The WhatsApp browser is busy with another operation (e.g. a "
-                "scan or group refresh). Try again in a few seconds.",
-            )
-            return self.snapshot()
+            try:
+                profile_lock = await self._claim_whatsapp_profile_lock()
+            except ProfileInUseError as exc:
+                self.last_error = str(exc)
+                self._set_status(
+                    "error",
+                    "The WhatsApp browser is busy with another operation (e.g. a "
+                    "scan or group refresh). Try again in a few seconds.",
+                )
+                return self.snapshot()
 
-        self._set_status("starting", "Launching headless browser…")
+            # Store immediately so a crash/exception path can always release it.
+            # The live-chat manager already does this — leaving the token in a
+            # local variable leaked ``profile_lock:whatsapp`` for 30 minutes
+            # and made every retry look like another session was using WhatsApp
+            # even when the UI showed no active account.
+            self._profile_lock = profile_lock
+            self._set_status("starting", "Launching headless browser…")
 
         pw = None
         context = None
@@ -310,6 +321,55 @@ class BrowserViewManager:
             except Exception:
                 pass
             return self.snapshot()
+
+    async def _claim_whatsapp_profile_lock(self):
+        """Acquire ``profile_lock:whatsapp``, stealing a leftover Redis key.
+
+        A crashed API worker or scan task can leave the Redis lock for its
+        30-minute TTL even though no browser is open and the UI shows no
+        WhatsApp account. Connect then fails with a confusing "in use"
+        error. If this process does not currently own the profile, delete
+        the stale key and retry once.
+        """
+        from worker.profile_lock import (
+            ProfileInUseError,
+            acquire_profile_lock,
+            force_release_profile_lock,
+        )
+
+        try:
+            return await asyncio.to_thread(
+                acquire_profile_lock, "whatsapp", blocking_timeout=5
+            )
+        except ProfileInUseError:
+            if self._whatsapp_lock_has_local_owner():
+                raise
+            logger.warning(
+                "🔓 WhatsApp profile lock is held but no local browser owns it "
+                "— treating it as stale and retrying"
+            )
+            await asyncio.to_thread(force_release_profile_lock, "whatsapp")
+            try:
+                from services.whatsapp_browser import clear_stale_chromium_singleton
+
+                clear_stale_chromium_singleton()
+            except Exception:
+                pass
+            return await asyncio.to_thread(
+                acquire_profile_lock, "whatsapp", blocking_timeout=5
+            )
+
+    @staticmethod
+    def _whatsapp_lock_has_local_owner() -> bool:
+        """True when live chat in this process currently holds the profile."""
+        try:
+            from services.whatsapp_live_browser import live_browser
+        except Exception:
+            return False
+        return (
+            getattr(live_browser, "_profile_lock", None) is not None
+            and live_browser.status in ("running", "starting")
+        )
 
     async def stop(self) -> dict:
         """Stop the browser and reset state."""
