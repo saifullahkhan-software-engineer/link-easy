@@ -42,9 +42,10 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install chromium
-RUN playwright install-deps chromium
+# Install Patchright (stealth Playwright fork) Chromium browser + system deps.
+# `playwright` was replaced by `patchright` in requirements.txt, so the
+# matching CLI is `patchright`, not `playwright`.
+RUN patchright install chromium --with-deps
 
 # Copy application code
 COPY . .
