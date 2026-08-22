@@ -1,4 +1,4 @@
-import api, { getAccessToken } from './client';
+import api, { getAccessToken, API_BASE_URL } from './client';
 
 /* ---------------------------------- auth --------------------------------- */
 export const authApi = {
@@ -379,7 +379,7 @@ export const adminApi = {
 // EventSource cannot send Authorization headers, so the live streams accept
 // the access token as a query parameter (?token=...) instead.
 const liveStreamUrl = (path) => {
-  const base = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+  const base = API_BASE_URL;
   const token = getAccessToken();
   const sep = path.includes('?') ? '&' : '?';
   return `${base}${path}${sep}token=${encodeURIComponent(token || '')}`;

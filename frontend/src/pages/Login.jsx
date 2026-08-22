@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
+import { authApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
 
@@ -25,6 +26,21 @@ export default function Login() {
       toast.success('Welcome back');
       navigate(from, { replace: true });
     } catch (err) {
+      // 403 = account exists but the email was never verified. Send a fresh
+      // code and drop the user on the verification page instead of just
+      // showing an error.
+      if (err?.response?.status === 403) {
+        try {
+          await authApi.resendVerification(email.trim());
+          toast.success('A new verification code was sent to your email.');
+        } catch (resendErr) {
+          toast.error(
+            getErrorMessage(resendErr, 'Could not send a new code — use "Resend" on the next page.')
+          );
+        }
+        navigate('/verify-email', { state: { email: email.trim(), codeSent: true } });
+        return;
+      }
       setError(getErrorMessage(err, 'Login failed — check your credentials.'));
     } finally {
       setBusy(false);

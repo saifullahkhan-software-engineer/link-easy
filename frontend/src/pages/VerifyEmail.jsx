@@ -16,6 +16,9 @@ export default function VerifyEmail() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [resendCooldown, setResendCooldown] = useState(0);
+  // True when we arrive right after a code was generated for us (fresh signup
+  // or a login attempt with an unverified email).
+  const codeJustSent = Boolean(location.state?.codeSent);
 
   useEffect(() => {
     if (resendCooldown <= 0) return;
@@ -63,6 +66,13 @@ export default function VerifyEmail() {
           <p className="mt-1 text-sm text-zinc-400">
             We sent a verification code to your email. Enter it below to activate your account.
           </p>
+
+          {codeJustSent && (
+            <div className="mt-4 rounded-lg border border-teal-500/40 bg-teal-500/10 px-4 py-3 text-sm text-teal-300">
+              A fresh verification code is on its way to <span className="font-medium">{email}</span>.
+              Enter it below to verify your account.
+            </div>
+          )}
 
           <form onSubmit={onSubmit} className="mt-6 space-y-5">
             <div>
