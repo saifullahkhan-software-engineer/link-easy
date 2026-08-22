@@ -2,6 +2,7 @@ import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
 import { useAdminAccess } from '../hooks/useAdminAccess';
+import BetaBanner from './BetaBanner';
 
 /**
  * App module shell — the customer-facing product.
@@ -279,6 +280,7 @@ export default function AppLayout() {
 
       {/* Main content */}
       <main className="ml-64 min-w-0 flex-1 p-8">
+        <BetaBanner />
         <Outlet />
       </main>
     </div>
