@@ -41,5 +41,5 @@ like_action_debug.png
 session_verification_debug.png
 schema.sql
 
-# Alembic
-alembic.ini
+# # Alembic
+# alembic.ini
