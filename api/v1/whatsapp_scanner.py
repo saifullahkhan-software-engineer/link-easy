@@ -3,6 +3,7 @@ WhatsApp Job Scanner — API endpoints.
 FILE: api/v1/whatsapp_scanner.py
 
 POST   /api/v1/whatsapp/connect          → start embedded browser view + QR watcher
+POST   /api/v1/whatsapp/session/capture  → manually snapshot the scanned session
 GET    /api/v1/whatsapp/status           → connection status
 DELETE /api/v1/whatsapp/connection       → disconnect + remove durable credentials
 GET    /api/v1/whatsapp/groups           → list all groups
@@ -45,6 +46,7 @@ from api.dependencies import get_db, get_current_user
 from models.user import User
 from schemas.whatsapp import (
     WhatsAppConnectResponse,
+    WhatsAppCaptureResponse,
     WhatsAppDisconnectResponse,
     WhatsAppStatusResponse,
     WhatsAppGroupListResponse,
@@ -172,7 +174,7 @@ async def _filter_response(
 # ``/connect`` to tell a truly in-progress connection apart from a stale
 # ``waiting_qr`` row whose watcher died (timeout / server restart / browser
 # stop) — stale rows used to leave the UI stuck on the QR screen forever.
-_active_watchers: set[int] = set()
+_active_watchers: dict[int, asyncio.Task] = {}
 
 # Serializes WhatsApp browser operations inside the API process. Two browsers
 # on the same WhatsApp account at once (the live browser view + a group-fetch
@@ -189,9 +191,23 @@ def _spawn_qr_watcher(session_id: int, max_wait_seconds: int = 300) -> None:
     """Create the background QR-watch task (idempotent per session)."""
     if session_id in _active_watchers:
         return
-    _active_watchers.add(session_id)
     task = asyncio.create_task(_watch_qr_scan(session_id, max_wait_seconds))
-    task.add_done_callback(lambda _t: _active_watchers.discard(session_id))
+    _active_watchers[session_id] = task
+    task.add_done_callback(lambda _t: _active_watchers.pop(session_id, None))
+
+
+def _cancel_qr_watcher(session_id: int) -> bool:
+    """Stop the background watcher for ``session_id`` (used by manual capture).
+
+    Without this a manual capture would race the watcher: the watcher keeps
+    polling for its own detection and, when it eventually times out, flips the
+    freshly captured session back to ``disconnected``.
+    """
+    task = _active_watchers.pop(session_id, None)
+    if task is None:
+        return False
+    task.cancel()
+    return True
 
 
 # ── POST /connect ────────────────────────────────────────────────────────────
@@ -275,7 +291,17 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
             )
         ).scalar_one_or_none()
         if row:
-            if storage_state is not None:
+            already_connected = bool(
+                row.status == "connected" and row.storage_state_json
+            )
+            if already_connected and storage_state is None:
+                # A manual "capture session" already saved this connection.
+                # Never downgrade it just because our own detection timed out.
+                message = (
+                    f"ℹ️ Session {session_id} was already captured manually — "
+                    "leaving it connected"
+                )
+            elif storage_state is not None:
                 row.storage_state_json = storage_state
                 row.cookies_json = storage_state.get("cookies", [])
                 row.status = "connected"
@@ -463,6 +489,157 @@ async def connect_whatsapp(
     return WhatsAppConnectResponse(
         message="WhatsApp connection started — scan the QR code in the Live Browser view below.",
         status="waiting_qr",
+    )
+
+
+# ── POST /session/capture ────────────────────────────────────────────────────
+
+
+async def _persist_captured_session(
+    db: AsyncSession,
+    storage_state: dict,
+) -> tuple[int, datetime]:
+    """Save ``storage_state`` onto the newest session row (creating one)."""
+    result = await db.execute(
+        select(WhatsAppSession).order_by(WhatsAppSession.id.desc()).limit(1)
+    )
+    row = result.scalars().first()
+    if row is None:
+        row = WhatsAppSession(status="waiting_qr", is_active=True)
+        db.add(row)
+        await db.flush()
+
+    now = datetime.now(timezone.utc)
+    row.storage_state_json = storage_state
+    row.cookies_json = storage_state.get("cookies", [])
+    row.status = "connected"
+    row.is_active = True
+    row.updated_at = now
+    await db.commit()
+    await db.refresh(row)
+    return row.id, row.updated_at or now
+
+
+@router.post("/session/capture", response_model=WhatsAppCaptureResponse)
+async def capture_whatsapp_session(
+    force: bool = Query(
+        False,
+        description=(
+            "Save the session even when the logged-in chat surface cannot be "
+            "detected (use when WhatsApp is visibly logged in but detection "
+            "keeps failing)."
+        ),
+    ),
+    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppCaptureResponse:
+    """Manually capture the WhatsApp session from the open browser view.
+
+    The automatic QR watcher relies on WhatsApp Web's DOM markers, which
+    WhatsApp changes regularly — when they miss, a perfectly good scan sits at
+    "waiting_qr" until it times out.  This endpoint is the escape hatch behind
+    the "I've scanned it — capture session" button: it snapshots the live
+    browser context's cookies/storage right now, marks the session connected,
+    cancels the watcher (so it can't undo the capture) and stops the browser.
+    """
+    from services.browser_view import browser_view
+    from services.whatsapp_browser import (
+        get_storage_state,
+        is_logged_in,
+        is_showing_qr,
+        wait_for_login,
+    )
+
+    page = browser_view.page
+    context = browser_view.context
+    if page is None or context is None or browser_view.status not in ("running", "starting"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "The WhatsApp browser is not open, so there is no session to "
+                'capture. Press "Connect WhatsApp" and scan the QR code first.'
+            ),
+        )
+
+    detected = False
+    try:
+        detected = await is_logged_in(page)
+        if not detected:
+            detected = await wait_for_login(page, timeout_seconds=15)
+    except Exception as exc:  # page may be mid-navigation
+        logger.debug("Manual capture login check failed: %s", exc)
+
+    if not detected and not force:
+        showing_qr = False
+        try:
+            showing_qr = await is_showing_qr(page)
+        except Exception:
+            showing_qr = False
+        if showing_qr:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "WhatsApp Web is still showing the QR code — scan it with "
+                    "your phone (Settings → Linked devices → Link a device), "
+                    "then press the button again."
+                ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "WhatsApp Web has not finished loading the chat list yet. Wait "
+                'a few seconds and try again, or use "Capture anyway" if the '
+                "chats are already visible in the browser view."
+            ),
+        )
+
+    try:
+        storage_state = await get_storage_state(context)
+    except Exception as exc:
+        logger.error("Manual capture could not extract storage state: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Could not read the session from the browser. Press "
+                '"Restart connection" and scan a fresh QR code.'
+            ),
+        ) from exc
+
+    if not storage_state or (
+        not storage_state.get("cookies") and not storage_state.get("origins")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "The browser has no WhatsApp session data yet — scan the QR "
+                "code and wait for your chats to appear, then try again."
+            ),
+        )
+
+    session_id, updated_at = await _persist_captured_session(db, storage_state)
+    _cancel_qr_watcher(session_id)
+
+    logger.info(
+        "✅ WhatsApp session captured manually (session id=%s, detected=%s, force=%s)",
+        session_id,
+        detected,
+        force,
+    )
+
+    try:
+        await browser_view.stop()
+    except Exception as exc:
+        logger.warning("Error stopping browser view after manual capture: %s", exc)
+
+    return WhatsAppCaptureResponse(
+        message=(
+            "WhatsApp session captured — you're connected."
+            if detected
+            else "WhatsApp session captured from the open browser — you're connected."
+        ),
+        status="connected",
+        detected=detected,
+        updated_at=updated_at,
     )
 
 

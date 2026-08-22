@@ -21,6 +21,17 @@ class WhatsAppDisconnectResponse(BaseModel):
     status: str = "disconnected"
 
 
+class WhatsAppCaptureResponse(BaseModel):
+    """Result of the manual "I've scanned it — capture session" action."""
+
+    message: str
+    status: str = "connected"
+    # False when the logged-in chat surface could not be detected and the
+    # session was captured anyway (force). Useful for UI copy/telemetry.
+    detected: bool = True
+    updated_at: Optional[datetime] = None
+
+
 class WhatsAppStatusResponse(BaseModel):
     status: str  # disconnected | waiting_qr | connected | error
     is_active: bool

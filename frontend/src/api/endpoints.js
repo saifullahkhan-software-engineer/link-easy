@@ -182,6 +182,13 @@ export const whatsappApi = {
     api.post('/whatsapp/connect', null, { timeout: WHATSAPP_TIMEOUT }),
   disconnect: () =>
     api.delete('/whatsapp/connection', { timeout: WHATSAPP_TIMEOUT }),
+  // Manual escape hatch when the automatic QR watcher misses a successful
+  // scan: snapshot the live browser's session right now.
+  captureSession: (force = false) =>
+    api.post('/whatsapp/session/capture', null, {
+      params: { force },
+      timeout: WHATSAPP_TIMEOUT,
+    }),
   getStatus: () =>
     api.get('/whatsapp/status'),
 
