@@ -67,11 +67,10 @@ BROWSER_ARGS = [
     "--disable-gpu",
 ]
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+# NOTE: the browser launches with the USER_AGENT imported from
+# services.whatsapp_browser inside start() — keep the Chrome version there in
+# sync with the Chromium that patchright bundles, or WhatsApp Web serves its
+# outdated-browser interstitial and Connect always times out.
 
 _STEALTH_SCRIPT = """
 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -252,6 +251,13 @@ class BrowserViewManager:
             # browser ready; otherwise a cold profile is handed to the QR
             # watcher/live chat while React is still hydrating.
             surface = await wait_for_whatsapp_surface(page, timeout_seconds=45)
+            if surface == "unsupported":
+                raise RuntimeError(
+                    "WhatsApp Web refused to load in the embedded browser "
+                    "(it treats the browser as outdated), so no QR code can "
+                    "be shown. Please update this deployment so its embedded "
+                    "Chromium and user agent are current, then retry."
+                )
             if surface == "timeout":
                 raise RuntimeError(
                     "WhatsApp Web took too long to render its QR code or chat list. "

@@ -57,10 +57,15 @@ LAUNCH_ARGS = [
     "--no-first-run",
 ]
 
+# Keep in sync with the Chromium that patchright actually launches
+# (patchright 1.60 bundles Chromium rev 1223 ≈ Chrome 148). Claiming an
+# ancient Chrome here makes WhatsApp Web serve its "update your browser"
+# interstitial: no QR canvas and no chat list, so every Connect dies with
+# the misleading "took too long to render" timeout.
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/148.0.0.0 Safari/537.36"
 )
 
 STEALTH_SCRIPT = """
@@ -323,6 +328,16 @@ LOGGED_IN_SELECTORS = (
     'header[data-testid="chatlist-header"]',
 )
 
+# Text fragments WhatsApp Web renders on its "browser too old" interstitial.
+UNSUPPORTED_BROWSER_PHRASES = (
+    "update whatsapp",
+    "update your browser",
+    "update google chrome",
+    "browser is not supported",
+    "unsupported browser",
+    "outdated browser",
+)
+
 # Comma-joined version for single query_selector calls.
 LOGGED_IN_SELECTOR = ', '.join(LOGGED_IN_SELECTORS)
 
@@ -500,6 +515,21 @@ async def wait_for_full_whatsapp_surface(
     return False
 
 
+async def is_unsupported_browser_page(page: Page) -> bool:
+    """True when WhatsApp Web shows its outdated/unsupported-browser page.
+
+    On that interstitial there is no QR canvas and no chat list — the surface
+    wait would burn its whole timeout and report a misleading "took too long
+    to render" error. Detected by body text because the page is static HTML,
+    not the React app (no stable selectors exist for it).
+    """
+    try:
+        text = (await page.inner_text("body") or "").lower()
+    except Exception:  # page mid-navigation / no body yet
+        return False
+    return any(phrase in text for phrase in UNSUPPORTED_BROWSER_PHRASES)
+
+
 async def wait_for_whatsapp_surface(
     page: Page, timeout_seconds: float = 45.0
 ) -> str:
@@ -511,6 +541,9 @@ async def wait_for_whatsapp_surface(
     connection look broken and leaves live chat with an empty sidebar.  This
     helper distinguishes the expected QR surface from the authenticated app
     without treating a slow page as a logged-out session.
+
+    Returns ``"connected"``, ``"qr"``, ``"unsupported"`` (WhatsApp's
+    outdated-browser interstitial — no QR can ever appear) or ``"timeout"``.
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -522,10 +555,20 @@ async def wait_for_whatsapp_surface(
                 ) else "timeout"
             if await is_showing_qr(page):
                 return "qr"
+            # Fail fast when WhatsApp refuses to load this browser at all
+            # (typically a user agent it gates as outdated) instead of
+            # waiting out the clock on a page that can never show a QR code.
+            if await is_unsupported_browser_page(page):
+                logger.warning(
+                    "WhatsApp Web is showing its unsupported-browser page "
+                    "(url=%s) — the QR surface can never appear", page.url
+                )
+                return "unsupported"
         except Exception:
             # Navigation and React hydration can detach selectors temporarily.
             pass
         await asyncio.sleep(0.75)
+    logger.warning("WhatsApp surface wait timed out (url=%s)", page.url)
     return "timeout"
 
 
