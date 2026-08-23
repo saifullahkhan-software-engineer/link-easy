@@ -122,6 +122,18 @@ def acquire_profile_lock(account_id: str, blocking_timeout: int | float = PROFIL
         _lock_key(account_id),
         timeout=PROFILE_LOCK_TIMEOUT,
         blocking_timeout=blocking_timeout if blocking_timeout else None,
+        # The token must be shared across threads. We routinely acquire this
+        # lock inside an ``asyncio.to_thread`` worker (WhatsApp browser view /
+        # live chat) or a Celery task thread and release it from the FastAPI
+        # event-loop thread. With the default thread-local token, release()
+        # from the other thread hits an AttributeError ("Profile lock object
+        # state corrupted"), the key is NEVER deleted, and it sits in Redis
+        # for the full 30-minute TTL blocking every later Connect until
+        # someone force-releases it. Each acquire_profile_lock() call builds
+        # a fresh Lock object, so the cross-thread-release footgun documented
+        # in redis-py (another thread re-acquiring an expired lock) cannot
+        # happen here.
+        thread_local=False,
     )
 
     acquired = lock.acquire(blocking=bool(blocking_timeout))
@@ -150,8 +162,11 @@ def release_profile_lock(lock) -> None:
         logger.debug("Profile lock was already released before release()")
     except AttributeError:
         # Lock object's internal state is corrupted (e.g. missing token).
-        # This can happen when the lock wasn't properly acquired or was
-        # partially initialized. Treat as already released.
+        # Mostly historical: this happened whenever a lock acquired in an
+        # asyncio.to_thread worker was released from another thread (the
+        # thread-local token was invisible there). acquire_profile_lock()
+        # now creates locks with thread_local=False, so this is only a
+        # safety net for foreign lock objects. Treat as already released.
         logger.warning("⚠️ Profile lock object state corrupted, treating as released")
     except Exception:
         logger.warning("⚠️ Failed to release profile lock", exc_info=True)

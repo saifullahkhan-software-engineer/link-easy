@@ -96,20 +96,33 @@ async def find_visible_input_by_type(page: Page, input_type: str) -> Locator:
     except Exception:
         pass
 
-    # Final fallback: query_selector_all with enhanced checks
-    inputs = await page.query_selector_all(f"input[type='{input_type}']")
+    # Final fallback: a plain CSS locator checked element-by-element via
+    # nth(). IMPORTANT: this used to wrap query_selector_all() handles in
+    # ``page.locator(...).filter(has=<ElementHandle>)`` — ``filter()`` only
+    # accepts a Locator, so Playwright crashed with
+    # ``'ElementHandle' object has no attribute '_selector'`` and turned the
+    # self-healing path itself into a hard login failure.
+    if input_type == "email":
+        # LinkedIn A/B-serves the login field as type="email", type="text",
+        # or with no type attribute at all — cover all three variants.
+        css = "input[type='email'], input[type='text'], input:not([type])"
+    else:
+        css = f"input[type='{input_type}']"
 
-    for inp in inputs:
-        # Check if element is physically visible (has positive dimensions)
-        box = await inp.bounding_box()
-        if box and box['width'] > 0 and box['height'] > 0:
-            # Check if element is not hidden via CSS
-            is_visible = await inp.is_visible()
-            # Check if element is enabled
-            is_enabled = await inp.is_enabled()
-            if is_visible and is_enabled:
-                # Return as a Locator instead of building a CSS selector
-                return page.locator(f"input[type='{input_type}']").filter(has=inp)
+    base = page.locator(css)
+    for i in range(await base.count()):
+        element = base.nth(i)
+        try:
+            # Check if element is physically visible (has positive dimensions)
+            box = await element.bounding_box()
+            if not box or box["width"] <= 0 or box["height"] <= 0:
+                continue
+            # Check if element is not hidden via CSS and is enabled
+            if not (await element.is_visible() and await element.is_enabled()):
+                continue
+            return element
+        except Exception:
+            continue
 
     raise ValueError(f"No visible, enabled input of type '{input_type}' found on page")
 
@@ -149,27 +162,35 @@ async def find_visible_button_by_text(page: Page, button_text: str) -> Locator:
     except Exception:
         pass
 
-    # Final fallback: query_selector_all with enhanced checks
-    buttons = await page.query_selector_all("button")
-    matching_buttons = []
+    # Final fallback: nth()-indexed button Locators. This used to wrap
+    # query_selector_all() handles in ``page.locator("button").filter(
+    # has=<ElementHandle>)`` — ``filter()`` only accepts a Locator, so
+    # Playwright crashed with ``'ElementHandle' object has no attribute
+    # '_selector'`` inside the self-healing path itself.
+    base = page.locator("button")
+    matching_buttons: list[Locator] = []
 
-    for btn in buttons:
-        # Check if element is physically visible (has positive dimensions)
-        box = await btn.bounding_box()
-        if box and box['width'] > 0 and box['height'] > 0:
-            is_visible = await btn.is_visible()
-            is_enabled = await btn.is_enabled()
-            if is_visible and is_enabled:
-                # Check if button contains the target text
-                text_content = await btn.text_content()
-                if text_content and button_text.lower() in text_content.lower():
-                    matching_buttons.append(btn)
+    for i in range(await base.count()):
+        button = base.nth(i)
+        try:
+            # Check if element is physically visible (has positive dimensions)
+            box = await button.bounding_box()
+            if not box or box["width"] <= 0 or box["height"] <= 0:
+                continue
+            if not (await button.is_visible() and await button.is_enabled()):
+                continue
+            # Check if button contains the target text
+            text_content = await button.text_content()
+            if text_content and button_text.lower() in text_content.lower():
+                matching_buttons.append(button)
+        except Exception:
+            continue
 
     if not matching_buttons:
         raise ValueError(f"No visible, enabled button containing '{button_text}' found on page")
 
     # Use the last matching button (to target the main sign-in button, not social login)
-    return page.locator("button").filter(has=matching_buttons[-1])
+    return matching_buttons[-1]
 
 
 async def linkedin_login(email: str, password: str, account, keep_alive: bool = False) -> tuple[LinkedInSessionStatus, any]:
