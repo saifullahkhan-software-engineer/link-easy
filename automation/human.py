@@ -10,7 +10,7 @@ import math
 import logging
 import random
 from patchright.async_api import Page, Locator, ElementHandle
-from core.logging_config import get_logger, should_log_debug
+from core.logging_config import get_logger, should_log_debug, should_take_screenshots
 
 logger = get_logger(__name__)
  
@@ -65,13 +65,24 @@ async def human_click(page: Page, target: str | Locator | ElementHandle) -> None
         try:
             element = await page.wait_for_selector(target, timeout=5000)
         except Exception as e:
-            # On failure, save a screenshot for debugging
-            screenshot_path = f"error_screenshot_{random.randint(1000, 9999)}.png"
-            await page.screenshot(path=screenshot_path, full_page=True)
+            # On failure, save a screenshot for debugging.
+            # Gate this on dev mode: the resilient fallback loops below call
+            # human_click() through human_type() for EVERY non-matching
+            # selector candidate (~30x per LinkedIn login attempt), and an
+            # unconditional full-page screenshot per miss both wasted disk
+            # and added seconds to an already slow flow in production.
+            screenshot_note = ""
+            if should_take_screenshots():
+                try:
+                    screenshot_path = f"error_screenshot_{random.randint(1000, 9999)}.png"
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                    screenshot_note = f"Screenshot saved to '{screenshot_path}'. "
+                except Exception:
+                    pass
             # Re-raise the exception with more context
             raise type(e)(
                 f"Failed to find selector '{target}'. "
-                f"Screenshot saved to '{screenshot_path}'. "
+                f"{screenshot_note}"
                 f"Current URL: {page.url}. Original error: {e}"
             ) from e
     elif isinstance(target, Locator):
@@ -236,6 +247,30 @@ async def random_idle_pause(min_sec: float = 2.0, max_sec: float = 8.0) -> None:
     await asyncio.sleep(random.uniform(min_sec, max_sec))
 
 
+# Per-candidate visibility probe for the resilient selector pools.
+# LinkedIn A/B-serves several login layouts, each with different markup; a
+# pool of ~16 candidate selectors means the FIRST one usually matches and the
+# rest should fail fast. The old path waited 3s for "attached" here plus up
+# to 5s for "visible" inside human_type()/human_click() — ~60-70s of pure
+# waiting per login attempt before self-healing ever ran, pushing
+# POST /api/v1/linkedin/account past 150s (reverse-proxy timeout territory).
+_SELECTOR_PROBE_TIMEOUT_MS = 1500
+
+
+async def _probe_visible(page: Page, selector: str) -> Locator | None:
+    """
+    Resolve a selector string to a VISIBLE Locator, quickly.
+    Returns None (never raises) when the candidate doesn't match a visible
+    element within the probe timeout, or the selector is malformed.
+    """
+    try:
+        probe = page.locator(selector).first
+        await probe.wait_for(state="visible", timeout=_SELECTOR_PROBE_TIMEOUT_MS)
+        return probe
+    except Exception:
+        return None
+
+
 async def find_and_type_resilient(page: Page, selectors: list[str] | list[Locator] | list[ElementHandle], value: str, field_name: str) -> str | Locator:
     """
     Iterates through a list of potential selectors/locators for a field.
@@ -246,21 +281,21 @@ async def find_and_type_resilient(page: Page, selectors: list[str] | list[Locato
     for target in selectors:
         try:
             if isinstance(target, str):
-                # Check if selector is attached to DOM (not necessarily visible yet)
-                await page.wait_for_selector(target, timeout=3000, state="attached")
+                # Only interact with candidates that resolve to a VISIBLE
+                # element — skips hidden duplicate forms LinkedIn renders
+                # for A/B tests, instead of timing out on them one by one.
+                probe = await _probe_visible(page, target)
+                if probe is None:
+                    continue
                 if should_log_debug():
                     logger.debug(f"Found active selector for {field_name}: '{target}'")
-                await human_type(page, target, value)
+                await human_type(page, probe, value)
                 return target
             elif isinstance(target, (Locator, ElementHandle)):
                 # For Locators/ElementHandles, check if they're visible and enabled
-                if isinstance(target, Locator):
-                    is_visible = await target.is_visible()
-                    is_enabled = await target.is_enabled()
-                else:
-                    is_visible = await target.is_visible()
-                    is_enabled = await target.is_enabled()
-                
+                is_visible = await target.is_visible()
+                is_enabled = await target.is_enabled()
+
                 if is_visible and is_enabled:
                     if should_log_debug():
                         logger.debug(f"Found active locator for {field_name}")
@@ -282,21 +317,21 @@ async def find_and_click_resilient(page: Page, selectors: list[str] | list[Locat
     for target in selectors:
         try:
             if isinstance(target, str):
-                element = await page.wait_for_selector(target, timeout=3000, state="attached")
-                if element:
-                    if should_log_debug():
-                        logger.debug(f"Found active selector for {button_name}: '{target}'")
-                    await human_click(page, target)
-                    return target
+                # Only click candidates that resolve to a VISIBLE element
+                # (see _probe_visible for why a fast probe replaced the old
+                # 3s "attached" + 5s "visible" double-wait).
+                probe = await _probe_visible(page, target)
+                if probe is None:
+                    continue
+                if should_log_debug():
+                    logger.debug(f"Found active selector for {button_name}: '{target}'")
+                await human_click(page, probe)
+                return target
             elif isinstance(target, (Locator, ElementHandle)):
                 # For Locators/ElementHandles, check if they're visible and enabled
-                if isinstance(target, Locator):
-                    is_visible = await target.is_visible()
-                    is_enabled = await target.is_enabled()
-                else:
-                    is_visible = await target.is_visible()
-                    is_enabled = await target.is_enabled()
-                
+                is_visible = await target.is_visible()
+                is_enabled = await target.is_enabled()
+
                 if is_visible and is_enabled:
                     if should_log_debug():
                         logger.debug(f"Found active locator for {button_name}")
