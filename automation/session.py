@@ -8,9 +8,12 @@ logs in inside the persistent profile (Chromium persists the session to disk
 as a side effect), and ``verify_session`` checks whether the profile's session
 is still live.
 """
+import asyncio
 import logging
 import random
 from enum import Enum
+from typing import Optional
+from urllib.parse import urlsplit
 
 from patchright.async_api import BrowserContext, Page, Locator, ElementHandle  # noqa: F401
 
@@ -193,7 +196,173 @@ async def find_visible_button_by_text(page: Page, button_text: str) -> Locator:
     return matching_buttons[-1]
 
 
-async def linkedin_login(email: str, password: str, account, keep_alive: bool = False) -> tuple[LinkedInSessionStatus, any]:
+# ---------------------------------------------------------------------------
+# Login outcome helpers
+# ---------------------------------------------------------------------------
+
+# URL fragments that mean the sign-in POST is still in flight. While the
+# browser is on one of these, the attempt has neither succeeded nor failed.
+LOGIN_SUBMIT_MARKERS = ("/uas/login-submit", "/login-submit", "/uas/openid")
+
+# URL fragments that mean we have definitively LEFT the login surface.
+LOGIN_TERMINAL_MARKERS = (
+    "/feed",
+    "/checkpoint",
+    "/challenge",
+    "/verify",
+    "/mynetwork",
+    "/onboarding",
+    "/in/",
+)
+
+# LinkedIn's on-page rejection banners (wrong email / wrong password /
+# throttling). The TEXT inside is LinkedIn chrome (never user input), so it
+# is safe to log and to echo back in the API error detail.
+LOGIN_ERROR_SELECTORS = (
+    "#error-for-username",
+    "#error-for-password",
+    "div[role='alert']",
+    "#artdeco-global-alerts .artdeco-inline-feedback--error",
+    ".login__form .alert",
+    ".form__error",
+)
+
+# Human-verification challenges embedded in the login page. IMPORTANT: these
+# must NOT be classified as VERIFICATION_REQUIRED — the pending-session flow
+# can only type a 6-digit code, it cannot solve a CAPTCHA, so routing a
+# captcha page into it would strand the user in an unwinnable session.
+CAPTCHA_SELECTORS = (
+    "iframe[src*='arkose']",
+    "iframe[src*='captcha' i]",
+    "iframe[title*='captcha' i]",
+    "#captcha-internal",
+    "div[data-captcha]",
+)
+
+
+def sanitized_url_path(url: str) -> str:
+    """URL with query string stripped — safe to log (challenge tokens live in the query)."""
+    if not url:
+        return "(unparseable URL)"
+    try:
+        parts = urlsplit(url)
+        if not (parts.scheme and parts.netloc):
+            return parts.path or "(unparseable URL)"
+        return f"{parts.scheme}://{parts.netloc}{parts.path}"
+    except Exception:
+        return "(unparseable URL)"
+
+
+async def extract_login_error(page: Page) -> Optional[str]:
+    """
+    Return the text of LinkedIn's on-page login rejection banner, if visible.
+
+    LinkedIn bounces a failed sign-in straight back to /login with an inline
+    error (e.g. "Wrong email or password..."). Old code only looked at the
+    URL, so operators got "still on login page" with zero indication of why.
+    """
+    for selector in LOGIN_ERROR_SELECTORS:
+        try:
+            banner = page.locator(selector).first
+            if await banner.is_visible():
+                text = (await banner.text_content() or "").strip()
+                text = " ".join(text.split())  # collapse whitespace/newlines
+                if text:
+                    return text[:300]
+        except Exception:
+            continue
+    return None
+
+
+async def detect_human_challenge(page: Page) -> bool:
+    """True when a CAPTCHA-type iframe block is visible on the current page."""
+    for selector in CAPTCHA_SELECTORS:
+        try:
+            if await page.locator(selector).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def wait_for_login_outcome(page: Page, timeout_ms: int = 20000) -> None:
+    """
+    Poll (500ms cadence) until the post-submit navigation reaches a
+    *classifiable* state:
+
+    - the URL left the login surface entirely (feed/checkpoint/...), or
+    - we are still on /login AND LinkedIn rendered a rejection banner
+      (that combination is a definitive wrong-credentials bounce), or
+    - the deadline expires (conservative fallback; caller classifies by URL).
+
+    This replaced a blind ``random_idle_pause(2, 4)`` after the click. Behind
+    a slow proxy the /uas/login-submit POST + redirect chain regularly takes
+    longer than 4s, so the old code mis-classified a still-in-flight
+    navigation as "still on login page" == "invalid credentials" (400).
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while True:
+        url = (page.url or "").lower()
+        if any(marker in url for marker in LOGIN_SUBMIT_MARKERS):
+            # Form POST target still in flight — keep waiting.
+            pass
+        elif any(marker in url for marker in LOGIN_TERMINAL_MARKERS):
+            return
+        elif "/login" not in url:
+            # Left the login surface via some path we don't explicitly list.
+            return
+        elif await extract_login_error(page):
+            # Still on /login with a visible rejection banner == bounced.
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            return
+        await page.wait_for_timeout(500)
+
+
+async def uncheck_all_checkboxes(page: Page, context_label: str = "login") -> None:
+    """
+    Uncheck every visible checkbox on the current page ("Keep me signed in"
+    on the login form, "Remember this device" on the verification page).
+
+    This replaced the query_selector_all()-based version which crashed on
+    every production run with ``'ElementHandle' object has no attribute
+    'wait_for'`` (ElementHandle does not expose wait_for — only Locator
+    does). It also deduplicated with ``set()`` over wrapper objects, so the
+    SAME box found by two selectors was processed twice.
+    """
+    try:
+        await page.wait_for_timeout(500)
+        boxes = page.locator("input[type='checkbox'], [role='checkbox']")
+        total = await boxes.count()
+        logger.info(f"🔍 Found {total} total checkbox(es) on the {context_label} page")
+
+        for i in range(total):
+            checkbox = boxes.nth(i)
+            try:
+                if not await checkbox.is_visible():
+                    continue
+                if not await checkbox.is_checked():
+                    continue
+                try:
+                    await checkbox.uncheck(force=True, timeout=4000)
+                except Exception:
+                    await checkbox.click(force=True, timeout=4000)
+                # Verify it actually unticked; JS fallback for stubborn boxes.
+                await page.wait_for_timeout(200)
+                if await checkbox.is_checked():
+                    try:
+                        await checkbox.evaluate("el => el.checked = false")
+                    except Exception:
+                        logger.warning(
+                            f"⚠️ Could not uncheck checkbox {i} on the {context_label} page"
+                        )
+            except Exception as e:
+                logger.warning(f"⚠️ Could not process checkbox {i}: {str(e)}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not uncheck checkboxes on the {context_label} page: {str(e)}")
+
+
+async def linkedin_login(email: str, password: str, account, keep_alive: bool = False) -> tuple[LinkedInSessionStatus, any, Optional[str]]:
     """
     Performs LinkedIn login inside the account's PERSISTENT browser profile
     and returns the session status.
@@ -212,9 +381,12 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
             resources the caller owns and must close).
 
     Returns:
-        tuple: (LinkedInSessionStatus, session_resources or None)
+        tuple: (LinkedInSessionStatus, session_resources or None, error_detail or None)
             - session_resources (when returned) is: (pw, browser, context, page, user_agent)
               where `browser` is always None for persistent contexts.
+            - error_detail is LinkedIn's own on-page rejection text (or a
+              captcha note) when one was detected — safe to surface to the
+              caller in an HTTP error response.
 
     Returns LinkedInSessionStatus: VALID, EXPIRED, CHECKPOINT, VERIFICATION_REQUIRED, or UNKNOWN.
     """
@@ -275,6 +447,13 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
         await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30000)
         # await page.wait_for_load_state("networkidle", timeout=120000)
         await random_idle_pause(2, 4)
+        # The login form is hydrated by client-side JS after domcontentloaded.
+        # Give it a bounded chance to appear ONCE so the per-selector probes
+        # below don't all time out against a half-painted page.
+        try:
+            await page.wait_for_selector("input", state="attached", timeout=10000)
+        except Exception:
+            logger.warning("⚠️ No <input> appeared within 10s of page load — page may not have rendered")
         if should_take_screenshots():
             await page.screenshot(path="login_page_debug.png", full_page=True)
 
@@ -320,69 +499,7 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
 
         # ── Step 3.5: Uncheck all checkboxes BEFORE clicking submit ─────────────
         logger.info("🔲 Unchecking all checkboxes to avoid LinkedIn emails...")
-        try:
-            # Wait a moment for any dynamic checkboxes to load
-            await page.wait_for_timeout(500)
-
-            # Try multiple selector strategies for LinkedIn's "Keep me signed in" checkbox
-            checkbox_selectors = [
-                "input[type='checkbox']",
-                "input[name='rememberMe']",
-                "input[id*='remember']",
-                "input[id*='Remember']",
-                "[role='checkbox']",
-                ".checkbox__input",
-                ".remember-me-checkbox",
-            ]
-
-            checkboxes_found = []
-
-            for selector in checkbox_selectors:
-                try:
-                    elements = await page.query_selector_all(selector)
-                    if elements:
-                        checkboxes_found.extend(elements)
-                        logger.debug(f"Found {len(elements)} checkboxes with selector: {selector}")
-                except:
-                    pass
-
-            # Remove duplicates
-            unique_checkboxes = list(set(checkboxes_found))
-            logger.info(f"🔍 Found {len(unique_checkboxes)} total checkbox(es) on the page")
-
-            for i, checkbox in enumerate(unique_checkboxes):
-                try:
-                    # Force check visibility with a small wait
-                    await checkbox.wait_for(state="visible", timeout=1000)
-                    is_checked = await checkbox.is_checked()
-                    logger.info(f"Checkbox {i}: checked={is_checked}")
-
-                    if is_checked:
-                        # Try multiple methods to uncheck
-                        try:
-                            await checkbox.click(force=True)
-                            logger.info(f"✅ Unchecked checkbox {i} via click")
-                        except:
-                            try:
-                                await checkbox.uncheck(force=True)
-                                logger.info(f"✅ Unchecked checkbox {i} via uncheck")
-                            except:
-                                logger.warning(f"⚠️ Could not uncheck checkbox {i}")
-
-                            # Verify it's unchecked
-                            await page.wait_for_timeout(200)
-                            if await checkbox.is_checked():
-                                logger.warning(f"⚠️ Checkbox {i} still checked after uncheck attempt")
-                                # Try one more time with JavaScript
-                                try:
-                                    await checkbox.evaluate("el => el.checked = false")
-                                    logger.info(f"✅ Force unchecked checkbox {i} via JavaScript")
-                                except:
-                                    logger.warning(f"⚠️ JavaScript uncheck also failed for checkbox {i}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not process checkbox {i}: {str(e)}")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not uncheck checkboxes: {str(e)}")
+        await uncheck_all_checkboxes(page, context_label="login")
 
         # ── Step 4: Click Sign In ─────────────────────────────────────────────
         logger.info("🚀 Clicking submit button...")
@@ -393,12 +510,22 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
             submit_locator = await find_visible_button_by_text(page, "Sign in")
             logger.info(f"Dynamic locator found for Sign In button")
             await find_and_click_resilient(page, [submit_locator], "Sign In Button")
-        await random_idle_pause(2, 4)  # Wait for redirect + page load
 
-        # ── Step 5: Verify login result and determine status ───────────────────
+        # ── Step 5: Wait for the navigation to reach a classifiable state ──────
+        # (No fixed sleep: behind a slow proxy the /uas/login-submit POST +
+        # redirect chain takes longer than the old 2–4s pause, which used to
+        # misclassify an in-flight SUCCESS as "still on login page".)
+        await wait_for_login_outcome(page, timeout_ms=20000)
+        # Let rejection banners finish painting before we read them.
+        await page.wait_for_timeout(500)
+
         # URL may contain challenge tokens — only log it in debug mode.
         if should_log_debug():
             logger.debug(f"📍 Current URL after login attempt: {page.url}")
+
+        # Gather the on-page evidence once; it drives classification + logs.
+        login_error_detail = await extract_login_error(page)
+        captcha_present = await detect_human_challenge(page)
 
         # Check for checkpoint/bot detection
         if "/checkpoint" in page.url or "/checkpoint/challenge" in page.url:
@@ -408,8 +535,8 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
             if keep_alive:
                 # Keep session alive for verification (resources handed to caller)
                 handed_off_resources = (pw, browser, context, page, actual_user_agent)
-                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, handed_off_resources)
-            return (LinkedInSessionStatus.CHECKPOINT, None)
+                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, handed_off_resources, None)
+            return (LinkedInSessionStatus.CHECKPOINT, None, None)
 
         # Check for verification required
         if "/verify" in page.url or "verification" in page.url.lower():
@@ -419,15 +546,44 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
             if keep_alive:
                 # Keep session alive for verification (resources handed to caller)
                 handed_off_resources = (pw, browser, context, page, actual_user_agent)
-                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, handed_off_resources)
-            return (LinkedInSessionStatus.VERIFICATION_REQUIRED, None)
+                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, handed_off_resources, None)
+            return (LinkedInSessionStatus.VERIFICATION_REQUIRED, None, None)
 
         # Check if still on login page (failed login)
         if "/login" in page.url or "/uas/login" in page.url:
-            logger.error("❌ Login failed - still on login page")
+            # Bounced sign-in. Surface WHY — LinkedIn's rejection banner text
+            # (wrong email/password, throttling notice) or a rendered CAPTCHA
+            # — instead of the old bare "still on login page".
+            logger.error(
+                "❌ Login failed - bounced back to login page | url=%s rejection_banner=%s captcha=%s",
+                sanitized_url_path(page.url),
+                login_error_detail or "(none)",
+                captcha_present,
+            )
             if should_take_screenshots():
                 await page.screenshot(path="login_failure_diagnostics.png", full_page=True)
-            return (LinkedInSessionStatus.EXPIRED, None)
+                try:
+                    with open("login_failure_diagnostics.html", "w", encoding="utf-8") as fh:
+                        fh.write(await page.content())
+                except Exception:
+                    pass
+            if login_error_detail:
+                return (
+                    LinkedInSessionStatus.EXPIRED,
+                    None,
+                    f"LinkedIn rejected the sign-in: {login_error_detail}",
+                )
+            if captcha_present:
+                return (
+                    LinkedInSessionStatus.UNKNOWN,
+                    None,
+                    "LinkedIn presented a CAPTCHA on the login page - bot-detection flag on this IP/browser profile",
+                )
+            return (
+                LinkedInSessionStatus.EXPIRED,
+                None,
+                "LinkedIn did not accept the sign-in form (bad credentials, throttled IP, or an unrecognized login layout)",
+            )
 
         # Check if on feed page (successful login)
         if "/feed" in page.url:
@@ -435,13 +591,17 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
             # No explicit save needed: the session now lives in the persistent
             # profile directory; Chromium persisted it to disk automatically.
             handed_off_resources = (pw, browser, context, page, actual_user_agent)
-            return (LinkedInSessionStatus.VALID, handed_off_resources)
+            return (LinkedInSessionStatus.VALID, handed_off_resources, None)
 
         # Unknown state
-        logger.warning("⚠️ Unknown page state after login")
+        logger.warning(
+            "⚠️ Unknown page state after login | url=%s captcha=%s",
+            sanitized_url_path(page.url),
+            captcha_present,
+        )
         if should_take_screenshots():
             await page.screenshot(path="unknown_state.png", full_page=True)
-        return (LinkedInSessionStatus.UNKNOWN, None)
+        return (LinkedInSessionStatus.UNKNOWN, None, None)
 
     except Exception as e:
         if should_take_screenshots():
@@ -450,7 +610,7 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
             except Exception:
                 pass
         logger.error(f"❌ Automation Error Encountered: {str(e)}")
-        return (LinkedInSessionStatus.EXPIRED, None)
+        return (LinkedInSessionStatus.EXPIRED, None, None)
     finally:
         # Close everything UNLESS we handed live resources to the caller for
         # the keep_alive verification flow. (Also fixes the old leak where an

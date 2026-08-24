@@ -38,7 +38,12 @@ from schemas.linkedin import (
     VerificationCodeResponse,
     SessionVerificationResponse,
 )
-from automation.session import linkedin_login, LinkedInSessionStatus, verify_session
+from automation.session import (
+    linkedin_login,
+    LinkedInSessionStatus,
+    verify_session,
+    uncheck_all_checkboxes,
+)
 from automation.session_manager import session_manager
 from automation.browser import launch_persistent_browser, ensure_profile_dir
 from worker.profile_lock import (
@@ -154,7 +159,7 @@ async def add_linkedin_account(
 
         # Attempt login inside the persistent profile (keep_alive=True to
         # support the verification-code flow).
-        session_status, session_resources = await linkedin_login(
+        session_status, session_resources, login_error_detail = await linkedin_login(
             email=account.linkedin_email,
             password=payload.linkedin_password,
             account=account,
@@ -226,7 +231,12 @@ async def add_linkedin_account(
             shutil.rmtree(profile_dir, ignore_errors=True)
 
             error_message = "Login failed"
-            if session_status == LinkedInSessionStatus.CHECKPOINT:
+            if login_error_detail:
+                # LinkedIn's own on-page rejection text (or captcha note),
+                # scraped by the login flow — far more actionable than the
+                # generic messages below.
+                error_message = login_error_detail
+            elif session_status == LinkedInSessionStatus.CHECKPOINT:
                 error_message = "LinkedIn security checkpoint detected - possible bot detection"
             elif session_status == LinkedInSessionStatus.EXPIRED:
                 error_message = "Invalid credentials or login failed"
@@ -409,71 +419,12 @@ async def submit_verification_code(
         await code_input.fill(payload.verification_code)
         await random_idle_pause(0.5, 1.0)
 
-        # Uncheck any checkboxes (e.g., "Remember this device") before submitting
+        # Uncheck any checkboxes (e.g., "Remember this device") before submitting.
+        # Shared Locator-based helper — the old inline copy crashed on
+        # ElementHandle.is_visible(timeout=...) (ElementHandle accepts no
+        # timeout) and duplicated every box found by multiple selectors.
         logger.info("🔲 Unchecking any checkboxes before verification...")
-        try:
-            # Wait a moment for dynamic checkboxes to load
-            await page.wait_for_timeout(500)
-
-            # Try multiple selector strategies for LinkedIn's checkboxes
-            checkbox_selectors = [
-                "input[type='checkbox']",
-                "input[name='rememberMe']",
-                "input[id*='remember']",
-                "input[id*='Remember']",
-                "[role='checkbox']",
-                ".checkbox__input",
-                ".remember-me-checkbox",
-            ]
-
-            checkboxes_found = []
-
-            for selector in checkbox_selectors:
-                try:
-                    elements = await page.query_selector_all(selector)
-                    if elements:
-                        checkboxes_found.extend(elements)
-                        logger.debug(f"Found {len(elements)} checkboxes with selector: {selector}")
-                except:
-                    pass
-
-            # Remove duplicates
-            unique_checkboxes = list(set(checkboxes_found))
-            logger.info(f"🔍 Found {len(unique_checkboxes)} total checkbox(es) on verification page")
-
-            for i, checkbox in enumerate(unique_checkboxes):
-                try:
-                    # Force check visibility with timeout
-                    if await checkbox.is_visible(timeout=1000):
-                        is_checked = await checkbox.is_checked()
-                        logger.info(f"Checkbox {i}: checked={is_checked}")
-
-                        if is_checked:
-                            # Try multiple methods to uncheck
-                            try:
-                                await checkbox.click(force=True)
-                                logger.info(f"✅ Unchecked checkbox {i} via click")
-                            except:
-                                try:
-                                    await checkbox.uncheck(force=True)
-                                    logger.info(f"✅ Unchecked checkbox {i} via uncheck")
-                                except:
-                                    logger.warning(f"⚠️ Could not uncheck checkbox {i}")
-
-                            # Verify it's unchecked
-                            await page.wait_for_timeout(200)
-                            if await checkbox.is_checked():
-                                logger.warning(f"⚠️ Checkbox {i} still checked after uncheck attempt")
-                                # Try one more time with JavaScript
-                                try:
-                                    await checkbox.evaluate("el => el.checked = false")
-                                    logger.info(f"✅ Force unchecked checkbox {i} via JavaScript")
-                                except:
-                                    logger.warning(f"⚠️ JavaScript uncheck also failed for checkbox {i}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not process checkbox {i}: {str(e)}")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not uncheck checkboxes: {str(e)}")
+        await uncheck_all_checkboxes(page, context_label="verification")
 
         # Find and click submit button
         logger.info("🚀 Looking for submit button...")
@@ -780,7 +731,7 @@ async def verify_linkedin_session(
 
         password = decrypt_credential(account.encrypted_password)
 
-        session_status, session_resources = await linkedin_login(
+        session_status, session_resources, login_error_detail = await linkedin_login(
             email=account.linkedin_email,
             password=password,
             account=account,
@@ -864,7 +815,9 @@ async def verify_linkedin_session(
             await db.refresh(account)
 
             error_message = "Automatic relogin failed"
-            if session_status == LinkedInSessionStatus.EXPIRED:
+            if login_error_detail:
+                error_message = login_error_detail
+            elif session_status == LinkedInSessionStatus.EXPIRED:
                 error_message = "Invalid credentials during relogin"
             elif session_status == LinkedInSessionStatus.UNKNOWN:
                 error_message = "Unknown error during relogin"
