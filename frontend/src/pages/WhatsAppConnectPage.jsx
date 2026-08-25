@@ -36,6 +36,7 @@ export default function WhatsAppConnectPage() {
   const [showBrowserView, setShowBrowserView] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [captureFailed, setCaptureFailed] = useState(false);
+  const [connectError, setConnectError] = useState(null);
   const connectionStartedRef = useRef(false);
   const hideBrowserTimerRef = useRef(null);
   const prevStatus = useRef(null);
@@ -93,6 +94,7 @@ export default function WhatsAppConnectPage() {
   const handleConnect = async () => {
     try {
       setConnecting(true);
+      setConnectError(null);
       connectionStartedRef.current = true;
       setCaptureFailed(false);
       setShowBrowserView(true);
@@ -102,7 +104,9 @@ export default function WhatsAppConnectPage() {
     } catch (err) {
       connectionStartedRef.current = false;
       setShowBrowserView(false);
-      toast.error(getErrorMessage(err, 'Failed to start connection'));
+      const message = getErrorMessage(err, 'Failed to start connection');
+      setConnectError(message);
+      toast.error(message);
     } finally {
       setConnecting(false);
     }
@@ -266,6 +270,7 @@ export default function WhatsAppConnectPage() {
                   type="button"
                   onClick={handleConnect}
                   disabled={connecting}
+                  data-testid="whatsapp-connect"
                   title={
                     status === 'waiting_qr'
                       ? 'Already scanned but nothing happened? Restart to get a fresh QR code and a fresh watcher.'
@@ -294,7 +299,14 @@ export default function WhatsAppConnectPage() {
               </div>
             )}
 
-            {status === 'error' && (
+            {connectError && !connecting && (
+              <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300" data-testid="whatsapp-connect-error">
+                <p className="font-medium">Could not start WhatsApp</p>
+                <p className="mt-0.5 text-red-300/90">{connectError}</p>
+              </div>
+            )}
+
+            {status === 'error' && !connectError && (
               <p className="mt-3 text-sm text-red-300">
                 The last connection attempt failed. Press Connect WhatsApp to try
                 again — leftover browser locks from a previous session are cleared

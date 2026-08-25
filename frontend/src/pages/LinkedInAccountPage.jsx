@@ -415,7 +415,7 @@ export default function LinkedInAccountPage() {
             )}
 
             <div className="flex flex-wrap items-center gap-3 pt-1">
-              <button type="submit" className="btn-primary px-6" disabled={connecting}>
+              <button type="submit" className="btn-primary px-6" disabled={connecting} data-testid="linkedin-connect">
                 {connecting && <Spinner />}
                 {connecting ? 'Connecting…' : 'Connect LinkedIn account'}
               </button>

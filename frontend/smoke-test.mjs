@@ -391,7 +391,65 @@ const CASES = [
     path: '/app/account/whatsapp',
     storage: AUTH_TOKENS,
     api: { 'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }) },
-    mustContain: ['WhatsApp Connection', 'Connection status', 'Connect WhatsApp', 'Live Browser View'],
+    mustContain: ['WhatsApp Account', 'Connection status', 'Connect WhatsApp', 'Live Browser View'],
+  },
+  {
+    name: 'whatsapp connect 500 stays on the page with the backend error',
+    path: '/app/account/whatsapp',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
+      'POST /api/v1/whatsapp/connect': (res) =>
+        json(res, 500, { detail: 'Could not start Chromium for the WhatsApp browser view.' }),
+      'POST /api/v1/auth/refresh': (res) =>
+        json(res, 200, {
+          access_token: makeToken({
+            sub: 'owner@test.dev',
+            role: 'customer',
+            roles: ['customer'],
+            token_type: 'access',
+            exp: secondsNow() + 3600,
+          }),
+          refresh_token: 'fresh-refresh-token',
+          token_type: 'bearer',
+        }),
+    },
+    interact: async (window) => {
+      const waitFor = async (selector) => {
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          const element = window.document.querySelector(selector);
+          if (element) return element;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error(`Timed out waiting for ${selector}`);
+      };
+      (await waitFor('[data-testid="whatsapp-connect"]')).click();
+    },
+    mustContain: ['Could not start Chromium', 'WhatsApp Account', 'Connect WhatsApp'],
+    mustNotContain: ['Forgot password?', 'Session expired'],
+  },
+  {
+    name: 'whatsapp connect success starts the QR waiting state',
+    path: '/app/account/whatsapp',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
+      'POST /api/v1/whatsapp/connect': (res) =>
+        json(res, 200, { status: 'waiting_qr', message: 'Scan the WhatsApp Web QR code to connect.' }),
+    },
+    interact: async (window) => {
+      const waitFor = async (selector) => {
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          const element = window.document.querySelector(selector);
+          if (element) return element;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error(`Timed out waiting for ${selector}`);
+      };
+      (await waitFor('[data-testid="whatsapp-connect"]')).click();
+    },
+    mustContain: ['Waiting for QR', 'WhatsApp Account', 'scan the WhatsApp Web QR code'],
+    mustNotContain: ['Forgot password?', 'Session expired'],
   },
   {
     name: 'whatsapp connect page — connected account shows manage card with dates, scan and live chat',
@@ -407,7 +465,7 @@ const CASES = [
         }),
     },
     mustContain: [
-      'WhatsApp Connection',
+      'WhatsApp Account',
       'Added',
       'Jul 15, 2026',
       'Status details',
@@ -616,6 +674,49 @@ const CASES = [
     storage: AUTH_TOKENS,
     api: { 'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }) },
     mustContain: ['Connect your LinkedIn account', 'Connect LinkedIn account', 'LinkedIn password'],
+  },
+  {
+    name: 'linkedin connect 400 stays on the page with an actionable error',
+    path: '/app/account/linkedin',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }),
+      'POST /api/v1/linkedin/account': (res) =>
+        json(res, 400, { detail: 'LinkedIn rejected the sign-in: Wrong email or password.' }),
+      'POST /api/v1/auth/refresh': (res) =>
+        json(res, 200, {
+          access_token: makeToken({
+            sub: 'owner@test.dev',
+            role: 'customer',
+            roles: ['customer'],
+            token_type: 'access',
+            exp: secondsNow() + 3600,
+          }),
+          refresh_token: 'fresh-refresh-token',
+          token_type: 'bearer',
+        }),
+    },
+    interact: async (window) => {
+      const waitFor = async (selector) => {
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          const element = window.document.querySelector(selector);
+          if (element) return element;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error(`Timed out waiting for ${selector}`);
+      };
+      const setValue = (input, value) => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, value);
+        input.dispatchEvent(new window.Event('input', { bubbles: true }));
+        input.dispatchEvent(new window.Event('change', { bubbles: true }));
+      };
+      setValue(await waitFor('#li-email'), 'li@test.dev');
+      setValue(await waitFor('#li-password'), 'not-the-password');
+      (await waitFor('[data-testid="linkedin-connect"]')).click();
+    },
+    mustContain: ['Wrong email or password', 'Connect your LinkedIn account'],
+    mustNotContain: ['Forgot password?', 'Session expired'],
   },
   {
     name: 'linkedin account page — active account renders card + actions',

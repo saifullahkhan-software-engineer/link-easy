@@ -398,6 +398,35 @@ async def _check_2fa_page(page) -> bool:
     return False
 
 
+async def _ensure_browser_view_ready(browser_view, url: str, wait_seconds: int = 90) -> dict:
+    """Start the embedded browser and wait until it is running or failed.
+
+    ``ensure_started`` is idempotent and can return ``starting`` if another
+    coroutine already launched Chromium. The Connect button must not report
+    success until a QR frame can actually be streamed.
+    """
+    start_result = await browser_view.ensure_started(url)
+    if start_result.get("status") != "starting":
+        return start_result
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.5)
+        start_result = browser_view.snapshot()
+        if start_result.get("status") in ("running", "error"):
+            return start_result
+    snapshot = browser_view.snapshot()
+    if snapshot.get("status") == "starting":
+        return {
+            "status": "error",
+            "error": (
+                "The WhatsApp browser is still starting. Wait a few seconds "
+                "and press Connect WhatsApp again."
+            ),
+            "message": snapshot.get("message") or "",
+        }
+    return snapshot
+
+
 @router.post("/connect", response_model=WhatsAppConnectResponse)
 async def connect_whatsapp(
     current_user: User = Depends(get_current_user),
@@ -452,7 +481,7 @@ async def connect_whatsapp(
             "📱 Restarting stale WhatsApp connection (session id=%s) — no live watcher",
             existing.id,
         )
-        start_result = await browser_view.ensure_started(WHATSAPP_URL)
+        start_result = await _ensure_browser_view_ready(browser_view, WHATSAPP_URL)
         if start_result.get("status") == "error":
             existing.status = "error"
             existing.is_active = False
@@ -481,7 +510,7 @@ async def connect_whatsapp(
 
     # Launch (or reuse) the embedded headless browser on WhatsApp Web.
     logger.info("📱 Starting browser view for WhatsApp QR scan (session id=%s)", new_session.id)
-    start_result = await browser_view.ensure_started(WHATSAPP_URL)
+    start_result = await _ensure_browser_view_ready(browser_view, WHATSAPP_URL)
     if start_result.get("status") == "error":
         new_session.status = "error"
         new_session.is_active = False

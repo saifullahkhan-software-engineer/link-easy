@@ -248,30 +248,49 @@ async def random_idle_pause(min_sec: float = 2.0, max_sec: float = 8.0) -> None:
 
 
 # Per-candidate visibility probe for the resilient selector pools.
-# LinkedIn A/B-serves several login layouts, each with different markup; a
-# pool of ~16 candidate selectors means the FIRST one usually matches and the
-# rest should fail fast. The old path waited 3s for "attached" here plus up
-# to 5s for "visible" inside human_type()/human_click() — ~60-70s of pure
-# waiting per login attempt before self-healing ever ran, pushing
-# POST /api/v1/linkedin/account past 150s (reverse-proxy timeout territory).
-_SELECTOR_PROBE_TIMEOUT_MS = 1500
+# LinkedIn A/B-serves several login layouts, each with different markup. Once
+# the login form is already painted, a missing selector should fail instantly
+# (``is_visible()`` does not wait). A short wait is only used when the caller
+# expects the page to still be hydrating. The previous 1.5s-per-candidate
+# wait made a 16-selector email pool take ~24s even when the form was ready.
+_SELECTOR_PROBE_TIMEOUT_MS = 250
 
 
-async def _probe_visible(page: Page, selector: str) -> Locator | None:
+async def _probe_visible(
+    page: Page,
+    selector: str,
+    timeout_ms: int | None = None,
+) -> Locator | None:
     """
     Resolve a selector string to a VISIBLE Locator, quickly.
+
     Returns None (never raises) when the candidate doesn't match a visible
-    element within the probe timeout, or the selector is malformed.
+    element. If the form is already loaded, ``is_visible()`` is instant and
+    we do not sit out the probe timeout for every miss.
     """
+    wait_ms = _SELECTOR_PROBE_TIMEOUT_MS if timeout_ms is None else timeout_ms
     try:
         probe = page.locator(selector).first
-        await probe.wait_for(state="visible", timeout=_SELECTOR_PROBE_TIMEOUT_MS)
+        try:
+            if await probe.is_visible():
+                return probe
+        except Exception:
+            pass
+        if wait_ms <= 0:
+            return None
+        await probe.wait_for(state="visible", timeout=wait_ms)
         return probe
     except Exception:
         return None
 
 
-async def find_and_type_resilient(page: Page, selectors: list[str] | list[Locator] | list[ElementHandle], value: str, field_name: str) -> str | Locator:
+async def find_and_type_resilient(
+    page: Page,
+    selectors: list[str] | list[Locator] | list[ElementHandle],
+    value: str,
+    field_name: str,
+    probe_timeout_ms: int | None = None,
+) -> str | Locator:
     """
     Iterates through a list of potential selectors/locators for a field.
     Finds the active one, and types the value like a human.
@@ -284,7 +303,7 @@ async def find_and_type_resilient(page: Page, selectors: list[str] | list[Locato
                 # Only interact with candidates that resolve to a VISIBLE
                 # element — skips hidden duplicate forms LinkedIn renders
                 # for A/B tests, instead of timing out on them one by one.
-                probe = await _probe_visible(page, target)
+                probe = await _probe_visible(page, target, timeout_ms=probe_timeout_ms)
                 if probe is None:
                     continue
                 if should_log_debug():
@@ -320,7 +339,7 @@ async def find_and_click_resilient(page: Page, selectors: list[str] | list[Locat
                 # Only click candidates that resolve to a VISIBLE element
                 # (see _probe_visible for why a fast probe replaced the old
                 # 3s "attached" + 5s "visible" double-wait).
-                probe = await _probe_visible(page, target)
+                probe = await _probe_visible(page, target, timeout_ms=probe_timeout_ms)
                 if probe is None:
                     continue
                 if should_log_debug():
