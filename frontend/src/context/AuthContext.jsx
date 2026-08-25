@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   clearSession,
   getAccessToken,
+  getSessionExpiresAt,
   getUserEmail,
   getUserName,
   getUserRoles,
@@ -51,6 +52,24 @@ export function AuthProvider({ children }) {
   }, [navigate]);
 
   const dismissSessionExpired = useCallback(() => setSessionExpired(false), []);
+
+  // Enforce the absolute session deadline in the browser too. Without this
+  // timer, a user who leaves the app open with no API traffic could still see
+  // authenticated UI after the two-hour server deadline. The server remains
+  // authoritative; this is the immediate client-side logout path.
+  useEffect(() => {
+    const expiresAt = getSessionExpiresAt(token);
+    if (expiresAt === null) return undefined;
+
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) {
+      handleSessionExpired();
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(handleSessionExpired, remaining);
+    return () => window.clearTimeout(timeoutId);
+  }, [token, handleSessionExpired]);
 
   // Boot-time session validation — this runs on every page load / refresh:
   //  • access token still valid          → nothing to do; the page simply

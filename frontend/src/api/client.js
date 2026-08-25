@@ -5,6 +5,10 @@ export const TOKEN_KEYS = {
   REFRESH: 'le.refresh_token',
   EMAIL: 'le.user_email',
   NAME: 'le.user_name',
+  // Absolute deadline for the login session, copied from the signed access
+  // token as a convenience for the expiry timer. The backend remains the
+  // authority for every request.
+  SESSION_EXPIRES_AT: 'le.session_expires_at',
   // backward compat: also clear old rp.* keys on logout
   LEGACY_ACCESS: 'rp.access_token',
   LEGACY_REFRESH: 'rp.refresh_token',
@@ -42,7 +46,13 @@ export const getUserName = () => getWithLegacy(TOKEN_KEYS.NAME, TOKEN_KEYS.LEGAC
 
 export function storeSession({ access_token, refresh_token, email, name }) {
   try {
-    if (access_token) localStorage.setItem(TOKEN_KEYS.ACCESS, access_token);
+    if (access_token) {
+      localStorage.setItem(TOKEN_KEYS.ACCESS, access_token);
+      const sessionExpiresAt = getSessionExpiresAt(access_token);
+      if (sessionExpiresAt) {
+        localStorage.setItem(TOKEN_KEYS.SESSION_EXPIRES_AT, String(sessionExpiresAt));
+      }
+    }
     if (refresh_token) localStorage.setItem(TOKEN_KEYS.REFRESH, refresh_token);
     if (email) localStorage.setItem(TOKEN_KEYS.EMAIL, email);
     if (name) localStorage.setItem(TOKEN_KEYS.NAME, name);
@@ -92,6 +102,32 @@ export function getUserRoles() {
   }
   if (payload.role) return [String(payload.role).toLowerCase()];
   return ['customer'];
+}
+
+/**
+ * Return the absolute session deadline from the signed token in
+ * milliseconds since the Unix epoch. The localStorage fallback lets a tab
+ * keep its timer through a token refresh, while the backend still validates
+ * the signed claim on every request.
+ */
+export function getSessionExpiresAt(token = getAccessToken()) {
+  const payload = decodeToken(token);
+  const claim = payload?.session_expires_at;
+  if (typeof claim === 'number' && Number.isFinite(claim) && claim > 0) {
+    return claim * 1000;
+  }
+
+  try {
+    const stored = Number(localStorage.getItem(TOKEN_KEYS.SESSION_EXPIRES_AT));
+    return Number.isFinite(stored) && stored > 0 ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isSessionExpired(leewaySeconds = 0) {
+  const expiresAt = getSessionExpiresAt();
+  return expiresAt !== null && expiresAt <= Date.now() + leewaySeconds * 1000;
 }
 
 /**
@@ -161,6 +197,11 @@ export const SESSION_EXPIRED_EVENT = 'auth:session-expired';
 async function doRefresh() {
   const refreshToken = getRefreshToken();
   if (!refreshToken) throw new Error('No refresh token');
+  if (isSessionExpired()) {
+    const error = new Error('Session expired');
+    error.code = 'SESSION_EXPIRED';
+    throw error;
+  }
   // Plain axios call so we don't re-enter this interceptor.
   const { data } = await axios.post(
     `${api.defaults.baseURL}/auth/refresh`,
@@ -194,6 +235,7 @@ export function refreshSession() {
 export function isDefinitiveAuthFailure(error) {
   const status = error?.response?.status;
   if (status === 401 || status === 403) return true;
+  if (error?.code === 'SESSION_EXPIRED' || error?.message === 'Session expired') return true;
   if (!status && error?.message === 'No refresh token') return true;
   return false;
 }

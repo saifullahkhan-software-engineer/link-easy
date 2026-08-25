@@ -216,8 +216,11 @@ async def login(credentials: UserLogin, db: AsyncSession = Depends(get_db)):
         "role": primary_role(roles),
         "roles": roles,
     }
-    access_token = create_access_token(subject)
-    refresh_token = create_refresh_token(subject)
+    # Both tokens receive the same absolute deadline.  Refreshing the access
+    # token must never start a new two-hour session window.
+    session_expires_at = _utc_now() + timedelta(minutes=settings.SESSION_EXPIRE_MINUTES)
+    access_token = create_access_token(subject, session_expires_at)
+    refresh_token = create_refresh_token(subject, session_expires_at)
 
     return {
         "access_token": access_token,
@@ -323,6 +326,21 @@ async def refresh_token(data: RefreshTokenRequest, db: AsyncSession = Depends(ge
     except (JWTError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
+    # A refresh token is also bounded by the original login's absolute
+    # deadline.  Reject tokens without the claim so a refresh token issued by
+    # an older deployment cannot silently keep a session alive for its legacy
+    # seven-day lifetime.
+    try:
+        if token_data.session_expires_at is None:
+            raise ValueError("missing session expiry")
+        session_expires_at = datetime.fromtimestamp(
+            float(token_data.session_expires_at), tz=timezone.utc
+        )
+        if session_expires_at <= _utc_now():
+            raise ValueError("session expired")
+    except (TypeError, ValueError, OverflowError, OSError):
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
     result = await db.execute(select(User).where(User.email == token_data.sub))
     user = result.scalars().first()
 
@@ -339,7 +357,7 @@ async def refresh_token(data: RefreshTokenRequest, db: AsyncSession = Depends(ge
     }
 
     return {
-        "access_token": create_access_token(subject),
-        "refresh_token": create_refresh_token(subject),
+        "access_token": create_access_token(subject, session_expires_at),
+        "refresh_token": create_refresh_token(subject, session_expires_at),
         "token_type": "bearer",
     }
