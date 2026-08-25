@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from datetime import datetime, timezone
 import logging
 
 from fastapi import Depends, HTTPException, status
@@ -44,6 +45,19 @@ async def get_current_user_from_token(
         token_data = TokenPayload(**payload)
         if token_data.token_type != "access":
             raise JWTError("Invalid token type")
+
+        # ``exp`` is the lifetime of this individual access token.  The
+        # session claim is the absolute login deadline and protects against a
+        # token being minted with a longer lifetime than the session window.
+        if token_data.session_expires_at is not None:
+            try:
+                session_expires_at = datetime.fromtimestamp(
+                    float(token_data.session_expires_at), tz=timezone.utc
+                )
+            except (TypeError, ValueError, OverflowError, OSError) as exc:
+                raise JWTError("Invalid session expiry") from exc
+            if session_expires_at <= datetime.now(timezone.utc):
+                raise JWTError("Session expired")
     except (JWTError, ValidationError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

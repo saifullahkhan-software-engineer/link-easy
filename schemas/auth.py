@@ -77,3 +77,7 @@ class TokenPayload(BaseModel):
     # still validate; ``role`` remains the single highest-privilege role.
     roles: list[str] = []
     token_type: str | None = None
+    # Unix timestamp for the fixed, absolute login-session deadline. Optional
+    # only so access-token validation can produce a useful error for tokens
+    # minted before the session-timeout claim was introduced.
+    session_expires_at: int | float | None = None

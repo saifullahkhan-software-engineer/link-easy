@@ -33,7 +33,7 @@ export function SlowOperationNotice({ title, hint, elapsedSeconds }) {
             {elapsedSeconds}s elapsed
             {elapsedSeconds > 45
               ? ' — still working, LinkedIn can be slow on the free beta'
-              : ' — normal, connections usually take 30–40s'}
+              : ' — normal, connections usually take 30–40s (up to 2 minutes on a cold start)'}
           </p>
         )}
       </div>

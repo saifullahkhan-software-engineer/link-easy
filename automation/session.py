@@ -285,7 +285,7 @@ async def detect_human_challenge(page: Page) -> bool:
     return False
 
 
-async def wait_for_login_outcome(page: Page, timeout_ms: int = 20000) -> None:
+async def wait_for_login_outcome(page: Page, timeout_ms: int = 60000) -> None:
     """
     Poll (500ms cadence) until the post-submit navigation reaches a
     *classifiable* state:
@@ -515,7 +515,10 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
         # (No fixed sleep: behind a slow proxy the /uas/login-submit POST +
         # redirect chain takes longer than the old 2–4s pause, which used to
         # misclassify an in-flight SUCCESS as "still on login page".)
-        await wait_for_login_outcome(page, timeout_ms=20000)
+        # The API can be running behind a slow proxy/cold container. Give
+        # LinkedIn enough time to finish its redirect before treating a still
+        # visible login URL as a failed sign-in.
+        await wait_for_login_outcome(page, timeout_ms=60000)
         # Let rejection banners finish painting before we read them.
         await page.wait_for_timeout(500)
 

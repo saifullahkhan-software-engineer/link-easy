@@ -37,7 +37,14 @@ class Settings(BaseSettings):
     CREDENTIAL_ENCRYPTION_KEY: str = ""  # type: ignore
     ENCRYPTION_KEY: str | None = None  # legacy alias
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    # A login is one fixed session.  Access tokens can still be shorter-lived
+    # and refreshed, but neither token may keep the session alive past this
+    # absolute deadline.  Two hours is the product default.
+    SESSION_EXPIRE_MINUTES: int = 120
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
+    # Kept as an upper bound for backwards-compatible deployments that tune
+    # refresh-token lifetime.  ``SESSION_EXPIRE_MINUTES`` always wins when it
+    # is shorter (which it is by default).
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
     PASSWORD_RESET_URL: str

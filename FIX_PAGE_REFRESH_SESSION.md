@@ -7,9 +7,9 @@ auth state purely from *localStorage token presence* and never validated the
 session first:
 
 1. **Valid session** → on refresh, protected pages mounted and fired their
-   API calls immediately. With an expired access token (15-minute TTL) this
-   meant a burst of 401s before the interceptor quietly refreshed — any race
-   or page-level error handling surfaced as visible errors.
+   API calls immediately. With an expired access token this meant a burst of
+   401s before the interceptor quietly refreshed — any race or page-level
+   error handling surfaced as visible errors.
 2. **Invalid session** (both tokens expired) → pages mounted, every API call
    401'd, the refresh failed, and the user was thrown at `/login` by a hard
    `window.location.assign()` with **no explanation** — no popup, no message,
@@ -65,28 +65,41 @@ refresh endpoint or a missing refresh token counts as a dead session.
 Network/5xx failures keep the session intact — backend downtime no longer
 logs the user out.
 
-### 4. Provider order (`src/App.jsx`)
+### 4. Fixed two-hour session lifetime
+
+`SESSION_EXPIRE_MINUTES` defaults to `120`. Login puts the same
+`session_expires_at` claim on both JWTs. Access tokens and refreshed tokens are
+capped at that deadline, and the refresh endpoint preserves the original
+deadline instead of extending it. The frontend schedules the same deadline
+and clears local credentials, shows the expiry dialog, and routes to `/login`
+when the two hours are reached, even if the tab has no API traffic.
+
+### 5. Provider order (`src/App.jsx`)
 
 `BrowserRouter` now wraps `AuthProvider` so the auth layer can route to
 `/login` with `useNavigate` (soft navigation, popup preserved).
 
 ## Files changed
 
-- `frontend/src/api/client.js` — `isAccessTokenExpired()`, `refreshSession()`
-  single-flight, `isDefinitiveAuthFailure()`, `SESSION_EXPIRED_EVENT`
-  broadcast instead of hard redirect.
-- `frontend/src/context/AuthContext.jsx` — boot-time validation,
-  `isCheckingSession`, `sessionExpired` + popup wiring, interceptor event
-  listener.
+- `core/config.py`, `core/security.py`, `schemas/auth.py`, and
+  `api/v1/auth.py` / `api/dependencies.py` — the default two-hour absolute
+  session deadline and server-side enforcement.
+- `frontend/src/api/client.js` — `isAccessTokenExpired()`, the absolute
+  session-deadline helpers, `refreshSession()` single-flight,
+  `isDefinitiveAuthFailure()`, and `SESSION_EXPIRED_EVENT` broadcast instead
+  of hard redirect.
+- `frontend/src/context/AuthContext.jsx` — boot-time validation, the
+  two-hour expiry timer, `isCheckingSession`, `sessionExpired` + popup wiring,
+  and interceptor event listener.
 - `frontend/src/components/SessionExpiredDialog.jsx` — new login popup.
 - `frontend/src/components/ProtectedRoute.jsx` / `AdminRoute.jsx` —
   "Restoring your session…" gate while the check runs.
 - `frontend/src/App.jsx` — provider order swapped.
-- `frontend/smoke-test.mjs` — three regression cases.
+- `frontend/smoke-test.mjs` — four regression cases.
 
 ## Testing
 
-`npm run smoke` (build + jsdom smoke suite) — new cases:
+`npm run smoke` (build + jsdom smoke suite) — regression cases include:
 
 - **page refresh — expired access token is renewed silently, no errors, page
   renders** — expired token at boot → refresh succeeds → the accounts hub
@@ -94,6 +107,9 @@ logs the user out.
 - **page refresh — invalid session shows the login popup and lands on
   /login** — refresh returns 401 at boot → popup text *and* the login form
   both render.
+- **absolute two-hour session deadline** — an already-expired session claim
+  logs the user out even when the access token is still valid and no API call
+  is made.
 - **mid-session unrefreshable 401 — login popup and redirect to /login** —
   an API call 401s with a dead refresh token → interceptor path produces the
   same popup + redirect.
@@ -109,5 +125,7 @@ are unrelated pre-existing issues.)
   the local check only decides whether a refresh is worth attempting *before*
   rendering.
 - Tokens without an `exp` claim are treated as not-locally-expired and left
-  to the normal 401 → refresh flow (keeps legacy/dev tokens working).
+  to the normal 401 → refresh flow. Refresh tokens from before the absolute
+  session claim was introduced are rejected so they cannot bypass the
+  two-hour limit; those users simply log in again.
 - Manual logout, signup, and unauthenticated browsing are untouched.

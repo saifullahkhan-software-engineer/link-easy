@@ -64,6 +64,22 @@ const EXPIRED_SESSION = {
   'le.user_name': 'Test Owner',
 };
 
+// Access token is still valid, but the fixed login-session deadline has
+// passed. The browser must log out even if no API request is made.
+const ABSOLUTE_SESSION_EXPIRED = {
+  'le.access_token': makeToken({
+    sub: 'owner@test.dev',
+    role: 'customer',
+    roles: ['customer'],
+    token_type: 'access',
+    exp: secondsNow() + 3600,
+    session_expires_at: secondsNow() - 1,
+  }),
+  'le.refresh_token': 'stale-refresh-token',
+  'le.user_email': 'owner@test.dev',
+  'le.user_name': 'Test Owner',
+};
+
 const ADMIN_ME = { email: 'owner@test.dev', roles: ['admin', 'customer'], is_admin: true, admin_api_enforced: true };
 const CUSTOMER_ME = { email: 'owner@test.dev', roles: ['customer'], is_admin: false, admin_api_enforced: true };
 
@@ -326,6 +342,13 @@ const CASES = [
     api: {
       'POST /api/v1/auth/refresh': (res) => json(res, 401, { detail: 'Invalid refresh token' }),
     },
+    mustContain: ['Session expired', 'Please log in again', 'Log in', 'Forgot password?'],
+  },
+  {
+    name: 'absolute two-hour session deadline — browser logs out without an API request',
+    path: '/app/account',
+    storage: ABSOLUTE_SESSION_EXPIRED,
+    api: {},
     mustContain: ['Session expired', 'Please log in again', 'Log in', 'Forgot password?'],
   },
   {

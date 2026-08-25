@@ -112,17 +112,80 @@ def generate_5_digit_code() -> str:
 def generate_token_id() -> str:
     return secrets.token_urlsafe(32)
 
-def create_access_token(data: dict) -> str:
+def _session_expiry(
+    data: dict,
+    session_expires_at: datetime | None,
+    now: datetime,
+) -> datetime:
+    """Return the absolute deadline for a login session.
+
+    The deadline is deliberately shared by the access and refresh tokens.  A
+    refresh must carry the original deadline forward instead of starting a
+    new two-hour window, otherwise an active user could stay logged in forever
+    by continuously refreshing their access token.
+    """
+    if session_expires_at is None:
+        raw_deadline = data.get("session_expires_at")
+        if isinstance(raw_deadline, (int, float)):
+            session_expires_at = datetime.fromtimestamp(raw_deadline, tz=timezone.utc)
+
+    if session_expires_at is None:
+        session_expires_at = now + timedelta(minutes=settings.SESSION_EXPIRE_MINUTES)
+
+    if session_expires_at.tzinfo is None:
+        session_expires_at = session_expires_at.replace(tzinfo=timezone.utc)
+    return session_expires_at.astimezone(timezone.utc)
+
+
+def _token_expiry(
+    configured_expiry: datetime,
+    session_expires_at: datetime,
+) -> datetime:
+    """Never mint a token that outlives the absolute session deadline."""
+    return min(configured_expiry, session_expires_at)
+
+
+def create_access_token(
+    data: dict,
+    session_expires_at: datetime | None = None,
+) -> str:
+    now = datetime.now(timezone.utc)
     to_encode = data.copy()
-    # Note: Using timezone-aware or UTC dates depending on your settings library configuration
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "token_type": "access"})
+    session_deadline = _session_expiry(to_encode, session_expires_at, now)
+    expire = _token_expiry(
+        now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        session_deadline,
+    )
+    to_encode.update(
+        {
+            "iat": now,
+            "exp": expire,
+            "session_expires_at": int(session_deadline.timestamp()),
+            "token_type": "access",
+        }
+    )
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
-def create_refresh_token(data: dict) -> str:
+
+def create_refresh_token(
+    data: dict,
+    session_expires_at: datetime | None = None,
+) -> str:
+    now = datetime.now(timezone.utc)
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "token_type": "refresh"})
+    session_deadline = _session_expiry(to_encode, session_expires_at, now)
+    expire = _token_expiry(
+        now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+        session_deadline,
+    )
+    to_encode.update(
+        {
+            "iat": now,
+            "exp": expire,
+            "session_expires_at": int(session_deadline.timestamp()),
+            "token_type": "refresh",
+        }
+    )
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 def create_password_reset_token(email: str, token_id: str) -> str:

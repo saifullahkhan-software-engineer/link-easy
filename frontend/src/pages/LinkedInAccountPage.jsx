@@ -300,7 +300,7 @@ export default function LinkedInAccountPage() {
           <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
           <p className="mt-1 text-sm text-zinc-400">
             Connect the LinkedIn profile your campaigns will run from. Login happens in a real browser
-            on our side, so it may take 30–40 seconds to connect.
+            on our side, so it may take up to two minutes during a cold start.
           </p>
         </div>
         <Link to="/app/account" className="btn-secondary text-xs">
@@ -502,7 +502,7 @@ export default function LinkedInAccountPage() {
             <div className="mt-5">
               <SlowOperationNotice
                 title="Checking LinkedIn session…"
-                hint="Validating saved cookies and re-logging in if they expired — this may take 30–40 seconds."
+                hint="Validating saved cookies and re-logging in if they expired — this may take up to two minutes on a cold start."
                 elapsedSeconds={refreshElapsed}
               />
             </div>
