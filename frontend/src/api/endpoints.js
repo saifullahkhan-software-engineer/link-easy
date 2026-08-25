@@ -11,10 +11,11 @@ export const authApi = {
 };
 
 /* ------------------------------- linkedin -------------------------------- */
-// LinkedIn login/refresh calls drive real browser automation on the backend
-// and can take 30-60s — give them enough headroom without letting the user
-// stare at a spinner for too long when something goes wrong.
-const LINKEDIN_TIMEOUT = 90_000;
+// LinkedIn login/refresh calls drive real browser automation on the backend.
+// A cold browser start plus LinkedIn's slow redirect/verification flow can
+// take close to two minutes, so the client must not abort at the old 90s
+// limit while the API is still working.
+const LINKEDIN_TIMEOUT = 180_000;
 
 export const linkedinApi = {
   connect: (payload) => api.post('/linkedin/account', payload, { timeout: LINKEDIN_TIMEOUT }),
@@ -175,7 +176,10 @@ export const feedLeadsApi = {
 };
 
 /* ----------------------------- whatsapp scanner ---------------------------- */
-const WHATSAPP_TIMEOUT = 120_000;
+// WhatsApp Web may need a full navigation plus QR/chat-surface detection
+// during a cold container start. Keep the request alive for the same
+// headroom as LinkedIn so the client does not report a false connection error.
+const WHATSAPP_TIMEOUT = 180_000;
 
 export const whatsappApi = {
   connect: () =>

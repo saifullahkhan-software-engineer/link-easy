@@ -158,7 +158,7 @@ export default function WhatsAppConnectPage() {
             Link WhatsApp Web by scanning the QR code with your phone. The session is
             kept in a dedicated browser profile on our side, so it stays connected
             across restarts and scanner operations. Starting that browser may take
-            30–40 seconds (longer on a free-beta cold start), so the QR code can take a
+            up to two minutes (longer on a free-beta cold start), so the QR code can take a
             moment to appear.
           </p>
         </div>
@@ -284,7 +284,7 @@ export default function WhatsAppConnectPage() {
                 <Spinner className="mt-0.5 h-5 w-5 text-accent-400" />
                 <div>
                   <p className="text-sm font-medium text-accent-200">
-                    Starting a secure browser… this may take 30–40 seconds.
+                    Starting a secure browser… this may take up to two minutes.
                   </p>
                   <p className="mt-0.5 text-xs text-zinc-400">
                     The QR code will stream into the Live Browser View below once the browser

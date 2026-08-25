@@ -30,7 +30,7 @@ attempt ended with `❌ Login failed - still on login page` and
    `/uas/login-submit` POST + redirect chain regularly outlives that window,
    so a still-in-flight navigation was misclassified as "still on login page"
    → "Invalid credentials". Replaced with
-   `wait_for_login_outcome(page, timeout_ms=20000)` which polls until the URL
+   `wait_for_login_outcome(page, timeout_ms=60000)` which polls until the URL
    leaves the login surface **or** a rejection banner renders
    (`extract_login_error`), deadline-bounded.
 
@@ -46,7 +46,13 @@ attempt ended with `❌ Login failed - still on login page` and
    flow can only type a 6-digit code). It now returns UNKNOWN with an explicit
    "bot-detection flag on this IP/browser profile" message.
 
-5. **~130s of blind selector probing per attempt.** The resilient helpers
+5. **The client could abort before the API responded.** Production showed a
+   complete LinkedIn request taking about 97 seconds on a cold container,
+   while the frontend timeout was 90 seconds. The frontend LinkedIn and
+   WhatsApp automation timeouts are now 180 seconds, so a slow but healthy
+   browser startup is not reported as a network/connection error.
+
+6. **~130s of blind selector probing per attempt.** The resilient helpers
    (`find_and_type_resilient` / `find_and_click_resilient` in
    `automation/human.py`) now probe each candidate with a single fast
    *visible* check (1.5s) instead of 3s "attached" + 5s "visible" nested
