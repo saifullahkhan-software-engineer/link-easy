@@ -25,8 +25,12 @@ os.environ.setdefault("FROM_EMAIL", "test@example.com")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 from automation.session import (  # noqa: E402
+    LinkedInSessionStatus,
+    LoginPageSnapshot,
+    decide_login_outcome,
     detect_human_challenge,
     extract_login_error,
+    sanitize_exception_message,
     sanitized_url_path,
     uncheck_all_checkboxes,
     wait_for_login_outcome,
@@ -98,8 +102,15 @@ class FakeCheckboxPool:
 class FakePage:
     """Routes page.locator(selector) to canned fakes based on the selector."""
 
-    def __init__(self, url="https://www.linkedin.com/login", selector_map=None, boxes=None):
+    def __init__(
+        self,
+        url="https://www.linkedin.com/login",
+        selector_map=None,
+        boxes=None,
+        title="Sign in",
+    ):
         self.url = url
+        self.page_title = title
         self._selector_map = selector_map or {}
         self._boxes = boxes if boxes is not None else FakeCheckboxPool([])
         self.timeouts = 0
@@ -111,6 +122,9 @@ class FakePage:
         if fake is None:
             return _FirstOf(FakeSimpleLocator())
         return _FirstOf(fake)
+
+    async def title(self):
+        return self.page_title
 
     async def wait_for_timeout(self, ms):
         self.timeouts += 1
@@ -222,6 +236,45 @@ class UncheckAllCheckboxesTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_boxes_is_noop(self):
         page = FakePage(boxes=FakeCheckboxPool([]))
         await uncheck_all_checkboxes(page, context_label="test")  # must not raise
+
+
+class SelectorProbeLatencyTests(unittest.IsolatedAsyncioTestCase):
+    """Load automation/human.py by path so connect-action stubs cannot hide it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        path = os.path.join(os.path.dirname(__file__), "..", "automation", "human.py")
+        spec = importlib.util.spec_from_file_location("real_automation_human", path)
+        cls.human = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.human)
+
+    async def test_missing_selector_on_loaded_form_is_instant(self):
+        import time
+
+        class _Hidden:
+            async def is_visible(self):
+                return False
+
+            async def wait_for(self, **kwargs):
+                raise RuntimeError(f"should not wait when timeout is 0: {kwargs}")
+
+        class _Page:
+            def locator(self, _selector):
+                return type("F", (), {"first": _Hidden()})()
+
+        started = time.monotonic()
+        for _ in range(16):
+            result = await self.human._probe_visible(
+                _Page(), "input[type='email']", timeout_ms=0
+            )
+            self.assertIsNone(result)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.5, f"16 instant probes took {elapsed:.2f}s")
+
+    async def test_default_probe_timeout_is_at_most_250ms(self):
+        self.assertLessEqual(self.human._SELECTOR_PROBE_TIMEOUT_MS, 250)
 
 
 if __name__ == "__main__":

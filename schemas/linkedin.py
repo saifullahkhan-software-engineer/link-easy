@@ -19,8 +19,13 @@ from models.linkedin_account import LinkedInAccountStatus
 
 class LinkedInAccountCreate(BaseModel):
     """Payload to add a new LinkedIn account."""
-    owner_email : EmailStr = Field(
-        ..., description="The email address of the user who owns this LinkedIn account"
+    owner_email: EmailStr | None = Field(
+        default=None,
+        description=(
+            "Ignored when a LinkEasy session is present. Ownership is always "
+            "taken from the authenticated user so callers cannot attach an "
+            "account to someone else."
+        ),
     )
 
     linkedin_email: EmailStr = Field(

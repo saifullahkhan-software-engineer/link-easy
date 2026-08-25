@@ -11,6 +11,8 @@ is still live.
 import asyncio
 import logging
 import random
+import re
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 from urllib.parse import urlsplit
@@ -29,11 +31,15 @@ logger = get_logger(__name__)
 
 
 class LinkedInSessionStatus(str, Enum):
-    """LinkedIn account/session status after verification."""
+    """LinkedIn account/session status after verification or login."""
     VALID = "valid"  # Session is active and working
-    EXPIRED = "expired"  # Session expired, needs re-login
-    VERIFICATION_REQUIRED = "verification_required"  # ID verification needed
+    EXPIRED = "expired"  # Wrong credentials, or an already-linked session expired
+    VERIFICATION_REQUIRED = "verification_required"  # PIN / email / SMS code
     CHECKPOINT = "checkpoint"  # Security checkpoint/challenge
+    CAPTCHA = "captcha"  # Bot-detection challenge the code-entry flow cannot solve
+    THROTTLED = "throttled"  # Too many attempts / unusual activity
+    TIMEOUT = "timeout"  # Still in-flight or no terminal browser state
+    NETWORK_ERROR = "network_error"  # Page-load / navigation / transport failure
     UNKNOWN = "unknown"  # Unknown state
 
 
@@ -61,9 +67,11 @@ async def find_visible_input_by_type(page: Page, input_type: str) -> Locator:
     # Try using Playwright's get_by_role with textbox role
     try:
         if input_type == "email":
-            locator = page.get_by_role("textbox", name="email")
+            locator = page.get_by_role(
+                "textbox", name=re.compile(r"email|phone|username", re.I)
+            )
         elif input_type == "password":
-            locator = page.get_by_role("textbox", name="password")
+            locator = page.get_by_role("textbox", name=re.compile(r"password", re.I))
         else:
             locator = page.get_by_role("textbox")
 
@@ -213,6 +221,43 @@ LOGIN_TERMINAL_MARKERS = (
     "/mynetwork",
     "/onboarding",
     "/in/",
+    "/notifications",
+    "/messaging",
+    "/preload",
+)
+
+SUCCESS_URL_MARKERS = (
+    "/feed",
+    "/mynetwork",
+    "/onboarding",
+    "/in/",
+    "/notifications",
+    "/messaging",
+    "/preload",
+    "/jobs",
+)
+
+CHECKPOINT_URL_MARKERS = (
+    "/checkpoint",
+    "/challenge",
+    "/security-verification",
+    "/check/add-phone",
+    "/uas/consumer-email-challenge",
+    "/uas/ato-challenge",
+)
+
+VERIFICATION_URL_MARKERS = (
+    "/verify",
+    "verification",
+    "two-step",
+    "two_step",
+)
+
+NETWORK_FAILURE_MARKERS = (
+    "chrome-error://",
+    "chrome-untrusted://",
+    "about:neterror",
+    "edge://",
 )
 
 # LinkedIn's on-page rejection banners (wrong email / wrong password /
@@ -239,6 +284,75 @@ CAPTCHA_SELECTORS = (
     "div[data-captcha]",
 )
 
+LOGGED_IN_SELECTORS = (
+    "[data-control-name='nav.home']",
+    ".global-nav",
+    "#global-nav",
+    ".feed-identity-module",
+    "a[href*='/feed/']",
+    "[data-test-global-nav-link]",
+)
+
+CHECKPOINT_UI_SELECTORS = (
+    "input[autocomplete='one-time-code']",
+    "input[name='pin']",
+    "input[id*='verification']",
+    "#input__email_verification_pin",
+    "input[name='challengeId']",
+    "input[id*='challenge']",
+)
+
+LOGIN_FORM_SELECTORS = (
+    "input[type='password']",
+    "#password",
+    "#username",
+    "form.login__form",
+    "form[action*='login']",
+)
+
+THROTTLE_BANNER_HINTS = (
+    "too many",
+    "try again later",
+    "unusual activity",
+    "temporarily restricted",
+    "we've temporarily",
+    "we have temporarily",
+    "rate limit",
+)
+
+_SENSITIVE_QUERY_RE = re.compile(
+    r"([?&])(token|access_token|refresh_token|password|passwd|sessionid|li_at|code|otp)="
+    r"[^&\s#]+",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class LoginPageSnapshot:
+    """Browser evidence used to classify a LinkedIn login attempt.
+
+    Never includes passwords, cookies, or raw query strings.
+    """
+
+    url: str
+    title: str = ""
+    rejection_banner: Optional[str] = None
+    captcha: bool = False
+    logged_in_surface: bool = False
+    checkpoint_ui: bool = False
+    login_form_visible: bool = False
+    navigation_in_flight: bool = False
+    network_failure: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class LoginOutcome:
+    """Classified result of a LinkedIn login attempt."""
+
+    status: LinkedInSessionStatus
+    error_detail: Optional[str]
+    keep_session: bool
+
 
 def sanitized_url_path(url: str) -> str:
     """URL with query string stripped — safe to log (challenge tokens live in the query)."""
@@ -251,6 +365,160 @@ def sanitized_url_path(url: str) -> str:
         return f"{parts.scheme}://{parts.netloc}{parts.path}"
     except Exception:
         return "(unparseable URL)"
+
+
+def sanitize_exception_message(exc: BaseException | str) -> str:
+    """Redact tokens / query strings from a Playwright or network error."""
+    text = str(exc) if not isinstance(exc, str) else exc
+    text = _SENSITIVE_QUERY_RE.sub(r"\1\2=***", text)
+    text = re.sub(r"\?[^\s]+", "", text)
+    return text[:300]
+
+
+def _url_matches(url: str, markers: tuple[str, ...]) -> bool:
+    lowered = (url or "").lower()
+    return any(marker in lowered for marker in markers)
+
+
+def is_login_surface_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return "/login" in lowered or "/uas/login" in lowered
+
+
+def is_success_url(url: str) -> bool:
+    if is_login_surface_url(url):
+        return False
+    lowered = (url or "").lower()
+    if _url_matches(lowered, SUCCESS_URL_MARKERS):
+        return True
+    # Bare linkedin.com/ after a successful sign-in is a real terminal state.
+    try:
+        parts = urlsplit(url or "")
+    except Exception:
+        return False
+    host = (parts.netloc or "").lower()
+    path = (parts.path or "").rstrip("/")
+    return host.endswith("linkedin.com") and path in ("", "/")
+
+
+def is_checkpoint_url(url: str) -> bool:
+    return _url_matches(url, CHECKPOINT_URL_MARKERS)
+
+
+def is_verification_url(url: str) -> bool:
+    return _url_matches(url, VERIFICATION_URL_MARKERS)
+
+
+def is_network_failure_url(url: str) -> bool:
+    return _url_matches(url, NETWORK_FAILURE_MARKERS)
+
+
+def is_throttle_banner(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(hint in lowered for hint in THROTTLE_BANNER_HINTS)
+
+
+def decide_login_outcome(snapshot: LoginPageSnapshot) -> LoginOutcome:
+    """Classify a gathered page snapshot. Pure — safe to unit-test.
+
+    A still-visible ``/login`` URL without a rejection banner is NOT a
+    credential failure: LinkedIn's post-submit redirect is often slow, and
+    treating that as ``EXPIRED`` produced the production 400s.
+    """
+    url = snapshot.url or ""
+
+    if snapshot.network_failure or is_network_failure_url(url):
+        detail = snapshot.network_failure or (
+            "Could not load LinkedIn (network or page-load failure)."
+        )
+        return LoginOutcome(LinkedInSessionStatus.NETWORK_ERROR, detail, False)
+
+    if snapshot.logged_in_surface or is_success_url(url):
+        return LoginOutcome(LinkedInSessionStatus.VALID, None, True)
+
+    if snapshot.captcha:
+        return LoginOutcome(
+            LinkedInSessionStatus.CAPTCHA,
+            "LinkedIn presented a CAPTCHA on the login page — bot-detection "
+            "flag on this IP/browser profile. Complete the challenge in a "
+            "normal browser, then retry.",
+            False,
+        )
+
+    if is_verification_url(url) or (
+        snapshot.checkpoint_ui and not is_checkpoint_url(url)
+    ):
+        return LoginOutcome(
+            LinkedInSessionStatus.VERIFICATION_REQUIRED,
+            "LinkedIn requires a verification code before this login can finish.",
+            True,
+        )
+
+    if is_checkpoint_url(url) or snapshot.checkpoint_ui:
+        return LoginOutcome(
+            LinkedInSessionStatus.CHECKPOINT,
+            "LinkedIn opened a security checkpoint. Complete the challenge "
+            "to finish connecting this account.",
+            True,
+        )
+
+    if snapshot.rejection_banner:
+        banner = snapshot.rejection_banner
+        if is_throttle_banner(banner):
+            return LoginOutcome(
+                LinkedInSessionStatus.THROTTLED,
+                f"LinkedIn is throttling sign-in attempts: {banner}",
+                False,
+            )
+        return LoginOutcome(
+            LinkedInSessionStatus.EXPIRED,
+            f"LinkedIn rejected the sign-in: {banner}",
+            False,
+        )
+
+    if snapshot.navigation_in_flight or _url_matches(url, LOGIN_SUBMIT_MARKERS):
+        return LoginOutcome(
+            LinkedInSessionStatus.TIMEOUT,
+            "LinkedIn is still processing the sign-in (slow redirect). "
+            "This is not a confirmed credential error — please retry.",
+            False,
+        )
+
+    if is_login_surface_url(url):
+        if snapshot.login_form_visible:
+            return LoginOutcome(
+                LinkedInSessionStatus.TIMEOUT,
+                "LinkedIn stayed on the login page without accepting or "
+                "rejecting the form. This is usually a slow redirect, a "
+                "blocked request, or an unrecognized layout — not a "
+                "confirmed credential error.",
+                False,
+            )
+        return LoginOutcome(
+            LinkedInSessionStatus.TIMEOUT,
+            "LinkedIn left the login form but never reached a finished "
+            "page (feed, checkpoint, or error). The redirect was still "
+            "in flight — not a confirmed credential error.",
+            False,
+        )
+
+    return LoginOutcome(
+        LinkedInSessionStatus.UNKNOWN,
+        f"LinkedIn login ended on an unrecognized page ({sanitized_url_path(url)}).",
+        False,
+    )
+
+
+async def _any_visible(page: Page, selectors: tuple[str, ...]) -> bool:
+    for selector in selectors:
+        try:
+            if await page.locator(selector).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def extract_login_error(page: Page) -> Optional[str]:
@@ -276,47 +544,76 @@ async def extract_login_error(page: Page) -> Optional[str]:
 
 async def detect_human_challenge(page: Page) -> bool:
     """True when a CAPTCHA-type iframe block is visible on the current page."""
-    for selector in CAPTCHA_SELECTORS:
-        try:
-            if await page.locator(selector).first.is_visible():
-                return True
-        except Exception:
-            continue
-    return False
+    return await _any_visible(page, CAPTCHA_SELECTORS)
 
 
-async def wait_for_login_outcome(page: Page, timeout_ms: int = 60000) -> None:
+async def collect_login_snapshot(page: Page) -> LoginPageSnapshot:
+    """Read the current page once. Never logs or returns secrets."""
+    url = page.url or ""
+    title = ""
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    return LoginPageSnapshot(
+        url=url,
+        title=title or "",
+        rejection_banner=await extract_login_error(page),
+        captcha=await detect_human_challenge(page),
+        logged_in_surface=await _any_visible(page, LOGGED_IN_SELECTORS),
+        checkpoint_ui=await _any_visible(page, CHECKPOINT_UI_SELECTORS),
+        login_form_visible=await _any_visible(page, LOGIN_FORM_SELECTORS),
+        navigation_in_flight=_url_matches(url, LOGIN_SUBMIT_MARKERS),
+        network_failure=(
+            "LinkedIn page failed to load." if is_network_failure_url(url) else None
+        ),
+    )
+
+
+def login_state_is_terminal(snapshot: LoginPageSnapshot) -> bool:
+    """True when waiting longer cannot change the classification."""
+    if snapshot.network_failure or is_network_failure_url(snapshot.url):
+        return True
+    if snapshot.logged_in_surface or is_success_url(snapshot.url):
+        return True
+    if snapshot.captcha:
+        return True
+    if snapshot.rejection_banner:
+        return True
+    if is_checkpoint_url(snapshot.url) or is_verification_url(snapshot.url):
+        return True
+    if snapshot.checkpoint_ui:
+        return True
+    if snapshot.navigation_in_flight or _url_matches(snapshot.url, LOGIN_SUBMIT_MARKERS):
+        return False
+    if is_login_surface_url(snapshot.url):
+        return False
+    # Left /login via some other path — treat as terminal so the classifier
+    # can inspect the new surface.
+    return True
+
+
+async def wait_for_login_outcome(page: Page, timeout_ms: int = 45000) -> LoginPageSnapshot:
     """
-    Poll (500ms cadence) until the post-submit navigation reaches a
-    *classifiable* state:
+    Poll until the post-submit navigation reaches a *terminal* browser state.
 
-    - the URL left the login surface entirely (feed/checkpoint/...), or
-    - we are still on /login AND LinkedIn rendered a rejection banner
-      (that combination is a definitive wrong-credentials bounce), or
-    - the deadline expires (conservative fallback; caller classifies by URL).
+    Terminal means: logged-in surface, rejection banner, CAPTCHA, checkpoint /
+    verification UI, a non-login URL, or a network-error page. A still-visible
+    ``/login`` URL with no banner is *not* terminal — that is the slow
+    in-flight redirect that used to be misclassified as bad credentials.
 
-    This replaced a blind ``random_idle_pause(2, 4)`` after the click. Behind
-    a slow proxy the /uas/login-submit POST + redirect chain regularly takes
-    longer than 4s, so the old code mis-classified a still-in-flight
-    navigation as "still on login page" == "invalid credentials" (400).
+    The deadline is a safety bound so the request cannot hang past the
+    reverse-proxy timeout. The caller then classifies the last snapshot.
     """
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    snapshot = await collect_login_snapshot(page)
     while True:
-        url = (page.url or "").lower()
-        if any(marker in url for marker in LOGIN_SUBMIT_MARKERS):
-            # Form POST target still in flight — keep waiting.
-            pass
-        elif any(marker in url for marker in LOGIN_TERMINAL_MARKERS):
-            return
-        elif "/login" not in url:
-            # Left the login surface via some path we don't explicitly list.
-            return
-        elif await extract_login_error(page):
-            # Still on /login with a visible rejection banner == bounced.
-            return
+        if login_state_is_terminal(snapshot):
+            return snapshot
         if asyncio.get_running_loop().time() >= deadline:
-            return
-        await page.wait_for_timeout(500)
+            return snapshot
+        await page.wait_for_timeout(400)
+        snapshot = await collect_login_snapshot(page)
 
 
 async def uncheck_all_checkboxes(page: Page, context_label: str = "login") -> None:
@@ -476,25 +773,30 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
             raise ValueError(f"No input elements found on page. URL: {page.url}. Page may not have loaded correctly.")
 
         # ── Step 2: Fill in email ─────────────────────────────────────────────
-        logger.info("✍️ Typing email credential using fallback matching...")
+        # Prefer visible role/label locators (they match LinkedIn's current
+        # A/B layouts instantly). Only then walk the CSS fallback pool, and
+        # do it with a 0ms probe so a loaded form never burns 1.5s per miss.
+        logger.info("✍️ Typing email credential using role/label first...")
         try:
-            await find_and_type_resilient(page, USERNAME_SELECTORS, email, "Email Field")
-        except Exception:
-            logger.warning("Standard selectors failed, activating self-healing dynamic selector...")
             email_locator = await find_visible_input_by_type(page, "email")
-            logger.info(f"Dynamic locator found for Email field")
             await find_and_type_resilient(page, [email_locator], email, "Email Field")
+        except Exception:
+            logger.warning("Role/label email lookup missed — trying CSS fallback pool")
+            await find_and_type_resilient(
+                page, USERNAME_SELECTORS, email, "Email Field", probe_timeout_ms=0
+            )
         await random_idle_pause(0.5, 1.5)
 
         # ── Step 3: Fill in password ──────────────────────────────────────────
-        logger.info("🔑 Typing password credential using fallback matching...")
+        logger.info("🔑 Typing password credential using role/label first...")
         try:
-            await find_and_type_resilient(page, PASSWORD_SELECTORS, password, "Password Field")
-        except Exception:
-            logger.warning("Standard selectors failed, activating self-healing dynamic selector...")
             password_locator = await find_visible_input_by_type(page, "password")
-            logger.info(f"Dynamic locator found for Password field")
             await find_and_type_resilient(page, [password_locator], password, "Password Field")
+        except Exception:
+            logger.warning("Role/label password lookup missed — trying CSS fallback pool")
+            await find_and_type_resilient(
+                page, PASSWORD_SELECTORS, password, "Password Field", probe_timeout_ms=0
+            )
         await random_idle_pause(0.8, 2.0)
 
         # ── Step 3.5: Uncheck all checkboxes BEFORE clicking submit ─────────────
@@ -504,107 +806,69 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
         # ── Step 4: Click Sign In ─────────────────────────────────────────────
         logger.info("🚀 Clicking submit button...")
         try:
-            await find_and_click_resilient(page, SUBMIT_SELECTORS, "Sign In Button")
-        except Exception:
-            logger.warning("Standard selectors failed, activating self-healing dynamic selector...")
             submit_locator = await find_visible_button_by_text(page, "Sign in")
-            logger.info(f"Dynamic locator found for Sign In button")
             await find_and_click_resilient(page, [submit_locator], "Sign In Button")
-
-        # ── Step 5: Wait for the navigation to reach a classifiable state ──────
-        # (No fixed sleep: behind a slow proxy the /uas/login-submit POST +
-        # redirect chain takes longer than the old 2–4s pause, which used to
-        # misclassify an in-flight SUCCESS as "still on login page".)
-        # The API can be running behind a slow proxy/cold container. Give
-        # LinkedIn enough time to finish its redirect before treating a still
-        # visible login URL as a failed sign-in.
-        await wait_for_login_outcome(page, timeout_ms=60000)
-        # Let rejection banners finish painting before we read them.
-        await page.wait_for_timeout(500)
-
-        # URL may contain challenge tokens — only log it in debug mode.
-        if should_log_debug():
-            logger.debug(f"📍 Current URL after login attempt: {page.url}")
-
-        # Gather the on-page evidence once; it drives classification + logs.
-        login_error_detail = await extract_login_error(page)
-        captcha_present = await detect_human_challenge(page)
-
-        # Check for checkpoint/bot detection
-        if "/checkpoint" in page.url or "/checkpoint/challenge" in page.url:
-            logger.warning("⚠️ LinkedIn security checkpoint detected - possible bot detection")
-            if should_take_screenshots():
-                await page.screenshot(path="checkpoint_detected.png", full_page=True)
-            if keep_alive:
-                # Keep session alive for verification (resources handed to caller)
-                handed_off_resources = (pw, browser, context, page, actual_user_agent)
-                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, handed_off_resources, None)
-            return (LinkedInSessionStatus.CHECKPOINT, None, None)
-
-        # Check for verification required
-        if "/verify" in page.url or "verification" in page.url.lower():
-            logger.warning("⚠️ LinkedIn requires account verification")
-            if should_take_screenshots():
-                await page.screenshot(path="verification_required.png", full_page=True)
-            if keep_alive:
-                # Keep session alive for verification (resources handed to caller)
-                handed_off_resources = (pw, browser, context, page, actual_user_agent)
-                return (LinkedInSessionStatus.VERIFICATION_REQUIRED, handed_off_resources, None)
-            return (LinkedInSessionStatus.VERIFICATION_REQUIRED, None, None)
-
-        # Check if still on login page (failed login)
-        if "/login" in page.url or "/uas/login" in page.url:
-            # Bounced sign-in. Surface WHY — LinkedIn's rejection banner text
-            # (wrong email/password, throttling notice) or a rendered CAPTCHA
-            # — instead of the old bare "still on login page".
-            logger.error(
-                "❌ Login failed - bounced back to login page | url=%s rejection_banner=%s captcha=%s",
-                sanitized_url_path(page.url),
-                login_error_detail or "(none)",
-                captcha_present,
+        except Exception:
+            logger.warning("Role/label submit lookup missed — trying CSS fallback pool")
+            await find_and_click_resilient(
+                page, SUBMIT_SELECTORS, "Sign In Button", probe_timeout_ms=0
             )
-            if should_take_screenshots():
+
+        # ── Step 5: Wait for a real terminal browser state ────────────────────
+        snapshot = await wait_for_login_outcome(page, timeout_ms=45000)
+        outcome = decide_login_outcome(snapshot)
+
+        logger.info(
+            "📍 LinkedIn login outcome status=%s url=%s rejection_banner=%s captcha=%s "
+            "logged_in=%s checkpoint_ui=%s form_visible=%s in_flight=%s",
+            outcome.status.value,
+            sanitized_url_path(snapshot.url),
+            snapshot.rejection_banner or "(none)",
+            snapshot.captcha,
+            snapshot.logged_in_surface,
+            snapshot.checkpoint_ui,
+            snapshot.login_form_visible,
+            snapshot.navigation_in_flight,
+        )
+
+        if should_take_screenshots() and outcome.status != LinkedInSessionStatus.VALID:
+            try:
                 await page.screenshot(path="login_failure_diagnostics.png", full_page=True)
-                try:
-                    with open("login_failure_diagnostics.html", "w", encoding="utf-8") as fh:
-                        fh.write(await page.content())
-                except Exception:
-                    pass
-            if login_error_detail:
-                return (
-                    LinkedInSessionStatus.EXPIRED,
-                    None,
-                    f"LinkedIn rejected the sign-in: {login_error_detail}",
-                )
-            if captcha_present:
-                return (
-                    LinkedInSessionStatus.UNKNOWN,
-                    None,
-                    "LinkedIn presented a CAPTCHA on the login page - bot-detection flag on this IP/browser profile",
-                )
-            return (
-                LinkedInSessionStatus.EXPIRED,
-                None,
-                "LinkedIn did not accept the sign-in form (bad credentials, throttled IP, or an unrecognized login layout)",
-            )
+                with open("login_failure_diagnostics.html", "w", encoding="utf-8") as fh:
+                    fh.write(await page.content())
+            except Exception:
+                pass
 
-        # Check if on feed page (successful login)
-        if "/feed" in page.url:
-            logger.info("✅ Login successful - on feed page")
-            # No explicit save needed: the session now lives in the persistent
-            # profile directory; Chromium persisted it to disk automatically.
+        keep_browser = bool(
+            keep_alive
+            and outcome.keep_session
+            and outcome.status
+            in (
+                LinkedInSessionStatus.VALID,
+                LinkedInSessionStatus.VERIFICATION_REQUIRED,
+                LinkedInSessionStatus.CHECKPOINT,
+            )
+        )
+        if outcome.status == LinkedInSessionStatus.VALID:
             handed_off_resources = (pw, browser, context, page, actual_user_agent)
             return (LinkedInSessionStatus.VALID, handed_off_resources, None)
 
-        # Unknown state
-        logger.warning(
-            "⚠️ Unknown page state after login | url=%s captcha=%s",
-            sanitized_url_path(page.url),
-            captcha_present,
-        )
-        if should_take_screenshots():
-            await page.screenshot(path="unknown_state.png", full_page=True)
-        return (LinkedInSessionStatus.UNKNOWN, None, None)
+        if keep_browser:
+            # Checkpoint / verification: leave the persistent profile open so
+            # the user can submit the code. CAPTCHA is deliberately excluded.
+            handed_off_resources = (pw, browser, context, page, actual_user_agent)
+            status = (
+                LinkedInSessionStatus.VERIFICATION_REQUIRED
+                if outcome.status
+                in (
+                    LinkedInSessionStatus.CHECKPOINT,
+                    LinkedInSessionStatus.VERIFICATION_REQUIRED,
+                )
+                else outcome.status
+            )
+            return (status, handed_off_resources, outcome.error_detail)
+
+        return (outcome.status, None, outcome.error_detail)
 
     except Exception as e:
         if should_take_screenshots():
@@ -612,8 +876,30 @@ async def linkedin_login(email: str, password: str, account, keep_alive: bool = 
                 await page.screenshot(path=f"error_screenshot_{random.randint(1000, 9999)}.png", full_page=True)
             except Exception:
                 pass
-        logger.error(f"❌ Automation Error Encountered: {str(e)}")
-        return (LinkedInSessionStatus.EXPIRED, None, None)
+        detail = sanitize_exception_message(e)
+        logger.error("❌ Automation Error Encountered: %s", detail)
+        lowered = detail.lower()
+        networkish = any(
+            token in lowered
+            for token in (
+                "net::",
+                "timeout",
+                "timed out",
+                "err_connection",
+                "err_name_not_resolved",
+                "err_tunnel",
+                "err_proxy",
+                "err_internet",
+                "navigation",
+                "page.goto",
+            )
+        )
+        status = (
+            LinkedInSessionStatus.NETWORK_ERROR
+            if networkish
+            else LinkedInSessionStatus.UNKNOWN
+        )
+        return (status, None, detail or "LinkedIn login failed before a page state could be read.")
     finally:
         # Close everything UNLESS we handed live resources to the caller for
         # the keep_alive verification flow. (Also fixes the old leak where an

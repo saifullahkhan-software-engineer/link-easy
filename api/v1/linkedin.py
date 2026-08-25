@@ -44,6 +44,63 @@ from automation.session import (
     verify_session,
     uncheck_all_checkboxes,
 )
+
+
+def _owner_email_from_user(current_user: User) -> str:
+    return str(current_user.email).lower().strip()
+
+
+def _http_error_for_login_status(
+    session_status: LinkedInSessionStatus,
+    login_error_detail: str | None,
+) -> HTTPException:
+    """Map a LinkedIn login outcome to an actionable HTTP error.
+
+    Never returns 401/403 — those codes mean the *LinkEasy* session is dead
+    and would bounce the frontend to /login.
+    """
+    detail = login_error_detail
+    if session_status == LinkedInSessionStatus.EXPIRED:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail or "LinkedIn rejected the sign-in (wrong email or password).",
+        )
+    if session_status == LinkedInSessionStatus.CAPTCHA:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail
+            or "LinkedIn presented a CAPTCHA. Complete it in a normal browser, then retry.",
+        )
+    if session_status == LinkedInSessionStatus.THROTTLED:
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=detail or "LinkedIn is throttling sign-in attempts from this IP. Try again later.",
+        )
+    if session_status == LinkedInSessionStatus.TIMEOUT:
+        return HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=detail
+            or "LinkedIn did not finish signing in in time. This is not a confirmed credential error — please retry.",
+        )
+    if session_status == LinkedInSessionStatus.NETWORK_ERROR:
+        return HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=detail or "Could not reach LinkedIn. Check connectivity and retry.",
+        )
+    if session_status == LinkedInSessionStatus.CHECKPOINT:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail or "LinkedIn security checkpoint detected — possible bot detection.",
+        )
+    if session_status == LinkedInSessionStatus.VERIFICATION_REQUIRED:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail or "LinkedIn requires verification before this account can be connected.",
+        )
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=detail or "Unknown error during LinkedIn login.",
+    )
 from automation.session_manager import session_manager
 from automation.browser import launch_persistent_browser, ensure_profile_dir
 from worker.profile_lock import (
@@ -96,7 +153,7 @@ async def _get_account_or_404(
 async def add_linkedin_account(
     payload: LinkedInAccountCreate,
     db: AsyncSession = Depends(get_db),
-    # current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ) -> LinkedInAccountCreateResponse:
     """
     Accepts the user's LinkedIn email and password, encrypts the password
@@ -114,12 +171,15 @@ async def add_linkedin_account(
 
     encrypted = encrypt_credential(payload.linkedin_password)
     linkedin_email = str(payload.linkedin_email).lower().strip()
+    # Never trust a client-supplied owner_email — a caller could otherwise
+    # attach the LinkedIn account to a different LinkEasy user.
+    owner_email = _owner_email_from_user(current_user)
 
     # Fail fast on duplicates BEFORE launching any browser.
     existing = await db.execute(
         select(LinkedInAccount).where(
             (LinkedInAccount.linkedin_email == linkedin_email)
-            | (LinkedInAccount.owner_email == payload.owner_email)
+            | (LinkedInAccount.owner_email == owner_email)
         )
     )
     if existing.scalars().first() is not None:
@@ -132,7 +192,7 @@ async def add_linkedin_account(
     # profile directory. profile_dir is derived ONLY from the server-generated
     # UUID — never from the (user-supplied) email address.
     account = LinkedInAccount(
-        owner_email=payload.owner_email,
+        owner_email=owner_email,
         linkedin_email=linkedin_email,
         encrypted_password=encrypted,
         label=payload.label,
@@ -197,7 +257,7 @@ async def add_linkedin_account(
             # is submitted or the session expires.
             session_id = session_manager.create_session(
                 linkedin_email=account.linkedin_email,
-                owner_email=payload.owner_email,
+                owner_email=owner_email,
                 label=payload.label,
                 pw=pw,
                 browser=browser,
@@ -230,23 +290,7 @@ async def add_linkedin_account(
             await db.commit()
             shutil.rmtree(profile_dir, ignore_errors=True)
 
-            error_message = "Login failed"
-            if login_error_detail:
-                # LinkedIn's own on-page rejection text (or captcha note),
-                # scraped by the login flow — far more actionable than the
-                # generic messages below.
-                error_message = login_error_detail
-            elif session_status == LinkedInSessionStatus.CHECKPOINT:
-                error_message = "LinkedIn security checkpoint detected - possible bot detection"
-            elif session_status == LinkedInSessionStatus.EXPIRED:
-                error_message = "Invalid credentials or login failed"
-            elif session_status == LinkedInSessionStatus.UNKNOWN:
-                error_message = "Unknown error during login"
-
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=error_message
-            )
+            raise _http_error_for_login_status(session_status, login_error_detail)
 
     except HTTPException:
         raise
@@ -349,6 +393,7 @@ async def delete_linkedin_account(
 async def submit_verification_code(
     payload: VerificationCodeRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> VerificationCodeResponse:
     """
     Submits a verification code for a pending LinkedIn login session.
@@ -362,6 +407,14 @@ async def submit_verification_code(
     # Retrieve pending session
     pending_session = session_manager.get_session(payload.session_id)
     if not pending_session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found or expired. Please start a new login."
+        )
+    if (
+        getattr(pending_session, "owner_email", None)
+        and pending_session.owner_email != _owner_email_from_user(current_user)
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found or expired. Please start a new login."
@@ -572,8 +625,9 @@ async def admin_update_account_status(
     summary="Verify and refresh LinkedIn session",
 )
 async def verify_linkedin_session(
-    owner_email: str,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    owner_email: str | None = None,
 ) -> SessionVerificationResponse:
     """
     Verifies if the user's LinkedIn session is still active by opening the
@@ -588,8 +642,10 @@ async def verify_linkedin_session(
       encrypted_password).
     - If relogin fails: Returns FAILED status.
 
-    TEMPORARY: Uses owner_email query parameter to bypass auth for testing.
+    The optional ``owner_email`` query parameter is ignored — ownership is
+    always taken from the authenticated LinkEasy user.
     """
+    owner_email = _owner_email_from_user(current_user)
     logger.info("🔍 Starting LinkedIn session verification for user: %s", owner_email)
 
     # Get the user's LinkedIn account
