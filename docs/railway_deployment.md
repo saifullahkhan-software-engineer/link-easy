@@ -97,6 +97,8 @@ aborts at boot with a clear "not writable" error.
 | `SHUTDOWN_GRACE_SECONDS` | `25` | SIGTERM→SIGKILL window for Chromium cleanup. |
 | `ADMIN_API_ENFORCED` | `false` | Flip to `true` once admin roles are assigned. |
 | `WHATSAPP_FORWARD_DELAY_SECONDS` | `10` | Pacing between forwarded messages. |
+| `LINKEDIN_ENABLED` | `false` | LinkedIn automation is off by default — LinkedIn blocks sign-ins from datacenter IPs, so it needs one residential proxy per account. See [linkedin_availability.md](linkedin_availability.md). WhatsApp is unaffected. |
+| `LINKEDIN_DISABLED_MESSAGE` | see `core/config.py` | User-facing copy shown while LinkedIn is disabled. |
 
 ## Resources
 

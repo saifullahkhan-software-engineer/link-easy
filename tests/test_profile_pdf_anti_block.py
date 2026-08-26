@@ -91,21 +91,34 @@ def test_fastapi_smoke_for_new_routes():
 
     from main import app
 
+    from core.config import settings
+
     client = TestClient(app, raise_server_exceptions=False)
-    expected_401 = {
-        "GET  /api/v1/linkedin/live/status":                401,
-        "POST /api/v1/linkedin/live/start":                401,
-        "POST /api/v1/linkedin/live/stop":                 401,
-        "GET  /api/v1/linkedin/live/chats":                401,
-        "POST /api/v1/linkedin/live/chats/open":           401,
-        "POST /api/v1/linkedin/live/chats/close":          401,
-        "GET  /api/v1/linkedin/live/messages":             401,
-        "POST /api/v1/linkedin/live/messages/send":        401,
-        "POST /api/v1/linkedin/profile/scan":              401,
-    }
+
+    # Routes behind the LinkedIn availability flag. When LINKEDIN_ENABLED is
+    # false the gate is a route-level dependency, so it answers 503 *before*
+    # auth runs; when the flag is on, the usual 401 contract applies.
+    gated = [
+        "GET  /api/v1/linkedin/live/status",
+        "POST /api/v1/linkedin/live/start",
+        "GET  /api/v1/linkedin/live/chats",
+        "POST /api/v1/linkedin/live/chats/open",
+        "POST /api/v1/linkedin/live/chats/close",
+        "GET  /api/v1/linkedin/live/messages",
+        "POST /api/v1/linkedin/live/messages/send",
+        "POST /api/v1/linkedin/profile/scan",
+    ]
+    # /stop is deliberately never gated: a browser started while the flag was
+    # on must always be stoppable so its profile lock is released.
+    ungated = ["POST /api/v1/linkedin/live/stop"]
+
+    gated_expected = 401 if settings.LINKEDIN_ENABLED else 503
+    expected_status = {spec: gated_expected for spec in gated}
+    expected_status.update({spec: 401 for spec in ungated})
+
     # POST routes take JSON; supply empty payload so validators don't
     # intercept before auth.
-    for spec, expected in expected_401.items():
+    for spec, expected in expected_status.items():
         m, p = spec.split()
         url = p
         if m == "POST":

@@ -91,6 +91,35 @@ class Settings(BaseSettings):
     # Postgres-backed API rate limiting. Redis on this deployment is busy with
     # Celery job traffic, so limits live in the database instead.
     RATE_LIMIT_ENABLED: bool = True
+
+    # ── LinkedIn availability ────────────────────────────────────────────────
+    # LinkedIn automation is DISABLED by default because it is not viable from
+    # a datacenter IP. Driving the sign-in form (or reusing a session) from a
+    # hosted platform such as Railway makes LinkedIn serve a CAPTCHA or a
+    # /checkpoint/challenge on a large share of attempts, so accounts either
+    # fail to connect or get challenged mid-campaign. The fix is one sticky
+    # residential proxy per account (the LinkedInAccount.proxy_* columns,
+    # already read by automation/browser.py) — that costs money, so it is
+    # deferred until the product is monetised or has enough users to justify
+    # it.
+    #
+    # Until then the connect/verify endpoints return 503 with a clear
+    # explanation and the UI shows a "coming soon" notice instead of a form
+    # that cannot succeed. WhatsApp is unaffected and stays fully available.
+    #
+    # Flip to true (LINKEDIN_ENABLED=true) once proxies are provisioned — no
+    # code change required.
+    LINKEDIN_ENABLED: bool = False
+
+    # Shown to users wherever LinkedIn is gated. Overridable so the message can
+    # be retuned (e.g. with an ETA) without a redeploy.
+    LINKEDIN_DISABLED_MESSAGE: str = (
+        "LinkedIn automation is temporarily unavailable. LinkedIn blocks "
+        "sign-ins from datacenter IP addresses, so each account needs its own "
+        "residential proxy to run reliably. We're adding proxy support as the "
+        "product grows — WhatsApp automation is fully available in the "
+        "meantime."
+    )
     
     @property
     def cors_origins(self) -> list[str]:

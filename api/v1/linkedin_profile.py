@@ -10,6 +10,7 @@ from pydantic import BaseModel, HttpUrl
 
 from api.dependencies import get_current_user
 from api.rate_limit_deps import rate_limit
+from api.v1.linkedin import require_linkedin_enabled
 from core.logging_config import get_logger
 from models.user import User
 from services.linkedin_live_browser import linkedin_live_browser
@@ -17,7 +18,13 @@ from services.linkedin_profile_scraper import scrape_profile
 from services.profile_pdf import render_profile_pdf
 
 logger = get_logger(__name__)
-router = APIRouter(prefix="/api/v1/linkedin/profile", tags=["linkedin-profile"])
+# Profile scanning opens a LinkedIn browser session, so it is gated by the
+# same availability flag as account connect. Returns 503 while disabled.
+router = APIRouter(
+    prefix="/api/v1/linkedin/profile",
+    tags=["linkedin-profile"],
+    dependencies=[Depends(require_linkedin_enabled)],
+)
 
 
 class ProfileScanRequest(BaseModel):

@@ -1,5 +1,13 @@
 import api, { getAccessToken, API_BASE_URL } from './client';
 
+/* -------------------------------- features -------------------------------- */
+// Which optional features this deployment offers. LinkedIn is disabled until
+// residential proxies are in place (LinkedIn blocks datacenter IPs), so the UI
+// asks the backend rather than assuming.
+export const featuresApi = {
+  get: () => api.get('/features'),
+};
+
 /* ---------------------------------- auth --------------------------------- */
 export const authApi = {
   register: (payload) => api.post('/auth/register', payload),
@@ -19,12 +27,6 @@ const LINKEDIN_TIMEOUT = 180_000;
 
 export const linkedinApi = {
   connect: (payload) => api.post('/linkedin/account', payload, { timeout: LINKEDIN_TIMEOUT }),
-  // Connect by importing a session cookie the user copied from their own
-  // browser. Avoids the CAPTCHA that LinkedIn shows when the server drives
-  // the sign-in form from a datacenter IP. Payload:
-  //   { linkedin_email, session_cookie, label? }
-  connectWithCookie: (payload) =>
-    api.post('/linkedin/account/cookie', payload, { timeout: LINKEDIN_TIMEOUT }),
   getAccount: () => api.get('/linkedin/account'),
   updateAccount: (payload) => api.patch('/linkedin/account', payload),
   disconnect: () => api.delete('/linkedin/account'),

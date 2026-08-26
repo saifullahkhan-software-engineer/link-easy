@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
  
 from api.dependencies import get_current_user, get_db
+from api.v1.linkedin import require_linkedin_enabled
 from models.campaign import Campaign, CampaignStatus
 from models.lead import Lead, LeadSource, LeadStatus
 from models.user import User
@@ -130,7 +131,11 @@ async def get_campaign(
     return CampaignResponse.model_validate(campaign)
  
  
-@router.post("/{campaign_id}/start", status_code=200)
+@router.post(
+    "/{campaign_id}/start",
+    status_code=200,
+    dependencies=[Depends(require_linkedin_enabled)],
+)
 async def start_campaign(
     campaign_id: str,
     owner_email: str,
@@ -250,7 +255,11 @@ async def pause_campaign(
     return {"message": "Campaign paused"}
 
 
-@router.post("/{campaign_id}/restart", status_code=200)
+@router.post(
+    "/{campaign_id}/restart",
+    status_code=200,
+    dependencies=[Depends(require_linkedin_enabled)],
+)
 async def restart_campaign(
     campaign_id: str,
     owner_email: str,

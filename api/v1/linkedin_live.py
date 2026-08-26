@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from api.dependencies import get_current_user
+from api.v1.linkedin import require_linkedin_enabled
 from core.logging_config import get_logger
 from models.user import User
 from schemas.linkedin_live import (
@@ -22,7 +23,20 @@ from schemas.linkedin_live import (
 from services.linkedin_live_browser import DEFAULT_CHAT_LIMIT, linkedin_live_browser
 
 logger = get_logger(__name__)
-router = APIRouter(prefix="/api/v1/linkedin/live", tags=["linkedin-live"])
+# Every route here drives a Chromium session against linkedin.com, so the
+# whole router is gated behind the same availability flag as account connect
+# (see api/v1/linkedin.require_linkedin_enabled). Returns 503 while disabled.
+router = APIRouter(
+    prefix="/api/v1/linkedin/live",
+    tags=["linkedin-live"],
+    dependencies=[Depends(require_linkedin_enabled)],
+)
+
+# /stop is deliberately NOT gated: if the flag is switched off while a live
+# browser is still running, the owner must remain able to shut it down and
+# release the account's profile lock. A gate here would strand that Chromium
+# until its 30-minute lock TTL expired.
+stop_router = APIRouter(prefix="/api/v1/linkedin/live", tags=["linkedin-live"])
 
 
 def _ensure_running(current_user: User) -> None:
@@ -52,7 +66,7 @@ async def start_live(
     return response
 
 
-@router.post("/stop", response_model=LiveStartResponse)
+@stop_router.post("/stop", response_model=LiveStartResponse)
 async def stop_live(
     current_user: User = Depends(get_current_user),
 ) -> LiveStartResponse:
