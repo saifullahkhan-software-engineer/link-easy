@@ -10,7 +10,11 @@ from jose import jwt as jose_jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
-from api.dependencies import get_db, require_roles
+from api.dependencies import (
+    get_db,
+    require_roles,
+    SCHEDULED_JOBS_DISABLED_DETAIL,
+)
 from api.v1.auth import router as auth_router
 from api.v1.linkedin import router as linkedin_router
 from api.v1.users import router as users_router
@@ -260,6 +264,21 @@ async def feature_flags():
             "message": None if settings.LINKEDIN_ENABLED else settings.LINKEDIN_DISABLED_MESSAGE,
         },
         "whatsapp": {"enabled": True, "message": None},
+        # Timer-driven work (scheduled campaign steps, recurring feed/WhatsApp
+        # scans). Off on the hosted demo; on everywhere else.
+        "scheduled_jobs": {
+            "enabled": settings.scheduled_jobs_enabled,
+            "message": None if settings.scheduled_jobs_enabled
+            else SCHEDULED_JOBS_DISABLED_DETAIL,
+        },
+        # Hosted-demo banner. `notice` is null outside deployment mode, which
+        # is what the frontend keys off — the banner is shown ONLY when
+        # ENVIRONMENT=deployment.
+        "deployment": {
+            "is_demo": settings.is_deployment,
+            "notice": settings.deployment_notice,
+            "support_email": settings.SUPPORT_EMAIL,
+        },
     }
 
 

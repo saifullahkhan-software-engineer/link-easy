@@ -59,9 +59,39 @@ log() { printf '[start.sh] %s\n' "$*"; }
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
+# Capture whether the operator set RUN_BEAT explicitly BEFORE applying the
+# default below — once it is defaulted we can no longer tell the difference.
+if [ -n "${RUN_BEAT+x}" ]; then
+    RUN_BEAT_WAS_EXPLICIT=1
+else
+    RUN_BEAT_WAS_EXPLICIT=0
+fi
+
 RUN_WEB="${RUN_WEB:-1}"
 RUN_WORKER="${RUN_WORKER:-1}"
 RUN_BEAT="${RUN_BEAT:-1}"
+
+# ── Hosted-demo (ENVIRONMENT=deployment) ─────────────────────────────────────
+# On the public demo we do not run Celery Beat. Beat's three dispatchers fire
+# every 60s and each one can wake a ~500 MB Chromium with nobody watching; in
+# a free-tier container that also serves the API that means OOM-kills and
+# half-finished browser sessions. The Celery WORKER still runs, so everything
+# the user actually clicks — manual WhatsApp scans, connects, live chat —
+# still works. Only the unattended timers are removed.
+#
+# The backend enforces the same rule independently (settings.
+# scheduled_jobs_enabled clears beat_schedule and gates the "activate"
+# endpoints), so this is defence in depth, not the only guard.
+#
+# An explicit RUN_BEAT=1 still wins, for debugging the demo with schedules on.
+ENVIRONMENT_LOWER="$(printf '%s' "${ENVIRONMENT:-}" | tr '[:upper:]' '[:lower:]')"
+IS_DEPLOYMENT=0
+if [ "$ENVIRONMENT_LOWER" = "deployment" ]; then
+    IS_DEPLOYMENT=1
+    if [ "$RUN_BEAT_WAS_EXPLICIT" = "0" ]; then
+        RUN_BEAT=0
+    fi
+fi
 
 PORT="${PORT:-8000}"
 WEB_CONCURRENCY="${WEB_CONCURRENCY:-1}"
@@ -101,6 +131,19 @@ rm -f "$PROFILE_STORAGE_DIR/.writable" 2>/dev/null || true
 log "profiles     : $PROFILE_STORAGE_DIR (uid=$(id -u))"
 log "beat schedule: $CELERY_BEAT_SCHEDULE_FILE"
 log "processes    : web=$RUN_WEB worker=$RUN_WORKER beat=$RUN_BEAT"
+
+if [ "$IS_DEPLOYMENT" = "1" ]; then
+    log "ENVIRONMENT=deployment — hosted demo mode:"
+    if [ "$RUN_BEAT" = "1" ]; then
+        log "  * Beat is running because RUN_BEAT was set explicitly."
+    else
+        log "  * Celery Beat is DISABLED: no scheduled campaign steps, no"
+        log "    recurring feed/WhatsApp scans. Set RUN_BEAT=1 to override."
+    fi
+    log "  * The Celery worker still runs, so on-demand actions (manual scans,"
+    log "    connects, live chat) work normally."
+    log "  * LinkEasy is intended to run locally for the full feature set."
+fi
 
 if [ "$RUN_WEB" != "1" ] && [ "$RUN_WORKER" != "1" ] && [ "$RUN_BEAT" != "1" ]; then
     log "FATAL: RUN_WEB, RUN_WORKER and RUN_BEAT are all disabled — nothing to run."

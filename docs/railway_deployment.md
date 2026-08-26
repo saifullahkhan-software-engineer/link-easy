@@ -79,7 +79,7 @@ aborts at boot with a clear "not writable" error.
 | Variable | Value | Why |
 |---|---|---|
 | `PROFILE_STORAGE_DIR` | `/app/profiles` | Explicitly match the volume mount. |
-| `ENVIRONMENT` | `production` | |
+| `ENVIRONMENT` | `production` or `deployment` | `deployment` = public demo (no Beat, no recurring jobs, banner shown). See "Optional tuning". |
 | `PYTHONUNBUFFERED` | `1` | Logs appear immediately. |
 
 `PORT` is injected by Railway and honoured by `start.sh`; do not set it.
@@ -97,6 +97,9 @@ aborts at boot with a clear "not writable" error.
 | `SHUTDOWN_GRACE_SECONDS` | `25` | SIGTERM→SIGKILL window for Chromium cleanup. |
 | `ADMIN_API_ENFORCED` | `false` | Flip to `true` once admin roles are assigned. |
 | `WHATSAPP_FORWARD_DELAY_SECONDS` | `10` | Pacing between forwarded messages. |
+| `ENVIRONMENT` | `production` | Set to `deployment` on the public demo: skips Celery Beat, refuses to arm recurring jobs, and shows the "run it locally" banner. Any other value runs the full stack. See [running_locally.md](running_locally.md). |
+| `SCHEDULED_JOBS_ENABLED` | derived from `ENVIRONMENT` | Explicit override for timer-driven work. Unset = off in `deployment`, on elsewhere. |
+| `SUPPORT_EMAIL` | `saifullahkhanofficial1@gmail.com` | Contact address shown in the hosted-demo banner. |
 | `LINKEDIN_ENABLED` | `false` | LinkedIn automation is off by default — LinkedIn blocks sign-ins from datacenter IPs, so it needs one residential proxy per account. See [linkedin_availability.md](linkedin_availability.md). WhatsApp is unaffected. |
 | `LINKEDIN_DISABLED_MESSAGE` | see `core/config.py` | User-facing copy shown while LinkedIn is disabled. |
 

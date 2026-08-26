@@ -84,6 +84,14 @@ EXPOSE 8000
 # start.sh honours ${PORT} (Railway injects it) and can be narrowed with
 # RUN_WEB / RUN_WORKER / RUN_BEAT.
 #
+# Hosted demo: set ENVIRONMENT=deployment on the service. start.sh then skips
+# Celery Beat (no unattended timers on a free-tier box), the API clears the
+# Beat schedule and refuses to arm recurring jobs, and the UI shows the
+# "run it locally" banner. The Celery worker still runs, so on-demand actions
+# keep working. Any other ENVIRONMENT value — including the default
+# "production" — runs the full three-process stack exactly as before.
+#
 # docker-compose.yml is unaffected: its api / worker / beat services each
 # declare their own `command:`, which overrides this CMD.
+ENV ENVIRONMENT=production
 CMD ["/app/start.sh"]

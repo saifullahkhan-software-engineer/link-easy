@@ -5,6 +5,7 @@ import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import TagInput from '../components/feed/TagInput';
 import { Spinner } from '../components/Spinner';
+import SchedulingDisabledNotice from '../components/SchedulingDisabledNotice';
 
 function addPendingTags(tags, pending) {
   const next = [...tags];
@@ -85,6 +86,8 @@ export default function WhatsAppFilterCreatePage() {
           </p>
         </div>
       </div>
+
+      <SchedulingDisabledNotice className="mb-6" />
 
       <form onSubmit={handleSubmit} className="space-y-6 rounded-xl border border-surface-700 bg-surface-800 p-6">
         <div>

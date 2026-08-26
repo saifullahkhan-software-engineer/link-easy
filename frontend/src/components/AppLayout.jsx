@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useAdminAccess } from '../hooks/useAdminAccess';
 import { useFeatures } from '../hooks/useFeatures';
 import BetaBanner from './BetaBanner';
+import HostedDemoBanner from './HostedDemoBanner';
 
 /**
  * App module shell — the customer-facing product.
@@ -295,6 +296,7 @@ export default function AppLayout() {
 
       {/* Main content */}
       <main className="ml-64 min-w-0 flex-1 p-8">
+        <HostedDemoBanner />
         <BetaBanner />
         <Outlet />
       </main>

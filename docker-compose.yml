@@ -52,6 +52,9 @@ services:
       - PASSWORD_RESET_URL=http://localhost:5173/reset-password
       - BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
       - FROM_EMAIL=noreply@example.com
+      # Local/self-hosted runs use "production": every feature is on, Beat
+      # runs, and scheduled campaigns + recurring scans work. Only the public
+      # hosted demo sets ENVIRONMENT=deployment, which disables the timers.
       - ENVIRONMENT=production
       - PYTHONUNBUFFERED=1
     depends_on:

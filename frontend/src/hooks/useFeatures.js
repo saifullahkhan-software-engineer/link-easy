@@ -21,6 +21,12 @@ const FALLBACK = {
       'LinkedIn automation is temporarily unavailable while we add proxy support.',
   },
   whatsapp: { enabled: true, message: null },
+  // Assume scheduling works when we cannot reach the backend: hiding a
+  // working feature is worse than showing one that will return a clear 503.
+  scheduled_jobs: { enabled: true, message: null },
+  // Never claim to be the hosted demo on a failed fetch — a self-hosted user
+  // should not be told to "run it locally".
+  deployment: { is_demo: false, notice: null, support_email: null },
 };
 
 // Module-level cache — the flags cannot change without a backend restart, so
@@ -70,6 +76,15 @@ export function useFeatures() {
     loading,
     linkedinEnabled: Boolean(resolved?.linkedin?.enabled),
     linkedinMessage: resolved?.linkedin?.message || FALLBACK.linkedin.message,
+    // Timer-driven work. Defaults to true so an older backend that does not
+    // yet return this key keeps showing the scheduling UI.
+    scheduledJobsEnabled: resolved?.scheduled_jobs?.enabled !== false,
+    scheduledJobsMessage: resolved?.scheduled_jobs?.message || null,
+    // Hosted demo. The banner keys off isDemo, so it appears ONLY when the
+    // backend reports ENVIRONMENT=deployment.
+    isDemo: Boolean(resolved?.deployment?.is_demo),
+    deploymentNotice: resolved?.deployment?.notice || null,
+    supportEmail: resolved?.deployment?.support_email || null,
   };
 }
 
