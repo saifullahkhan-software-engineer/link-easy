@@ -57,6 +57,49 @@ class LinkedInAccountCreate(BaseModel):
         return v
 
 
+class LinkedInAccountCookieConnect(BaseModel):
+    """Payload to connect a LinkedIn account with an imported session cookie.
+
+    The user signs in to LinkedIn in their OWN browser and pastes the
+    resulting session cookie, so the server never submits the sign-in form —
+    which is what usually trips LinkedIn's CAPTCHA from a datacenter IP.
+    No password is transmitted or stored on this path.
+    """
+
+    linkedin_email: EmailStr = Field(
+        ...,
+        description=(
+            "The LinkedIn account the cookie belongs to. Used for labelling "
+            "and duplicate detection only — the cookie itself is what "
+            "authenticates."
+        ),
+    )
+    session_cookie: Annotated[
+        str,
+        Field(
+            ...,
+            min_length=20,
+            max_length=20_000,
+            description=(
+                "The li_at cookie value, a full 'name=value; ...' cookie "
+                "string, or a JSON cookie export. Transmitted over HTTPS and "
+                "written only into the account's browser profile."
+            ),
+        ),
+    ]
+    label: Annotated[
+        str | None,
+        Field(default=None, max_length=64, description="Optional human-readable label"),
+    ] = None
+
+    @field_validator("session_cookie")
+    @classmethod
+    def cookie_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Session cookie must not be empty")
+        return v
+
+
 class LinkedInAccountUpdate(BaseModel):
     """
     Payload to update an existing LinkedIn account.
@@ -102,6 +145,10 @@ class LinkedInAccountResponse(BaseModel):
     linkedin_email: EmailStr
     label: str | None
     status: LinkedInAccountStatus
+    # "password" or "cookie" — the UI uses this to explain that a cookie
+    # account cannot be auto-relogged-in and must be re-imported when its
+    # session expires.
+    auth_method: str = "password"
     created_at: datetime
     updated_at: datetime
 

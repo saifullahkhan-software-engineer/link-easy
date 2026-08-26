@@ -19,6 +19,12 @@ const LINKEDIN_TIMEOUT = 180_000;
 
 export const linkedinApi = {
   connect: (payload) => api.post('/linkedin/account', payload, { timeout: LINKEDIN_TIMEOUT }),
+  // Connect by importing a session cookie the user copied from their own
+  // browser. Avoids the CAPTCHA that LinkedIn shows when the server drives
+  // the sign-in form from a datacenter IP. Payload:
+  //   { linkedin_email, session_cookie, label? }
+  connectWithCookie: (payload) =>
+    api.post('/linkedin/account/cookie', payload, { timeout: LINKEDIN_TIMEOUT }),
   getAccount: () => api.get('/linkedin/account'),
   updateAccount: (payload) => api.patch('/linkedin/account', payload),
   disconnect: () => api.delete('/linkedin/account'),

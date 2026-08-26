@@ -35,6 +35,20 @@ class LinkedInAccountStatus(str, enum.Enum):
     SUSPENDED            = "suspended"
 
 
+class AuthMethod(str, enum.Enum):
+    """How a LinkedIn account's session was established.
+
+    PASSWORD — the server drove LinkedIn's sign-in form. Supports automatic
+        credential relogin when the session expires, but from a datacenter IP
+        the login itself frequently draws a CAPTCHA/checkpoint.
+    COOKIE   — the user signed in from their own browser and imported the
+        resulting ``li_at`` cookie. No password is stored, so an expired
+        session must be re-imported by the user rather than re-logged-in.
+    """
+    PASSWORD = "password"
+    COOKIE   = "cookie"
+
+
 class WarmupStage(str, enum.Enum):
     """
     Optional manual override for account warm-up pacing used by the rate
@@ -57,7 +71,15 @@ class LinkedInAccount(Base):
 
     owner_email = Column(String, ForeignKey("users.email", ondelete="CASCADE"))
     linkedin_email     = Column(String, nullable=False, unique=True, index=True)
-    encrypted_password = Column(String, nullable=False)
+    # NULL for cookie-imported accounts: the user pasted an already-signed-in
+    # session instead of credentials, so there is no password to encrypt.
+    # Those accounts cannot use the credential-relogin fallback.
+    encrypted_password = Column(String, nullable=True)
+    # How this account was connected: "password" (server drives LinkedIn's
+    # sign-in form) or "cookie" (li_at imported from the user's own browser,
+    # which avoids the CAPTCHA that datacenter-IP logins usually trigger).
+    auth_method        = Column(String, nullable=False, default=AuthMethod.PASSWORD.value,
+                                server_default=AuthMethod.PASSWORD.value)
     label              = Column(String, nullable=True)
     status             = Column(SAEnum(LinkedInAccountStatus, name="linkedin_account_status", create_type=False),
                                 nullable=False, default=LinkedInAccountStatus.PENDING_VERIFICATION)

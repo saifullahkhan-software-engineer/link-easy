@@ -25,10 +25,11 @@ from sqlalchemy.future import select
 
 from api.dependencies import get_current_user, get_db, require_roles
 from core.security import decrypt_credential, encrypt_credential
-from models.linkedin_account import LinkedInAccount, LinkedInAccountStatus
+from models.linkedin_account import AuthMethod, LinkedInAccount, LinkedInAccountStatus
 from models.roles import UserRole
 from models.user import User
 from schemas.linkedin import (
+    LinkedInAccountCookieConnect,
     LinkedInAccountCreate,
     LinkedInAccountDeleteResponse,
     LinkedInAccountResponse,
@@ -38,8 +39,10 @@ from schemas.linkedin import (
     VerificationCodeResponse,
     SessionVerificationResponse,
 )
+from automation.cookie_import import CookieImportError, parse_cookie_input
 from automation.session import (
     linkedin_login,
+    linkedin_login_with_cookies,
     LinkedInSessionStatus,
     verify_session,
     uncheck_all_checkboxes,
@@ -313,6 +316,153 @@ async def add_linkedin_account(
         release_profile_lock(lock)
 
 
+@router.post(
+    "/account/cookie",
+    response_model=LinkedInAccountCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Connect a LinkedIn account with an imported session cookie",
+)
+async def connect_linkedin_account_with_cookie(
+    payload: LinkedInAccountCookieConnect,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> LinkedInAccountCreateResponse:
+    """Connect LinkedIn by importing an existing browser session.
+
+    The user signs in to LinkedIn in their OWN browser — their own IP, their
+    own device — and pastes the resulting ``li_at`` cookie. We inject it into
+    the account's durable Chromium profile and confirm it lands on the feed.
+
+    Why: ``POST /account`` drives LinkedIn's real sign-in form from the
+    server. From a datacenter IP that very often returns a CAPTCHA or a
+    ``/checkpoint/challenge``, so the account can never be connected. This
+    path never submits the login form, so that whole class of failure
+    disappears.
+
+    Caveat: requests still egress from the server's IP, so LinkedIn may still
+    challenge a session that moved networks. A per-account sticky proxy
+    (``proxy_*`` columns) remains the complete fix.
+
+    No password is accepted or stored — ``encrypted_password`` stays NULL and
+    ``auth_method`` is ``cookie``, which disables the credential-relogin
+    fallback for this account.
+    """
+    linkedin_email = str(payload.linkedin_email).lower().strip()
+    owner_email = _owner_email_from_user(current_user)
+
+    # Parse BEFORE touching the database or launching a browser: a bad paste
+    # is by far the most likely failure and deserves an instant, clear error.
+    try:
+        cookies = parse_cookie_input(payload.session_cookie)
+    except CookieImportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+
+    existing = await db.execute(
+        select(LinkedInAccount).where(
+            (LinkedInAccount.linkedin_email == linkedin_email)
+            | (LinkedInAccount.owner_email == owner_email)
+        )
+    )
+    if existing.scalars().first() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A LinkedIn account is already connected to your profile",
+        )
+
+    account = LinkedInAccount(
+        owner_email=owner_email,
+        linkedin_email=linkedin_email,
+        encrypted_password=None,          # cookie import stores no password
+        auth_method=AuthMethod.COOKIE.value,
+        label=payload.label,
+        status=LinkedInAccountStatus.PENDING_VERIFICATION,
+    )
+    account.assign_profile_dir()
+    ensure_profile_dir(account)
+
+    db.add(account)
+    try:
+        await db.commit()
+        await db.refresh(account)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A LinkedIn account is already connected to your profile",
+        )
+
+    lock = None
+    try:
+        lock = acquire_profile_lock(account.id, blocking_timeout=0)
+
+        session_status, session_resources, error_detail = await linkedin_login_with_cookies(
+            cookies=cookies,
+            account=account,
+            keep_alive=False,
+        )
+        # Persist the fingerprint pinned at first launch (no-op afterwards).
+        await db.commit()
+
+        if session_status == LinkedInSessionStatus.VALID:
+            pw, browser, context, page, _user_agent = session_resources
+            await context.close()
+            await pw.stop()
+
+            account.status = LinkedInAccountStatus.ACTIVE
+            await db.commit()
+            await db.refresh(account)
+
+            logger.info(
+                "✅ LinkedIn account %s connected via cookie import", account.id
+            )
+            return LinkedInAccountCreateResponse(
+                status="LOGIN_SUCCESS",
+                session_id=None,
+                message="LinkedIn account connected using your imported session.",
+                account=LinkedInAccountResponse.model_validate(account),
+            )
+
+        # Anything else: the imported cookie is unusable. Remove the row and
+        # the profile dir so the user can simply paste a fresh cookie.
+        if session_resources:
+            pw, browser, context, page, _user_agent = session_resources
+            try:
+                await context.close()
+                await pw.stop()
+            except Exception:
+                logger.debug("Error closing browser after failed cookie import", exc_info=True)
+
+        profile_dir = account.profile_dir
+        await db.delete(account)
+        await db.commit()
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
+        raise _http_error_for_login_status(session_status, error_detail)
+
+    except HTTPException:
+        raise
+    except ProfileInUseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except Exception as exc:
+        logger.error("❌ Error during LinkedIn cookie import: %s", exc)
+        try:
+            await db.delete(account)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+        shutil.rmtree(account.profile_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not import the LinkedIn session: {exc}",
+        )
+    finally:
+        release_profile_lock(lock)
+
+
 @router.get(
     "/account",
     response_model=LinkedInAccountResponse,
@@ -350,6 +500,9 @@ async def update_linkedin_account(
 
     if payload.linkedin_password is not None:
         account.encrypted_password = encrypt_credential(payload.linkedin_password)
+        # Setting a password upgrades a cookie-imported account to the
+        # credential path, which re-enables the automatic relogin fallback.
+        account.auth_method = AuthMethod.PASSWORD.value
         # Reset status — credentials changed, need re-verification
         account.status = LinkedInAccountStatus.PENDING_VERIFICATION
 
@@ -772,6 +925,35 @@ async def verify_linkedin_session(
             )
 
         # Step 5: EXPIRED (or UNKNOWN) → credential-based relogin FALLBACK.
+        #
+        # Cookie-imported accounts have no password to fall back to: the user
+        # pasted an already-authenticated session instead of credentials.
+        # Ask them to re-import rather than crashing on decrypt(None).
+        if account.auth_method == AuthMethod.COOKIE.value or not account.encrypted_password:
+            logger.info(
+                "🍪 Session expired for cookie-imported account %s — re-import required",
+                account.id,
+            )
+            await context.close()
+            context = None
+            await pw.stop()
+            pw = None
+
+            account.status = LinkedInAccountStatus.FAILED
+            await db.commit()
+            await db.refresh(account)
+
+            return SessionVerificationResponse(
+                status="FAILED",
+                message=(
+                    "Your imported LinkedIn session has expired. Sign in to "
+                    "LinkedIn in your browser, copy a fresh li_at cookie and "
+                    "reconnect the account."
+                ),
+                account=LinkedInAccountResponse.model_validate(account),
+                requires_manual_verification=False,
+            )
+
         # This is the ONLY place encrypted_password is decrypted for an
         # already-linked account — normal campaign runs and the valid-session
         # path above never touch it. Relogin happens inside the SAME

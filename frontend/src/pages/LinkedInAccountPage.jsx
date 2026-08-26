@@ -121,6 +121,11 @@ export default function LinkedInAccountPage() {
   const [form, setForm] = useState({ linkedin_email: '', linkedin_password: '', label: '' });
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState(null);
+  // 'password' drives LinkedIn's sign-in form from our server; 'cookie' imports
+  // a session the user already created in their own browser. Cookie import
+  // avoids the CAPTCHA/checkpoint LinkedIn shows for datacenter logins.
+  const [connectMode, setConnectMode] = useState('password');
+  const [sessionCookie, setSessionCookie] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef(null);
 
@@ -206,6 +211,40 @@ export default function LinkedInAccountPage() {
       }
     } catch (err) {
       setConnectError(getErrorMessage(err, 'LinkedIn login failed.'));
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  /* ------------------------ connect with cookie ------------------------- */
+  async function connectWithCookie(e) {
+    e.preventDefault();
+    if (!ownerEmail) {
+      toast.error('Owner email missing — please log in again.');
+      return;
+    }
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const { data } = await linkedinApi.connectWithCookie({
+        linkedin_email: form.linkedin_email.trim(),
+        session_cookie: sessionCookie.trim(),
+        label: form.label.trim() || undefined,
+      });
+
+      if (data.status === 'LOGIN_SUCCESS') {
+        toast.success('LinkedIn connected using your imported session.');
+        setAccount(data.account);
+        setNotConnected(false);
+        setForm({ linkedin_email: '', linkedin_password: '', label: '' });
+        // Clear the cookie from component state as soon as it is applied —
+        // it is a live credential and does not belong in the DOM.
+        setSessionCookie('');
+      } else {
+        setConnectError(data.message || 'Unexpected response from the server.');
+      }
+    } catch (err) {
+      setConnectError(getErrorMessage(err, 'Could not import the LinkedIn session.'));
     } finally {
       setConnecting(false);
     }
@@ -355,6 +394,148 @@ export default function LinkedInAccountPage() {
             </div>
           )}
 
+          {/* Connect-method switch. Cookie import exists because LinkedIn
+              frequently CAPTCHAs a sign-in performed from a server IP. */}
+          <div className="mt-5 flex gap-2 rounded-lg bg-surface-800/60 p-1" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={connectMode === 'password'}
+              onClick={() => { setConnectMode('password'); setConnectError(null); }}
+              disabled={connecting}
+              className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition ${
+                connectMode === 'password'
+                  ? 'bg-accent-500/15 text-accent-200'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+              data-testid="linkedin-mode-password"
+            >
+              Email &amp; password
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={connectMode === 'cookie'}
+              onClick={() => { setConnectMode('cookie'); setConnectError(null); }}
+              disabled={connecting}
+              className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition ${
+                connectMode === 'cookie'
+                  ? 'bg-accent-500/15 text-accent-200'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+              data-testid="linkedin-mode-cookie"
+            >
+              Import session cookie
+              <span className="ml-1.5 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-emerald-300">
+                Fewer blocks
+              </span>
+            </button>
+          </div>
+
+          {connectMode === 'cookie' ? (
+            <form onSubmit={connectWithCookie} className="mt-5 space-y-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="input-label" htmlFor="li-cookie-email">LinkedIn email</label>
+                  <input
+                    id="li-cookie-email"
+                    type="email"
+                    className="input-field"
+                    value={form.linkedin_email}
+                    onChange={(e) => setForm((f) => ({ ...f, linkedin_email: e.target.value }))}
+                    placeholder="you@gmail.com"
+                    required
+                    disabled={connecting}
+                  />
+                </div>
+                <div>
+                  <label className="input-label" htmlFor="li-cookie-label">
+                    Label <span className="normal-case text-zinc-600">(optional)</span>
+                  </label>
+                  <input
+                    id="li-cookie-label"
+                    className="input-field"
+                    value={form.label}
+                    onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+                    placeholder="Work account"
+                    maxLength={64}
+                    disabled={connecting}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="input-label" htmlFor="li-cookie">
+                  li_at session cookie
+                </label>
+                <textarea
+                  id="li-cookie"
+                  className="input-field min-h-[90px] font-mono text-xs"
+                  value={sessionCookie}
+                  onChange={(e) => setSessionCookie(e.target.value)}
+                  placeholder="AQEDAT… — or paste a full cookie export (JSON)"
+                  required
+                  spellCheck={false}
+                  autoComplete="off"
+                  disabled={connecting}
+                  data-testid="linkedin-cookie-input"
+                />
+                <p className="mt-1 text-xs text-zinc-500">
+                  Paste just the <code className="text-zinc-400">li_at</code> value, a full
+                  {' '}<code className="text-zinc-400">name=value; …</code> cookie string, or a JSON
+                  cookie export — we detect the format automatically.
+                </p>
+              </div>
+
+              {connecting && (
+                <SlowOperationNotice
+                  title="Importing your LinkedIn session…"
+                  hint="We're opening a browser session with your cookie and checking that it lands on your feed. This usually takes 15–30 seconds."
+                  elapsedSeconds={elapsed}
+                />
+              )}
+
+              {connectError && !connecting && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                  <p className="font-medium">Import failed</p>
+                  <p className="mt-0.5 text-red-300/90">{connectError}</p>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                <button
+                  type="submit"
+                  className="btn-primary px-6"
+                  disabled={connecting}
+                  data-testid="linkedin-connect-cookie"
+                >
+                  {connecting && <Spinner />}
+                  {connecting ? 'Importing…' : 'Connect with session cookie'}
+                </button>
+                <span className="text-xs text-zinc-500">No password needed</span>
+              </div>
+
+              <div className="rounded-lg bg-surface-800/60 p-3 text-xs leading-relaxed text-zinc-400">
+                <p className="font-medium text-zinc-300">How to copy your li_at cookie</p>
+                <ol className="mt-1 list-decimal space-y-0.5 pl-4">
+                  <li>Sign in to linkedin.com in this browser as normal.</li>
+                  <li>Open DevTools (F12) → <span className="text-zinc-300">Application</span> tab.</li>
+                  <li>
+                    In the sidebar pick <span className="text-zinc-300">Cookies → https://www.linkedin.com</span>.
+                  </li>
+                  <li>
+                    Find the row named <code className="text-zinc-300">li_at</code> and copy its
+                    {' '}<span className="text-zinc-300">Value</span>.
+                  </li>
+                </ol>
+                <p className="mt-2 text-zinc-500">
+                  Because you sign in yourself, LinkedIn sees a normal login from your own device —
+                  this avoids the security check that often blocks server-side logins. Keep that
+                  browser signed in; logging out there ends this session too.
+                </p>
+              </div>
+            </form>
+          ) : (
           <form onSubmit={connect} className="mt-5 space-y-4">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
@@ -431,6 +612,7 @@ export default function LinkedInAccountPage() {
               </ul>
             </div>
           </form>
+          )}
         </div>
       ) : (
         /* --------------------------- account card --------------------------- */

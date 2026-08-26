@@ -1026,3 +1026,140 @@ async def verify_session(page: Page) -> SessionVerificationResult:
                     url=page.url,
                     message="Could not determine session status - unknown page state"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Cookie-based session import (no password, no sign-in form)
+# ---------------------------------------------------------------------------
+
+
+async def linkedin_login_with_cookies(
+    cookies: list[dict],
+    account,
+    keep_alive: bool = False,
+) -> tuple[LinkedInSessionStatus, any, Optional[str]]:
+    """Adopt an existing LinkedIn session by injecting its cookies.
+
+    This is the datacenter-IP alternative to ``linkedin_login``. Instead of
+    driving LinkedIn's sign-in form from the server — which from a hosted IP
+    very often returns a CAPTCHA or ``/checkpoint/challenge`` — the user signs
+    in from their own browser and hands us the resulting ``li_at`` cookie.
+    No password is submitted, and no password needs to be stored.
+
+    The cookies are written into the account's DURABLE profile directory, so
+    Chromium persists them to disk exactly like a real login: later campaign
+    sessions, feed scrolls and verification runs just reopen the profile.
+
+    Note this does not disguise the egress IP. LinkedIn can still challenge a
+    session that was created on a residential connection and is then used from
+    a datacenter, so a per-account sticky proxy remains the real fix.
+
+    Mirrors ``linkedin_login``'s return contract so callers can treat the two
+    paths identically.
+
+    Args:
+        cookies: Playwright cookie dicts from
+            ``automation.cookie_import.parse_cookie_input``.
+        account: LinkedInAccount whose ``profile_dir`` receives the session.
+        keep_alive: When True, hand the live browser back to the caller on a
+            checkpoint so the existing verification-code flow can drive it.
+
+    Returns:
+        (LinkedInSessionStatus, session_resources or None, error_detail or None)
+    """
+    pw, browser, context, page = await launch_persistent_browser(account, headless=True)
+    actual_user_agent = account.user_agent
+
+    # Set to the resource tuple whenever we hand the LIVE browser back to the
+    # caller (VALID, or a checkpoint under keep_alive). While it is None the
+    # finally block owns the browser and must close it, so no code path can
+    # leak a Chromium process holding the account's profile lock.
+    handed_off_resources = None
+
+    try:
+        logger.info(
+            "🍪 Injecting %d LinkedIn cookie(s) into profile %s",
+            len(cookies),
+            account.profile_dir,
+        )
+        # Start from a clean slate: a stale li_at left over from an earlier
+        # import would otherwise win and the user would see the OLD account.
+        try:
+            await context.clear_cookies()
+        except Exception:
+            logger.debug("Could not clear existing cookies (continuing)", exc_info=True)
+
+        await context.add_cookies(cookies)
+
+        # verify_session() navigates to /feed and classifies the outcome —
+        # reuse it so cookie import and password login report identically.
+        result = await verify_session(page)
+        logger.info(
+            "🍪 Cookie import verification: %s — %s",
+            result.status.value,
+            result.message,
+        )
+
+        if result.status == LinkedInSessionStatus.VALID:
+            handed_off_resources = (pw, browser, context, page, actual_user_agent)
+            return LinkedInSessionStatus.VALID, handed_off_resources, None
+
+        # An imported cookie that lands on /login was already dead when it was
+        # copied (or was revoked in the meantime). Say so precisely — "wrong
+        # password" would be nonsense here since no password was used.
+        if result.status == LinkedInSessionStatus.EXPIRED:
+            return (
+                LinkedInSessionStatus.EXPIRED,
+                None,
+                "LinkedIn rejected the imported session cookie. It has expired or "
+                "was revoked — sign in to LinkedIn again in your browser, copy a "
+                "fresh li_at cookie and retry. Staying signed in on that browser "
+                "keeps the session alive longer.",
+            )
+
+        if result.status in (
+            LinkedInSessionStatus.CHECKPOINT,
+            LinkedInSessionStatus.VERIFICATION_REQUIRED,
+        ):
+            detail = (
+                "LinkedIn asked this session to re-verify from our server. This "
+                "usually means it noticed the session moved to a different "
+                "network. Complete the challenge, or assign this account a "
+                "sticky proxy so it always browses from one IP."
+            )
+            if keep_alive:
+                handed_off_resources = (pw, browser, context, page, actual_user_agent)
+                return (
+                    LinkedInSessionStatus.VERIFICATION_REQUIRED,
+                    handed_off_resources,
+                    detail,
+                )
+            return result.status, None, detail
+
+        return (
+            result.status,
+            None,
+            f"Could not confirm the imported session: {result.message}",
+        )
+
+    except Exception as exc:
+        logger.error("❌ Cookie import failed: %s", exc, exc_info=True)
+        return (
+            LinkedInSessionStatus.UNKNOWN,
+            None,
+            f"Could not apply the session cookie: {exc}",
+        )
+
+    finally:
+        # Close the browser unless it was handed to the caller. The cookies
+        # are already flushed to the profile directory on disk by Chromium, so
+        # closing here never loses the imported session.
+        if handed_off_resources is None:
+            try:
+                await context.close()
+            except Exception:
+                logger.debug("Error closing context after cookie import", exc_info=True)
+            try:
+                await pw.stop()
+            except Exception:
+                logger.debug("Error stopping playwright after cookie import", exc_info=True)
