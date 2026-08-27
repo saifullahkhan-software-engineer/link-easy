@@ -2,7 +2,9 @@ import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
 import { useAdminAccess } from '../hooks/useAdminAccess';
+import { useFeatures } from '../hooks/useFeatures';
 import BetaBanner from './BetaBanner';
+import HostedDemoBanner from './HostedDemoBanner';
 
 /**
  * App module shell — the customer-facing product.
@@ -83,6 +85,7 @@ const linkedinGroup = {
     {
       to: '/app/linkedin-live',
       label: 'LinkedIn Live Chat',
+      needsLinkedIn: true,
       icon: (
         <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path
@@ -96,6 +99,7 @@ const linkedinGroup = {
     {
       to: '/app/linkedin-profile',
       label: 'Profile Scan (PDF)',
+      needsLinkedIn: true,
       icon: (
         <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path
@@ -153,6 +157,7 @@ const whatsappGroup = {
 export default function AppLayout() {
   const { email, name, logout } = useAuth();
   const { canSeeAdmin } = useAdminAccess();
+  const { linkedinEnabled } = useFeatures();
   const navigate = useNavigate();
 
   function handleLogout() {
@@ -219,7 +224,18 @@ export default function AppLayout() {
                     }
                   >
                     <span className="h-5 w-5 shrink-0 text-zinc-600">•</span>
-                    {item.label}
+                    <span className="flex-1">{item.label}</span>
+                    {/* LinkedIn-only tools stay clickable while the feature is
+                        paused — the page explains why — but are badged so the
+                        state is obvious from the sidebar. */}
+                    {item.needsLinkedIn && !linkedinEnabled && (
+                      <span
+                        title="Paused — needs proxy setup"
+                        className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300"
+                      >
+                        Paused
+                      </span>
+                    )}
                   </NavLink>
                 ))}
               </div>
@@ -280,6 +296,7 @@ export default function AppLayout() {
 
       {/* Main content */}
       <main className="ml-64 min-w-0 flex-1 p-8">
+        <HostedDemoBanner />
         <BetaBanner />
         <Outlet />
       </main>

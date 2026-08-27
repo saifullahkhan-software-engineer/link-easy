@@ -10,7 +10,11 @@ from jose import jwt as jose_jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
-from api.dependencies import get_db, require_roles
+from api.dependencies import (
+    get_db,
+    require_roles,
+    SCHEDULED_JOBS_DISABLED_DETAIL,
+)
 from api.v1.auth import router as auth_router
 from api.v1.linkedin import router as linkedin_router
 from api.v1.users import router as users_router
@@ -23,6 +27,7 @@ from api.v1.feed_scroll import router as feed_scroll_router
 from api.v1.whatsapp_scanner import router as whatsapp_scanner_router
 from api.v1.whatsapp_live import router as whatsapp_live_router
 from api.v1.linkedin_live import router as linkedin_live_router
+from api.v1.linkedin_live import stop_router as linkedin_live_stop_router
 from api.v1.linkedin_profile import router as linkedin_profile_router
 from api.v1.live import router as live_router
 from api.v1.system_queues import router as system_queues_router
@@ -229,6 +234,9 @@ app.include_router(feed_scroll_router)
 app.include_router(whatsapp_scanner_router)
 app.include_router(whatsapp_live_router)
 app.include_router(linkedin_live_router)
+# Ungated /live/stop — always available so a running browser can be shut down
+# and its profile lock released even while LinkedIn is disabled.
+app.include_router(linkedin_live_stop_router)
 app.include_router(linkedin_profile_router)
 app.include_router(live_router)
 app.include_router(system_queues_router)
@@ -238,6 +246,40 @@ app.include_router(admin_router)
 @app.get("/")
 async def root():
     return {"message": "LinkeFlow auth service is running"}
+
+
+@app.get("/api/v1/features")
+async def feature_flags():
+    """Which optional features this deployment offers.
+
+    Unauthenticated on purpose: the frontend reads it before/independently of
+    login to decide whether to render the LinkedIn surfaces at all, and it
+    exposes nothing sensitive. Serving the flag from the backend (rather than
+    a build-time env var) means enabling LinkedIn is a restart, not a
+    frontend redeploy.
+    """
+    return {
+        "linkedin": {
+            "enabled": settings.LINKEDIN_ENABLED,
+            "message": None if settings.LINKEDIN_ENABLED else settings.LINKEDIN_DISABLED_MESSAGE,
+        },
+        "whatsapp": {"enabled": True, "message": None},
+        # Timer-driven work (scheduled campaign steps, recurring feed/WhatsApp
+        # scans). Off on the hosted demo; on everywhere else.
+        "scheduled_jobs": {
+            "enabled": settings.scheduled_jobs_enabled,
+            "message": None if settings.scheduled_jobs_enabled
+            else SCHEDULED_JOBS_DISABLED_DETAIL,
+        },
+        # Hosted-demo banner. `notice` is null outside deployment mode, which
+        # is what the frontend keys off — the banner is shown ONLY when
+        # ENVIRONMENT=deployment.
+        "deployment": {
+            "is_demo": settings.is_deployment,
+            "notice": settings.deployment_notice,
+            "support_email": settings.SUPPORT_EMAIL,
+        },
+    }
 
 
 @app.get("/db-check")

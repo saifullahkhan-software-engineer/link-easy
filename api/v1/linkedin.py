@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from api.dependencies import get_current_user, get_db, require_roles
+from core.config import settings
 from core.security import decrypt_credential, encrypt_credential
 from models.linkedin_account import LinkedInAccount, LinkedInAccountStatus
 from models.roles import UserRole
@@ -120,6 +121,43 @@ router = APIRouter(prefix="/api/v1/linkedin", tags=["linkedin-accounts"])
 
 
 # ---------------------------------------------------------------------------
+# Availability gate
+# ---------------------------------------------------------------------------
+
+def linkedin_enabled() -> bool:
+    """Whether LinkedIn automation is currently offered.
+
+    Read at call time (not import time) so tests and the admin can flip
+    ``settings.LINKEDIN_ENABLED`` without reimporting the module.
+    """
+    return bool(getattr(settings, "LINKEDIN_ENABLED", False))
+
+
+def require_linkedin_enabled() -> None:
+    """FastAPI dependency: 503 unless LinkedIn automation is enabled.
+
+    Guards every endpoint that would open a Chromium profile against
+    linkedin.com. From a datacenter IP those launches are overwhelmingly met
+    with a CAPTCHA or ``/checkpoint/challenge``, so letting a user submit
+    credentials only to fail is worse than saying plainly that the feature is
+    not ready yet.
+
+    503 (not 403/404) is deliberate: it means "temporarily unavailable, try
+    later", and it is NOT one of the auth codes the frontend's axios
+    interceptor treats as a dead LinkEasy session — a 401 here would bounce
+    the user to /login for no reason.
+
+    Read-only and cleanup routes (GET/DELETE account) stay open so anyone who
+    connected before the gate can still see and remove their account.
+    """
+    if not linkedin_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=settings.LINKEDIN_DISABLED_MESSAGE,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -149,6 +187,7 @@ async def _get_account_or_404(
     response_model=LinkedInAccountCreateResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Add a LinkedIn account",
+    dependencies=[Depends(require_linkedin_enabled)],
 )
 async def add_linkedin_account(
     payload: LinkedInAccountCreate,
@@ -389,6 +428,7 @@ async def delete_linkedin_account(
     "/account/verify",
     response_model=VerificationCodeResponse,
     summary="Submit verification code for pending LinkedIn login",
+    dependencies=[Depends(require_linkedin_enabled)],
 )
 async def submit_verification_code(
     payload: VerificationCodeRequest,
@@ -623,6 +663,7 @@ async def admin_update_account_status(
     "/account/verify-session",
     response_model=SessionVerificationResponse,
     summary="Verify and refresh LinkedIn session",
+    dependencies=[Depends(require_linkedin_enabled)],
 )
 async def verify_linkedin_session(
     db: AsyncSession = Depends(get_db),

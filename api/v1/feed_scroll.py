@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from api.dependencies import get_db
+from api.v1.linkedin import require_linkedin_enabled
 from models.feed_scroll_job import (
     MAX_POSTS_PER_SCAN,
     FeedScrollJob,
@@ -666,7 +667,11 @@ async def restore_feed_scroll_result(
     return {"message": "Post restored to results", "id": result_id, "restored": restored}
 
 
-@router.post("/jobs/{job_id}/scan", status_code=200)
+@router.post(
+    "/jobs/{job_id}/scan",
+    status_code=200,
+    dependencies=[Depends(require_linkedin_enabled)],
+)
 async def trigger_manual_scan(
     job_id: str,
     owner_email: str,
@@ -693,7 +698,11 @@ async def trigger_manual_scan(
     return {"message": "Manual scan queued. Results will be available shortly."}
 
 
-@router.post("/jobs/{job_id}/activate", status_code=200)
+@router.post(
+    "/jobs/{job_id}/activate",
+    status_code=200,
+    dependencies=[Depends(require_linkedin_enabled)],
+)
 async def activate_feed_scroll_job(
     job_id: str,
     owner_email: str,

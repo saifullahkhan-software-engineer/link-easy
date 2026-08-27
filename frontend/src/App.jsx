@@ -7,6 +7,7 @@ import AdminRoute from './components/AdminRoute';
 import DashboardLayout from './components/DashboardLayout';
 import AppLayout from './components/AppLayout';
 import AdminLayout from './components/AdminLayout';
+import LinkedInFeatureRoute from './components/LinkedInFeatureRoute';
 import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
@@ -121,8 +122,22 @@ export default function App() {
             <Route path="whatsapp-scanner/jobs/:filterId" element={<WhatsAppScannerPage />} />
             <Route path="whatsapp-scanner/jobs/:filterId/edit" element={<WhatsAppFilterEditPage />} />
             <Route path="whatsapp-live" element={<WhatsAppLiveChatPage />} />
-            <Route path="linkedin-live" element={<LinkedInLiveChatPage />} />
-            <Route path="linkedin-profile" element={<LinkedInProfileScanPage />} />
+            <Route
+              path="linkedin-live"
+              element={
+                <LinkedInFeatureRoute title="LinkedIn Live Chat">
+                  <LinkedInLiveChatPage />
+                </LinkedInFeatureRoute>
+              }
+            />
+            <Route
+              path="linkedin-profile"
+              element={
+                <LinkedInFeatureRoute title="Profile Scan (PDF)">
+                  <LinkedInProfileScanPage />
+                </LinkedInFeatureRoute>
+              }
+            />
             {/* Legacy links redirect to the operations dashboard. */}
             <Route path="system-queues" element={<Navigate to="/dashboard/redis-queues" replace />} />
             <Route path="redis-jobs" element={<Navigate to="/dashboard/redis-queues" replace />} />

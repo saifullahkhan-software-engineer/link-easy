@@ -61,6 +61,10 @@ RUN patchright install chromium --with-deps
 # Copy application code
 COPY . .
 
+# The entrypoint must be executable even when the checkout lost the +x bit
+# (e.g. cloned on Windows, where git does not preserve the mode).
+RUN chmod +x /app/start.sh
+
 # Create a non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /ms-playwright
 USER appuser
@@ -68,7 +72,26 @@ USER appuser
 # Expose port
 EXPOSE 8000
 
-# Run the application with uvicorn.
-# Railway injects a PORT env var and healthchecks it — honor it when present
-# (shell form so ${PORT:-8000} expands), defaulting to 8000 elsewhere.
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Default runtime: API + Celery worker + Celery Beat in ONE container.
+#
+# All three need the SAME durable Chromium profile directory
+# (PROFILE_STORAGE_DIR): the API owns the browser while LinkedIn/WhatsApp are
+# being connected, and the worker reopens those profiles for campaign
+# sessions, feed scrolls and WhatsApp scans. A Railway volume attaches to a
+# single service, so running them as separate services would give the worker
+# an empty profile (QR screen) instead of the live session.
+#
+# start.sh honours ${PORT} (Railway injects it) and can be narrowed with
+# RUN_WEB / RUN_WORKER / RUN_BEAT.
+#
+# Hosted demo: set ENVIRONMENT=deployment on the service. start.sh then skips
+# Celery Beat (no unattended timers on a free-tier box), the API clears the
+# Beat schedule and refuses to arm recurring jobs, and the UI shows the
+# "run it locally" banner. The Celery worker still runs, so on-demand actions
+# keep working. Any other ENVIRONMENT value — including the default
+# "production" — runs the full three-process stack exactly as before.
+#
+# docker-compose.yml is unaffected: its api / worker / beat services each
+# declare their own `command:`, which overrides this CMD.
+ENV ENVIRONMENT=production
+CMD ["/app/start.sh"]

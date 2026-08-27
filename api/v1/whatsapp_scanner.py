@@ -42,7 +42,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func as sa_func, update as sa_update
 
-from api.dependencies import get_db, get_current_user
+from api.dependencies import (
+    get_db,
+    get_current_user,
+    require_scheduled_jobs_enabled,
+)
 from models.user import User
 from schemas.whatsapp import (
     WhatsAppConnectResponse,
@@ -1293,8 +1297,20 @@ async def reset_whatsapp_filter_messages(
     }
 
 
-@router.post("/filters/{filter_id}/activate", status_code=200)
-@router.post("/filters/jobs/{filter_id}/activate", status_code=200)
+# Activating a filter arms a REPEATING scan (next_scan_at -> Beat -> rescan).
+# On the hosted demo Beat is not running, so allowing this would persist a
+# schedule that never fires and show the user an "active" job that does
+# nothing. Manual scans (/scan/trigger) stay open — the worker still runs.
+@router.post(
+    "/filters/{filter_id}/activate",
+    status_code=200,
+    dependencies=[Depends(require_scheduled_jobs_enabled)],
+)
+@router.post(
+    "/filters/jobs/{filter_id}/activate",
+    status_code=200,
+    dependencies=[Depends(require_scheduled_jobs_enabled)],
+)
 async def activate_whatsapp_filter_job(
     filter_id: int,
     current_user: User = Depends(get_current_user),

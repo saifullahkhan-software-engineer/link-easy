@@ -1,5 +1,13 @@
 import api, { getAccessToken, API_BASE_URL } from './client';
 
+/* -------------------------------- features -------------------------------- */
+// Which optional features this deployment offers. LinkedIn is disabled until
+// residential proxies are in place (LinkedIn blocks datacenter IPs), so the UI
+// asks the backend rather than assuming.
+export const featuresApi = {
+  get: () => api.get('/features'),
+};
+
 /* ---------------------------------- auth --------------------------------- */
 export const authApi = {
   register: (payload) => api.post('/auth/register', payload),

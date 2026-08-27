@@ -154,3 +154,47 @@ async def require_admin(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Administrator access is required for this action",
     )
+
+
+# ---------------------------------------------------------------------------
+# Scheduled-work gate (hosted demo)
+# ---------------------------------------------------------------------------
+
+SCHEDULED_JOBS_DISABLED_DETAIL = (
+    "Scheduled and recurring jobs are turned off on the hosted demo. Every "
+    "timed run wakes a full browser in the background, which this free "
+    "instance cannot do reliably. You can still run scans on demand here — "
+    "for automatic scheduling, run LinkEasy locally, where it is enabled by "
+    "default."
+)
+
+
+def scheduled_jobs_enabled() -> bool:
+    """Whether timer-driven background work may run on this deployment.
+
+    Read at call time (not import time) so tests and operators can flip the
+    setting without reimporting the module.
+    """
+    return bool(settings.scheduled_jobs_enabled)
+
+
+def require_scheduled_jobs_enabled() -> None:
+    """FastAPI dependency: 503 unless recurring/timed jobs are allowed.
+
+    Guards the endpoints that arm a *repeating* schedule. Without this the
+    hosted demo would happily write a ``next_scan_at`` that Beat is never
+    going to dispatch, leaving a job that claims to be active and silently
+    never runs — worse than saying plainly that scheduling is off.
+
+    Deliberately does NOT guard one-shot, user-initiated actions (a manual
+    scan, connect, live chat): those are consumed by the Celery worker, which
+    keeps running in deployment mode.
+
+    503 matches the LinkedIn gate: "temporarily unavailable", and not one of
+    the auth codes the frontend treats as a dead session.
+    """
+    if not scheduled_jobs_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=SCHEDULED_JOBS_DISABLED_DETAIL,
+        )

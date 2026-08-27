@@ -6,6 +6,7 @@ import { getErrorMessage } from '../api/client';
 import WhatsAppFilterCard from '../components/whatsapp/WhatsAppFilterCard';
 import Modal from '../components/Modal';
 import { Spinner } from '../components/Spinner';
+import SchedulingDisabledNotice from '../components/SchedulingDisabledNotice';
 
 export default function WhatsAppFilterJobsPage() {
   const [filters, setFilters] = useState([]);
@@ -102,6 +103,8 @@ export default function WhatsAppFilterJobsPage() {
           New Filter
         </Link>
       </div>
+
+      <SchedulingDisabledNotice className="mb-6" />
 
       {filters.length === 0 ? (
         <div className="rounded-xl border border-surface-700 bg-surface-800 p-12 text-center">

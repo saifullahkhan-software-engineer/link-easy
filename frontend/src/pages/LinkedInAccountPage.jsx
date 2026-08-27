@@ -8,6 +8,8 @@ import { AccountStatusBadge } from '../components/Badge';
 import Modal from '../components/Modal';
 import VerificationCodeModal from '../components/VerificationCodeModal';
 import { SlowOperationNotice, Spinner } from '../components/Spinner';
+import LinkedInUnavailableNotice from '../components/LinkedInUnavailableNotice';
+import { useFeatures } from '../hooks/useFeatures';
 
 function formatDate(iso) {
   if (!iso) return '—';
@@ -112,6 +114,11 @@ function EditAccountModal({ open, account, onClose, onSaved }) {
 /* ------------------------------- main page ------------------------------- */
 export default function LinkedInAccountPage() {
   const { email: ownerEmail } = useAuth();
+  const {
+    linkedinEnabled,
+    linkedinMessage,
+    loading: featuresLoading,
+  } = useFeatures();
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -292,6 +299,79 @@ export default function LinkedInAccountPage() {
   }
 
   const hasAccount = Boolean(account);
+
+  // LinkedIn is gated until per-account residential proxies exist — the API
+  // returns 503 for connect/verify, so showing the form would only produce a
+  // confusing failure. Users who connected earlier keep their account card
+  // (and its Disconnect button) below the notice.
+  if (!featuresLoading && !linkedinEnabled) {
+    return (
+      <div className="max-w-3xl">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
+            <p className="mt-1 text-sm text-zinc-400">
+              LinkedIn automation is paused on this deployment.
+            </p>
+          </div>
+          <Link to="/app/account" className="btn-secondary text-xs">
+            ← Accounts
+          </Link>
+        </div>
+
+        <LinkedInUnavailableNotice message={linkedinMessage} className="mt-6" />
+
+        {hasAccount && (
+          <div className="card mt-6 p-6">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-semibold text-zinc-200">
+                  Previously connected account
+                </h2>
+                <p className="mt-1 text-sm text-zinc-400">
+                  {account.linkedin_email}
+                  {account.label ? ` · ${account.label}` : ''}
+                </p>
+                <p className="mt-1 text-xs text-zinc-500">
+                  It stays linked and will resume when LinkedIn automation is re-enabled.
+                </p>
+              </div>
+              <button
+                onClick={() => setConfirmDisconnect(true)}
+                className="btn-secondary text-xs"
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+        )}
+
+        <Modal
+          open={confirmDisconnect}
+          onClose={() => setConfirmDisconnect(false)}
+          title="Disconnect LinkedIn account?"
+        >
+          <p className="text-sm text-zinc-400">
+            This removes the stored credentials and browser profile. You can reconnect once
+            LinkedIn automation is available again.
+          </p>
+          <div className="mt-5 flex justify-end gap-3">
+            <button
+              onClick={() => setConfirmDisconnect(false)}
+              className="btn-secondary text-xs"
+              disabled={disconnecting}
+            >
+              Cancel
+            </button>
+            <button onClick={disconnect} className="btn-danger text-xs" disabled={disconnecting}>
+              {disconnecting && <Spinner />}
+              {disconnecting ? 'Disconnecting…' : 'Yes, disconnect'}
+            </button>
+          </div>
+        </Modal>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-3xl">
