@@ -26,6 +26,7 @@ export default function AccountsPage() {
   const [liAccount, setLiAccount] = useState(null);
   const [waLoading, setWaLoading] = useState(true);
   const [waStatus, setWaStatus] = useState('disconnected');
+  const [waReconnectRequired, setWaReconnectRequired] = useState(false);
 
   const loadLinkedIn = useCallback(async () => {
     setLiLoading(true);
@@ -44,8 +45,10 @@ export default function AccountsPage() {
     try {
       const { data } = await whatsappApi.getStatus();
       setWaStatus(data.status || 'disconnected');
+      setWaReconnectRequired(Boolean(data.reconnect_required));
     } catch {
       setWaStatus('disconnected');
+      setWaReconnectRequired(false);
     } finally {
       setWaLoading(false);
     }
@@ -108,13 +111,19 @@ export default function AccountsPage() {
                 {waLoading ? (
                   <p className="mt-0.5 h-4 w-28 animate-pulse rounded bg-surface-700" />
                 ) : waStatus === 'connected' ? (
-                  <p className="mt-0.5 text-sm text-zinc-400">Connected</p>
+                  <p className="mt-0.5 text-sm text-zinc-400">
+                    {waReconnectRequired ? 'Profile missing — rescan QR' : 'Connected'}
+                  </p>
                 ) : (
                   <p className="mt-0.5 text-sm text-zinc-500">No account connected</p>
                 )}
               </div>
             </div>
-            {waLoading ? <Spinner /> : <WhatsAppStatusBadge status={waStatus} />}
+            {waLoading ? (
+              <Spinner />
+            ) : (
+              <WhatsAppStatusBadge status={waStatus} reconnectRequired={waReconnectRequired} />
+            )}
           </div>
 
           <div className="mt-5 flex flex-wrap gap-3 border-t border-surface-700 pt-4">

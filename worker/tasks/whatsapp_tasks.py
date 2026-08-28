@@ -419,6 +419,34 @@ async def _check_whatsapp_messages_async(
         logger.info("🔒 WhatsApp profile in use by another browser — skipping this check")
         return {"status": "skipped", "reason": "WhatsApp profile in use"}
 
+    # Browser-free fast path: the guard above already proved the latest
+    # session row says "connected", so a missing/empty durable profile here
+    # means it was wiped (a deploy without the /app/profiles volume).
+    # Launching Chromium would just reveal a blank QR screen, so mark the
+    # session disconnected up front instead of paying for a launch.
+    # (A missing profile under a *disconnected* row is the normal
+    # pre-first-connect state and never reaches this point.)
+    from core.profiles import profile_dir_missing
+    from services.whatsapp_browser import whatsapp_profile_dir
+
+    if profile_dir_missing(whatsapp_profile_dir()):
+        release_profile_lock(profile_lock)
+        with get_sync_db() as db:
+            from models.whatsapp import WhatsAppSession
+
+            row = (
+                db.query(WhatsAppSession).order_by(WhatsAppSession.id.desc()).first()
+            )
+            if row and row.status == "connected":
+                row.status = "disconnected"
+                row.is_active = False
+        logger.warning(
+            "⚠️  WhatsApp profile dir is missing/empty — marking session "
+            "disconnected. Is the /app/profiles volume mounted on this "
+            "service? (status endpoint now reports reconnect_required)"
+        )
+        return {"status": "error", "reason": "Profile missing — reconnect required"}
+
     try:
         pw, context, page = await launch_whatsapp_persistent(headless=True)
     except Exception as exc:

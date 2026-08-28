@@ -246,6 +246,12 @@ async def admin_accounts(
     )
     wa_rows = wa_result.scalars().all() if wa_result is not None else []
 
+    from core.profiles import profile_dir_missing
+    from services.whatsapp_browser import whatsapp_profile_dir
+
+    # Single shared WhatsApp profile — computed once, not per row.
+    wa_profile_missing = profile_dir_missing(whatsapp_profile_dir())
+
     linkedin = [
         AdminLinkedInAccountRow(
             id=row.id,
@@ -255,6 +261,7 @@ async def admin_accounts(
             status=row.status.value if hasattr(row.status, "value") else row.status,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            profile_missing=profile_dir_missing(row.profile_dir),
         )
         for row in li_rows
     ]
@@ -265,6 +272,7 @@ async def admin_accounts(
             is_active=bool(row.is_active),
             created_at=row.created_at,
             updated_at=row.updated_at,
+            profile_missing=wa_profile_missing,
         )
         for row in wa_rows
     ]

@@ -16,6 +16,19 @@ function formatDate(iso) {
   });
 }
 
+/** Amber pill shown when the DB says "usable" but the durable browser profile
+ *  was wiped (usually: the /app/profiles volume is not mounted). */
+function ProfileMissingPill({ title }) {
+  return (
+    <span
+      title={title}
+      className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-300 ring-1 ring-inset ring-amber-500/20"
+    >
+      profile missing
+    </span>
+  );
+}
+
 /**
  * Admin: Accounts.
  *
@@ -135,7 +148,13 @@ export default function AdminAccountsPage() {
                   <td className="py-3 pr-4 text-xs text-zinc-400">{row.owner_email || '—'}</td>
                   <td className="py-3 pr-4 text-zinc-300">{row.label || '—'}</td>
                   <td className="py-3 pr-4">
-                    <span className="capitalize text-zinc-300">{row.status || '—'}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="capitalize text-zinc-300">{row.status || '—'}</span>
+                      {row.profile_missing &&
+                        ['active', 'valid', 'pending_verification'].includes(row.status) && (
+                          <ProfileMissingPill title="The stored browser profile is missing — the next session launch starts from a blank login. Check that the /app/profiles volume is mounted." />
+                        )}
+                    </div>
                   </td>
                   <td className="py-3 pr-4 text-xs text-zinc-500">{formatDate(row.created_at)}</td>
                   <td className="py-3 pr-4 text-xs text-zinc-500">{formatDate(row.updated_at)}</td>
@@ -169,7 +188,14 @@ export default function AdminAccountsPage() {
               {whatsapp.map((row) => (
                 <tr key={row.id} className="border-b border-surface-800/70">
                   <td className="py-3 pr-4 font-mono text-xs text-zinc-300">session #{row.id}</td>
-                  <td className="py-3 pr-4 capitalize text-zinc-300">{row.status}</td>
+                  <td className="py-3 pr-4">
+                    <div className="flex items-center gap-2 capitalize">
+                      <span className="text-zinc-300">{row.status}</span>
+                      {row.profile_missing && row.status === 'connected' && (
+                        <ProfileMissingPill title="The shared WhatsApp browser profile is missing — the next scan/connect starts from a blank QR screen. Check that the /app/profiles volume is mounted." />
+                      )}
+                    </div>
+                  </td>
                   <td className="py-3 pr-4">
                     <span className={row.is_active ? 'text-emerald-300' : 'text-zinc-500'}>
                       {row.is_active ? 'Yes' : 'No'}
