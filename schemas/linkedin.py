@@ -141,3 +141,8 @@ class SessionVerificationResponse(BaseModel):
     account: LinkedInAccountResponse | None  # Account data if available
     requires_manual_verification: bool = False
     session_id: str | None = None  # Session ID if pending verification (for checkpoint)
+    # True when the account's durable Chromium profile dir was missing/empty
+    # at the start of this check (e.g. a deploy without the /app/profiles
+    # volume wiped it). The session was then re-established from scratch —
+    # if this keeps showing up, the volume is not mounted.
+    profile_missing: bool = False

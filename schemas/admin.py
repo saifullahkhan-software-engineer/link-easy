@@ -98,6 +98,11 @@ class AdminLinkedInAccountRow(BaseModel):
     status: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Pure fact: the durable Chromium profile dir for this account is missing
+    # or empty. Meaningful when the status says the account is usable — a
+    # "connected" account with a missing profile was wiped (volume not
+    # mounted) and its next session launch lands on a blank login.
+    profile_missing: bool = False
 
 
 class AdminWhatsAppSessionRow(BaseModel):
@@ -106,6 +111,8 @@ class AdminWhatsAppSessionRow(BaseModel):
     is_active: bool
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Same fact as the LinkedIn rows, for the single shared WhatsApp profile.
+    profile_missing: bool = False
 
 
 class AdminAccountsResponse(BaseModel):

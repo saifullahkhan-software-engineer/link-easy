@@ -708,6 +708,19 @@ async def verify_linkedin_session(
 
     logger.info("✅ Found LinkedIn account: %s (status: %s)", account.linkedin_email, account.status)
 
+    # Honest-status probe (before any browser launch): if the durable profile
+    # dir is missing/empty, this check will end up re-establishing the session
+    # from scratch — usually a sign the /app/profiles volume is not mounted.
+    from core.profiles import profile_dir_missing
+
+    profile_missing = profile_dir_missing(account.profile_dir)
+    if profile_missing:
+        logger.warning(
+            "⚠️  Profile dir %s is missing/empty for account %s — this check "
+            "starts from a blank browser (volume not mounted?)",
+            account.profile_dir, account.id,
+        )
+
     # Check if account is already in pending verification state
     if account.status == LinkedInAccountStatus.PENDING_VERIFICATION:
         logger.warning("⚠️ Account already in PENDING_VERIFICATION state")
@@ -715,7 +728,8 @@ async def verify_linkedin_session(
             status="PENDING_VERIFICATION",
             message="Account is already pending manual verification. Please complete the verification process.",
             account=LinkedInAccountResponse.model_validate(account),
-            requires_manual_verification=True
+            requires_manual_verification=True,
+            profile_missing=profile_missing
         )
 
     lock = None
@@ -735,7 +749,8 @@ async def verify_linkedin_session(
                 status="IN_USE",
                 message="This LinkedIn account is currently in use by another session. Please try again in a few minutes.",
                 account=LinkedInAccountResponse.model_validate(account),
-                requires_manual_verification=False
+                requires_manual_verification=False,
+                profile_missing=profile_missing
             )
 
         # Step 2: Open the persistent profile and verify the session inside it.
@@ -763,7 +778,8 @@ async def verify_linkedin_session(
                 status="ACTIVE",
                 message="Your LinkedIn session is active and working.",
                 account=LinkedInAccountResponse.model_validate(account),
-                requires_manual_verification=False
+                requires_manual_verification=False,
+                profile_missing=profile_missing
             )
 
         # Step 4: Checkpoint / verification code required → hand the live
@@ -809,7 +825,8 @@ async def verify_linkedin_session(
                 message=f"LinkedIn requires verification. Session ID: {session_id}. Use this to submit the verification code.",
                 account=LinkedInAccountResponse.model_validate(account),
                 requires_manual_verification=True,
-                session_id=session_id
+                session_id=session_id,
+                profile_missing=profile_missing
             )
 
         # Step 5: EXPIRED (or UNKNOWN) → credential-based relogin FALLBACK.
@@ -853,9 +870,11 @@ async def verify_linkedin_session(
             logger.info("✅ Session refreshed successfully")
             return SessionVerificationResponse(
                 status="REFRESHED",
-                message="Your LinkedIn session expired but was successfully refreshed.",
+                message="Your LinkedIn session expired but was successfully refreshed."
+                + (" The stored profile was missing, so the session was rebuilt from saved credentials." if profile_missing else ""),
                 account=LinkedInAccountResponse.model_validate(account),
-                requires_manual_verification=False
+                requires_manual_verification=False,
+                profile_missing=profile_missing
             )
 
         elif session_status == LinkedInSessionStatus.VERIFICATION_REQUIRED or session_status == LinkedInSessionStatus.CHECKPOINT:
@@ -899,7 +918,8 @@ async def verify_linkedin_session(
                 message=f"LinkedIn {'checkpoint detected' if session_status == LinkedInSessionStatus.CHECKPOINT else 'requires verification'}. Session ID: {session_id}. Use this to submit verification code.",
                 account=LinkedInAccountResponse.model_validate(account),
                 requires_manual_verification=True,
-                session_id=session_id
+                session_id=session_id,
+                profile_missing=profile_missing
             )
 
         else:
@@ -923,7 +943,8 @@ async def verify_linkedin_session(
                 status="FAILED",
                 message=error_message,
                 account=LinkedInAccountResponse.model_validate(account),
-                requires_manual_verification=False
+                requires_manual_verification=False,
+                profile_missing=profile_missing
             )
 
     except HTTPException:
@@ -935,7 +956,8 @@ async def verify_linkedin_session(
             status="FAILED",
             message=f"An error occurred during session verification: {str(e)}",
             account=None,
-            requires_manual_verification=False
+            requires_manual_verification=False,
+            profile_missing=profile_missing
         )
 
     finally:

@@ -227,6 +227,12 @@ export default function LinkedInAccountPage() {
     setRefreshing(true);
     try {
       const { data } = await linkedinApi.verifySession(ownerEmail);
+      if (data.profile_missing) {
+        toast(
+          'The stored browser profile was missing, so this check started from a blank browser. If this keeps happening, the /app/profiles volume is not mounted.',
+          { icon: '⚠️', duration: 8000 },
+        );
+      }
       switch (data.status) {
         case 'ACTIVE':
           toast.success('Session is active.');

@@ -29,6 +29,9 @@ function formatDate(iso) {
  */
 export default function WhatsAppConnectPage() {
   const [status, setStatus] = useState('disconnected');
+  // DB says connected but the durable profile was wiped (volume missing) —
+  // the badge must not show a stale green in that case.
+  const [reconnectRequired, setReconnectRequired] = useState(false);
   const [sessionMeta, setSessionMeta] = useState({ created_at: null, updated_at: null, is_active: false });
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
@@ -50,6 +53,7 @@ export default function WhatsAppConnectPage() {
       const { data } = await whatsappApi.getStatus();
       const nextStatus = data.status || 'disconnected';
       setStatus(nextStatus);
+      setReconnectRequired(nextStatus === 'connected' && Boolean(data.reconnect_required));
       setSessionMeta({
         created_at: data.created_at || null,
         updated_at: data.updated_at || null,
@@ -98,6 +102,7 @@ export default function WhatsAppConnectPage() {
       connectionStartedRef.current = true;
       setCaptureFailed(false);
       setShowBrowserView(true);
+      setReconnectRequired(false);
       const { data } = await whatsappApi.connect();
       toast.success(data?.message || 'WhatsApp connection started — scan the QR code');
       setStatus(data?.status || 'waiting_qr');
@@ -184,7 +189,7 @@ export default function WhatsAppConnectPage() {
               <div>
                 <div className="flex flex-wrap items-center gap-2.5">
                   <h2 className="text-lg font-semibold text-zinc-100">WhatsApp</h2>
-                  <WhatsAppStatusBadge status={status} />
+                  <WhatsAppStatusBadge status={status} reconnectRequired={reconnectRequired} />
                 </div>
                 <p className="mt-0.5 text-sm text-zinc-400">Linked via WhatsApp Web</p>
               </div>
@@ -252,7 +257,7 @@ export default function WhatsAppConnectPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <h2 className="text-lg font-semibold text-zinc-100">Connection status</h2>
-                {loading ? <Spinner /> : <WhatsAppStatusBadge status={status} />}
+                {loading ? <Spinner /> : <WhatsAppStatusBadge status={status} reconnectRequired={reconnectRequired} />}
               </div>
               {status === 'connected' ? (
                 <button

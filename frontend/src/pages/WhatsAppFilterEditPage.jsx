@@ -42,6 +42,8 @@ export default function WhatsAppFilterEditPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('disconnected');
+  // true when DB says connected but the durable profile was wiped (no volume)
+  const [reconnectRequired, setReconnectRequired] = useState(false);
   const [filterJob, setFilterJob] = useState(null);
 
   const [name, setName] = useState('');
@@ -246,7 +248,7 @@ export default function WhatsAppFilterEditPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <WhatsAppStatusBadge status={status} />
+          <WhatsAppStatusBadge status={status} reconnectRequired={reconnectRequired} />
           <Link
             to={`/app/whatsapp-scanner/jobs/${filterId}`}
             className="rounded-lg border border-surface-700 px-4 py-2 text-sm font-medium text-zinc-300 transition hover:bg-surface-700"

@@ -43,6 +43,8 @@ export default function WhatsAppScannerPage() {
   const [filterJob, setFilterJob] = useState(null);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('disconnected');
+  // true when DB says connected but the durable profile was wiped (no volume)
+  const [reconnectRequired, setReconnectRequired] = useState(false);
   const [messages, setMessages] = useState([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [stats, setStats] = useState(null);
@@ -71,7 +73,9 @@ export default function WhatsAppScannerPage() {
         ]);
         if (cancelled) return;
         setFilterJob(filterResponse.data);
-        setStatus(statusResponse.data.status || 'disconnected');
+        const s = statusResponse.data.status || 'disconnected';
+        setStatus(s);
+        setReconnectRequired(s === 'connected' && Boolean(statusResponse.data.reconnect_required));
         setStats(statsResponse.data);
       } catch (err) {
         if (!cancelled) toast.error(getErrorMessage(err, 'Failed to load WhatsApp filter'));
@@ -94,7 +98,9 @@ export default function WhatsAppScannerPage() {
   const loadStatus = async () => {
     try {
       const { data } = await whatsappApi.getStatus();
-      setStatus(data.status || 'disconnected');
+      const s = data.status || 'disconnected';
+      setStatus(s);
+      setReconnectRequired(s === 'connected' && Boolean(data.reconnect_required));
     } catch {
       // Keep the most recently known connection status during transient errors.
     }
@@ -276,7 +282,7 @@ export default function WhatsAppScannerPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold text-zinc-100">WhatsApp Connection</h2>
-            <WhatsAppStatusBadge status={status} />
+            <WhatsAppStatusBadge status={status} reconnectRequired={reconnectRequired} />
           </div>
           <div className="flex items-center gap-3">
             <button onClick={loadStatus} className="text-sm text-zinc-400 transition hover:text-zinc-200">Refresh status</button>

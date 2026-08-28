@@ -723,11 +723,25 @@ async def get_whatsapp_status(
     if not session:
         return WhatsAppStatusResponse(status="disconnected", is_active=False)
 
+    # Honest status: the row can say "connected" while the durable profile was
+    # wiped (a deploy without the /app/profiles volume is the usual cause).
+    # Opening the browser in that state lands on a blank QR screen, so tell
+    # the UI to ask for a re-scan instead of trusting the green badge.
+    # The import is local (like the sibling handlers) so tests can patch
+    # services.whatsapp_browser.whatsapp_profile_dir.
+    reconnect_required = False
+    if session.status == "connected":
+        from core.profiles import profile_dir_missing
+        from services.whatsapp_browser import whatsapp_profile_dir
+
+        reconnect_required = profile_dir_missing(whatsapp_profile_dir())
+
     return WhatsAppStatusResponse(
         status=session.status,
         is_active=session.is_active,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        reconnect_required=reconnect_required,
     )
 
 

@@ -9,7 +9,9 @@ assert the pacing sleeps happen between forwards.
 """
 import asyncio
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -184,7 +186,18 @@ class WhatsAppForwardPacingTests(unittest.TestCase):
         fake_session = _build_session()
         page = Mock()
 
+        # The seeded session row is "connected", which in production implies
+        # an intact on-disk profile. Give the task's honest-status check the
+        # same world the mocked browser layer assumes.
+        profile_tmp = tempfile.mkdtemp(prefix="wa-profile-")
+        self.addCleanup(shutil.rmtree, profile_tmp, ignore_errors=True)
+        with open(os.path.join(profile_tmp, "Cookies"), "w") as fh:
+            fh.write("{}")
+
         with patch(
+            "services.whatsapp_browser.whatsapp_profile_dir",
+            new=Mock(return_value=profile_tmp),
+        ), patch(
             "services.whatsapp_browser.launch_whatsapp_persistent",
             new=AsyncMock(return_value=("pw", "ctx", page)),
         ), patch(

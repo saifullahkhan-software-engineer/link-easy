@@ -39,6 +39,12 @@ class WhatsAppStatusResponse(BaseModel):
     # connection was added / last updated. Null when no session row exists.
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Honest status: True when the DB row says "connected" but the durable
+    # Chromium profile directory is missing/empty (e.g. a deploy without the
+    # /app/profiles volume wiped it). The next browser launch would land on a
+    # blank QR screen, so the UI should ask for a re-scan instead of showing
+    # a stale green "Connected".
+    reconnect_required: bool = False
 
 
 # ── Groups ────────────────────────────────────────────────────────────────────
