@@ -105,17 +105,26 @@ SHUTDOWN_GRACE_SECONDS="${SHUTDOWN_GRACE_SECONDS:-25}"
 # it is read-only in spirit and wiped on every deploy. /tmp is always writable.
 export CELERY_BEAT_SCHEDULE_FILE="${CELERY_BEAT_SCHEDULE_FILE:-/tmp/linkeasy-celerybeat-schedule}"
 
-# Durable Chromium profiles. Mount a volume here on Railway, otherwise every
-# deploy silently logs LinkedIn/WhatsApp out while the database still says
-# "connected".
-PROFILE_STORAGE_DIR="${PROFILE_STORAGE_DIR:-./profiles}"
+# Durable Chromium profiles. Railway can mount a persistent volume at this
+# exact path. If no volume is attached, the Dockerfile provides the directory
+# (and declares it as an anonymous Docker volume) and this preflight creates
+# it when the image is run directly. The app can therefore start with fresh,
+# ephemeral profiles instead of failing the build/deploy; existing sessions
+# will need to be connected again after a restart or deploy.
+PROFILE_STORAGE_DIR="${PROFILE_STORAGE_DIR:-/app/profiles}"
 export PROFILE_STORAGE_DIR
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 
+PROFILE_STORAGE_FALLBACK=0
+if [ ! -d "$PROFILE_STORAGE_DIR" ]; then
+    PROFILE_STORAGE_FALLBACK=1
+fi
 if ! mkdir -p "$PROFILE_STORAGE_DIR" 2>/dev/null; then
     log "FATAL: cannot create PROFILE_STORAGE_DIR=$PROFILE_STORAGE_DIR"
-    log "       On Railway, volumes mount as root — set RAILWAY_RUN_UID=0 on the service."
+    log "       On Railway, a mounted volume may be owned by root; set"
+    log "       RAILWAY_RUN_UID=0 on the service or pre-create the directory"
+    log "       with write permission for the container user."
     exit 1
 fi
 if ! chmod 700 "$PROFILE_STORAGE_DIR" 2>/dev/null; then
@@ -123,12 +132,18 @@ if ! chmod 700 "$PROFILE_STORAGE_DIR" 2>/dev/null; then
 fi
 if ! touch "$PROFILE_STORAGE_DIR/.writable" 2>/dev/null; then
     log "FATAL: PROFILE_STORAGE_DIR=$PROFILE_STORAGE_DIR is not writable by uid $(id -u)."
-    log "       On Railway, set RAILWAY_RUN_UID=0 so the mounted volume is writable."
+    log "       On Railway, a mounted volume may be owned by root; set"
+    log "       RAILWAY_RUN_UID=0 on the service or fix the volume permissions."
     exit 1
 fi
 rm -f "$PROFILE_STORAGE_DIR/.writable" 2>/dev/null || true
 
 log "profiles     : $PROFILE_STORAGE_DIR (uid=$(id -u))"
+if [ "$PROFILE_STORAGE_FALLBACK" = "1" ]; then
+    log "WARN: no profile volume/directory was present; fresh profiles will be"
+    log "      created here and will be ephemeral unless a persistent volume is"
+    log "      mounted at $PROFILE_STORAGE_DIR."
+fi
 log "beat schedule: $CELERY_BEAT_SCHEDULE_FILE"
 log "processes    : web=$RUN_WEB worker=$RUN_WORKER beat=$RUN_BEAT"
 

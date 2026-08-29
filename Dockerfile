@@ -3,6 +3,9 @@ FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+# The runtime volume (when attached) and the ephemeral fallback use the same
+# path, so every process in the container resolves profiles consistently.
+ENV PROFILE_STORAGE_DIR=/app/profiles
 
 # Set working directory
 WORKDIR /app
@@ -65,9 +68,21 @@ COPY . .
 # (e.g. cloned on Windows, where git does not preserve the mode).
 RUN chmod +x /app/start.sh
 
-# Create a non-root user
+# Always have a usable mount point in the image.  Railway volumes are added
+# to the service separately and replace this directory at runtime; when no
+# volume is attached, this image-owned directory is an intentional ephemeral
+# fallback so the browser can create fresh profiles instead of failing at boot.
+RUN mkdir -p /app/profiles && chmod 700 /app/profiles
+
+# Create a non-root user.  Do this before declaring VOLUME so Docker's
+# anonymous fallback is initialized with an appuser-owned directory.
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /ms-playwright
 USER appuser
+
+# Declare the directory as a Docker volume as well.  A platform-provided
+# persistent volume mounted at /app/profiles takes precedence over the
+# anonymous fallback created by Docker when no platform volume is configured.
+VOLUME ["/app/profiles"]
 
 # Expose port
 EXPOSE 8000

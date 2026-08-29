@@ -3,8 +3,9 @@
 ## What changed
 
 The WhatsApp connection no longer round-trips through `storage_state` in the
-database. All WhatsApp browsers now share ONE durable Chromium user-data-dir
-at `{PROFILE_STORAGE_DIR}/whatsapp` (default `./profiles/whatsapp`), opened
+ database. All WhatsApp browsers now share ONE durable Chromium user-data-dir
+ at `{PROFILE_STORAGE_DIR}/whatsapp` (Docker default `/app/profiles/whatsapp`,
+ source-tree default `./profiles/whatsapp`), opened
 via Patchright's `launch_persistent_context()`:
 
 - the QR login browser view (`services/browser_view.py`),
