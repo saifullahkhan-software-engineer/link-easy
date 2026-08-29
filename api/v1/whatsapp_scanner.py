@@ -214,15 +214,36 @@ def _cancel_qr_watcher(session_id: int) -> bool:
     return True
 
 
+async def _publish_browser_session_event(
+    browser_view,
+    status_value: str,
+    message: str,
+    session_id: int,
+) -> None:
+    """Best-effort connection progress over the existing browser SSE stream.
+
+    Database status polling remains authoritative and is intentionally kept as
+    a fallback, so an unavailable/disconnected stream can never break the
+    established connect flow.
+    """
+    publisher = getattr(browser_view, "publish_session_event", None)
+    if not callable(publisher):
+        return
+    try:
+        await publisher(status_value, message, session_id=session_id)
+    except Exception as exc:
+        logger.debug("Could not publish WhatsApp session progress: %s", exc)
+
+
 # ── POST /connect ────────────────────────────────────────────────────────────
 
 
 async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
     """Background task: wait for the QR code in the embedded browser view.
 
-    Polls the live browser page until WhatsApp Web shows the chat list
-    (i.e. the QR was scanned), then persists cookies/storage state and marks
-    the session connected.  On timeout the session is marked disconnected.
+    Waits for WhatsApp Web's authenticated chat-list sidebar (i.e. the QR was
+    scanned), then persists cookies/storage state and marks the session
+    connected. On timeout the session is marked disconnected.
 
     After successful login, the browser is stopped to free resources.
     If 2FA is needed, the browser remains open for the user to enter the code.
@@ -231,63 +252,115 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
     from services.browser_view import browser_view
     from services.whatsapp_browser import (
         get_storage_state,
-        is_logged_in,
-        wait_for_full_whatsapp_surface,
+        wait_for_session_capture_ready,
     )
     from database import async_session
 
     logger.info("👀 Watching for WhatsApp QR scan (session id=%s)", session_id)
 
-    deadline = time.monotonic() + max_wait_seconds
+    watch_started = time.monotonic()
+    deadline = watch_started + max_wait_seconds
     logged_in = False
     encountered_2fa = False
     two_fa_completed = False
     browser_aborted = False
-    while time.monotonic() < deadline:
-        page = browser_view.page
-        if page is None or browser_view.status not in ("running", "starting"):
-            logger.warning("Browser view stopped while waiting for QR — aborting watch")
-            browser_aborted = True
-            break
-        try:
-            if await is_logged_in(page):
-                # Give WhatsApp a moment to finish syncing and flush the
-                # session keys before we snapshot the storage state, then wait
-                # for BOTH the sidebar and conversation shell. A visible
-                # sidebar by itself is an intermediate hydration state.
-                await asyncio.sleep(3)
-                if await wait_for_full_whatsapp_surface(page, timeout_seconds=60):
-                    await asyncio.sleep(2)
-                    logged_in = True
-                    if encountered_2fa:
-                        two_fa_completed = True
-                        logger.info("✅ 2FA completed — WhatsApp logged in successfully")
-                    logger.info("✅ WhatsApp full chat surface rendered after login")
-                    break
-                logger.info("⏳ WhatsApp sidebar is visible but the full chat surface is still loading")
-                continue
+    login_wait_task = None
 
-            # Check for 2FA page
-            if await _check_2fa_page(page):
-                if not encountered_2fa:
-                    encountered_2fa = True
-                    logger.info("🔐 2FA required — keeping browser open for code entry")
-                    logger.info("📝 User must enter the 6-digit code in the browser view")
-                # Keep browser open for 2FA - don't break, continue waiting
-                # The user needs to enter the code manually via the browser view
-        except Exception as exc:  # page may be mid-navigation
-            logger.debug("QR check error: %s", exc)
-        await asyncio.sleep(2)
+    page = browser_view.page
+    if page is None or browser_view.status not in ("running", "starting"):
+        logger.warning("Browser view stopped while waiting for QR — aborting watch")
+        browser_aborted = True
+    else:
+        # Playwright's selector waiter wakes as soon as the authenticated
+        # sidebar appears. Keep a lightweight outer loop only for browser-stop
+        # and 2FA diagnostics; unlike the former two-second login polling, it
+        # does not delay successful detection.
+        login_wait_task = asyncio.create_task(
+            wait_for_session_capture_ready(
+                page,
+                timeout_seconds=max(0.0, deadline - time.monotonic()),
+            )
+        )
+        next_2fa_check = time.monotonic()
+        try:
+            while time.monotonic() < deadline:
+                if (
+                    browser_view.page is not page
+                    or browser_view.status not in ("running", "starting")
+                ):
+                    logger.warning(
+                        "Browser view stopped while waiting for QR — aborting watch"
+                    )
+                    browser_aborted = True
+                    break
+
+                remaining = max(0.0, deadline - time.monotonic())
+                done, _ = await asyncio.wait(
+                    {login_wait_task},
+                    timeout=min(0.5, remaining),
+                )
+                if login_wait_task in done:
+                    try:
+                        logged_in = bool(login_wait_task.result())
+                    except Exception as exc:
+                        logger.debug("QR readiness wait failed: %s", exc)
+                        logged_in = False
+                    break
+
+                # Keep the previous 2FA behavior and messaging, but do not make
+                # it the clock that controls successful QR detection.
+                now = time.monotonic()
+                if now >= next_2fa_check:
+                    next_2fa_check = now + 2.0
+                    try:
+                        if await _check_2fa_page(page) and not encountered_2fa:
+                            encountered_2fa = True
+                            logger.info(
+                                "🔐 2FA required — keeping browser open for code entry"
+                            )
+                            logger.info(
+                                "📝 User must enter the 6-digit code in the browser view"
+                            )
+                    except Exception as exc:  # page may be mid-navigation
+                        logger.debug("2FA check error: %s", exc)
+        finally:
+            if login_wait_task is not None and not login_wait_task.done():
+                login_wait_task.cancel()
+                try:
+                    await login_wait_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    if logged_in:
+        two_fa_completed = encountered_2fa
+        logger.info(
+            "✅ WhatsApp authenticated sidebar detected in %.2fs",
+            time.monotonic() - watch_started,
+        )
+        if two_fa_completed:
+            logger.info("✅ 2FA completed — WhatsApp logged in successfully")
+        await _publish_browser_session_event(
+            browser_view,
+            "capturing",
+            "QR scanned — saving the WhatsApp session…",
+            session_id,
+        )
 
     storage_state = None
     if logged_in:
         logger.info("✅ QR code scanned — extracting session state…")
+        capture_started = time.monotonic()
         try:
             storage_state = await get_storage_state(browser_view.context)
+            logger.info(
+                "✅ WhatsApp session state captured in %.2fs",
+                time.monotonic() - capture_started,
+            )
         except Exception as exc:
             logger.error("Could not extract storage state: %s", exc)
             storage_state = None
 
+    final_status = None
     async with async_session() as db:
         row = (
             await db.execute(
@@ -301,6 +374,7 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
             if already_connected and storage_state is None:
                 # A manual "capture session" already saved this connection.
                 # Never downgrade it just because our own detection timed out.
+                final_status = "connected"
                 message = (
                     f"ℹ️ Session {session_id} was already captured manually — "
                     "leaving it connected"
@@ -311,10 +385,12 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
                 row.status = "connected"
                 row.is_active = True
                 row.updated_at = datetime.now(timezone.utc)
+                final_status = "connected"
                 message = "✅ WhatsApp connected — session state saved"
             else:
                 row.status = "error" if logged_in else "disconnected"
                 row.is_active = False
+                final_status = row.status
                 message = (
                     "❌ WhatsApp connect failed — could not save session state"
                     if logged_in
@@ -325,6 +401,20 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
         await db.commit()
 
     logger.info(message)
+    if final_status == "connected":
+        await _publish_browser_session_event(
+            browser_view,
+            "connected",
+            "WhatsApp connected — session saved.",
+            session_id,
+        )
+    elif final_status in ("error", "disconnected"):
+        await _publish_browser_session_event(
+            browser_view,
+            final_status,
+            message,
+            session_id,
+        )
 
     # Stop the browser when the flow is over:
     # - After successful login (with or without 2FA)
@@ -685,6 +775,12 @@ async def capture_whatsapp_session(
         session_id,
         detected,
         force,
+    )
+    await _publish_browser_session_event(
+        browser_view,
+        "connected",
+        "WhatsApp connected — session saved.",
+        session_id,
     )
 
     try:

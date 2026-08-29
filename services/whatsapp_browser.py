@@ -439,6 +439,52 @@ async def wait_for_login(page: Page, timeout_seconds: float = 30.0) -> bool:
     return False
 
 
+async def wait_for_session_capture_ready(
+    page: Page, timeout_seconds: float = 300.0
+) -> bool:
+    """Wait for a scanned WhatsApp device to be safe to persist.
+
+    The connection flow only needs the authenticated chat-list sidebar and the
+    QR surface to be gone. It does *not* need an active conversation or
+    ``#main``: WhatsApp may not mount that pane until the user selects a chat.
+
+    ``wait_for_selector`` wakes as soon as React makes any authenticated
+    sidebar marker visible, avoiding the old two-second polling delay. Short
+    retry windows let us survive nodes being replaced during hydration while
+    still reacting immediately when the selector appears.
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+
+    while time.monotonic() < deadline:
+        remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+        try:
+            await page.wait_for_selector(
+                LOGGED_IN_SELECTOR,
+                state="visible",
+                timeout=min(1000, remaining_ms),
+            )
+            # During the scan transition the old QR canvas and the sidebar can
+            # briefly overlap. Require the authenticated marker to remain
+            # visible and the QR to be gone before snapshotting storage.
+            if await is_logged_in(page) and not await is_showing_qr(page):
+                return True
+        except Exception:
+            # A normal one-second selector timeout lands here. If the page was
+            # actually closed, fail immediately instead of spinning to the
+            # outer connection timeout.
+            try:
+                if page.is_closed():
+                    return False
+            except Exception:
+                pass
+
+        # This is a condition retry, not a fixed post-login delay. A visible
+        # marker resolves the Playwright wait immediately.
+        await asyncio.sleep(0.1)
+
+    return False
+
+
 async def is_showing_qr(page: Page) -> bool:
     """True when WhatsApp Web is on the QR / login landing screen.
 
@@ -533,16 +579,20 @@ async def is_unsupported_browser_page(page: Page) -> bool:
 
 
 async def wait_for_whatsapp_surface(
-    page: Page, timeout_seconds: float = 45.0
+    page: Page,
+    timeout_seconds: float = 45.0,
+    *,
+    require_full_connected_surface: bool = True,
 ) -> str:
-    """Wait until WhatsApp has rendered either QR or the full logged-in UI.
+    """Wait until WhatsApp has rendered either QR or an authenticated UI.
 
-    ``domcontentloaded`` only means the shell HTML arrived.  On a cold
-    Chromium profile the React chat application can take another 10–30
-    seconds to mount.  Starting another browser during that gap makes the
-    connection look broken and leaves live chat with an empty sidebar.  This
-    helper distinguishes the expected QR surface from the authenticated app
-    without treating a slow page as a logged-out session.
+    ``domcontentloaded`` only means the shell HTML arrived. On a cold Chromium
+    profile the React application can take another 10–30 seconds to mount.
+    Callers that will operate on conversations can keep the default and wait
+    for the complete sidebar + main pane. The QR connection browser passes
+    ``require_full_connected_surface=False`` because a visible authenticated
+    sidebar is already sufficient to capture the persistent session; requiring
+    ``#main`` there can add a pointless 45-second wait.
 
     Returns ``"connected"``, ``"qr"``, ``"unsupported"`` (WhatsApp's
     outdated-browser interstitial — no QR can ever appear) or ``"timeout"``.
@@ -551,6 +601,8 @@ async def wait_for_whatsapp_surface(
     while time.monotonic() < deadline:
         try:
             if await is_logged_in(page):
+                if not require_full_connected_surface:
+                    return "connected"
                 remaining = max(0.5, deadline - time.monotonic())
                 return "connected" if await wait_for_full_whatsapp_surface(
                     page, timeout_seconds=remaining

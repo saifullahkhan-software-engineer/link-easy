@@ -244,13 +244,37 @@ class BrowserViewManager:
                 self._profile_lock = profile_lock
 
             await context.add_init_script(STEALTH_SCRIPT)
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-            # ``domcontentloaded`` is only the web shell.  Wait for the QR
-            # surface or the actual logged-in chat UI before declaring the
-            # browser ready; otherwise a cold profile is handed to the QR
-            # watcher/live chat while React is still hydrating.
-            surface = await wait_for_whatsapp_surface(page, timeout_seconds=45)
+            # Start frame delivery *before* navigation/readiness waits. The old
+            # order left the frontend blank while Chromium and WhatsApp were
+            # visibly loading, then began streaming only after the QR selector
+            # had already appeared. Streaming first does not alter connection
+            # semantics; it simply exposes the earliest browser paint.
+            self._screencast_mode = "screencast"
+            try:
+                cdp.on("Page.screencastFrame", self._on_screencast_frame)
+                await cdp.send("Page.startScreencast", dict(SCREENCAST_PARAMS))
+            except Exception as exc:
+                logger.warning(
+                    "CDP screencast unavailable (%s) — using screenshot polling", exc
+                )
+                self._screencast_mode = "screenshot"
+                self._frame_task = asyncio.create_task(self._screenshot_loop())
+
+            self._set_status("starting", "Opening WhatsApp Web…")
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            self._set_status("starting", "WhatsApp Web is loading…")
+
+            # ``domcontentloaded`` is only the web shell. Wait for QR or an
+            # authenticated sidebar before declaring this connection browser
+            # ready. We deliberately do not require an active conversation
+            # pane: it is unrelated to session capture and may not mount until
+            # a chat is selected.
+            surface = await wait_for_whatsapp_surface(
+                page,
+                timeout_seconds=45,
+                require_full_connected_surface=False,
+            )
             if surface == "unsupported":
                 raise RuntimeError(
                     "WhatsApp Web refused to load in the embedded browser "
@@ -263,30 +287,11 @@ class BrowserViewManager:
                     "WhatsApp Web took too long to render its QR code or chat list. "
                     "Please retry the connection."
                 )
-            if surface == "connected":
-                # Give the sidebar/main pane a final paint before the first
-                # screenshot so the user sees the full WhatsApp surface, not a
-                # half-rendered loading shell.
-                await asyncio.sleep(1.5)
 
-            # Seed one frame immediately so clients see something right away.
-            try:
-                raw = await page.screenshot(type="jpeg", quality=55)
-                self._latest_frame = base64.b64encode(raw).decode()
-            except Exception:
-                pass
-
-            # Preferred path: CDP screencast. Fallback: screenshot polling.
-            self._screencast_mode = "screencast"
-            try:
-                cdp.on("Page.screencastFrame", self._on_screencast_frame)
-                await cdp.send("Page.startScreencast", dict(SCREENCAST_PARAMS))
-            except Exception as exc:
-                logger.warning(
-                    "CDP screencast unavailable (%s) — using screenshot polling", exc
-                )
-                self._screencast_mode = "screenshot"
-                self._frame_task = asyncio.create_task(self._screenshot_loop())
+            # Publish a deterministic current frame as well as the continuous
+            # screencast. This covers Chromium builds that emit no new CDP frame
+            # once a static QR page has settled and also seeds late subscribers.
+            await self._capture_and_publish_frame(page)
 
             self._set_status(
                 "running",
@@ -459,6 +464,28 @@ class BrowserViewManager:
         except RuntimeError:
             pass
 
+    async def publish_session_event(
+        self,
+        status: str,
+        message: str,
+        *,
+        session_id: int | None = None,
+    ) -> None:
+        """Publish connection progress without changing browser lifecycle state.
+
+        Browser state remains ``running`` while the QR watcher captures the
+        session. A distinct SSE event lets the account page react immediately
+        while its existing database polling remains a fallback.
+        """
+        event = {
+            "type": "session",
+            "status": status,
+            "message": message,
+        }
+        if session_id is not None:
+            event["session_id"] = session_id
+        await self.events.publish(event)
+
     async def subscribe(self) -> asyncio.Queue:
         return await self.events.subscribe()
 
@@ -466,6 +493,22 @@ class BrowserViewManager:
         await self.events.unsubscribe(queue)
 
     # ── Frame capture ──────────────────────────────────────────────────────
+
+    async def _capture_and_publish_frame(self, page=None) -> bool:
+        """Capture and publish one current frame, best-effort."""
+        page = page or self._page
+        if page is None:
+            return False
+        try:
+            raw = await page.screenshot(type="jpeg", quality=55)
+        except Exception:
+            return False
+
+        data = base64.b64encode(raw).decode()
+        self._latest_frame = data
+        self._last_publish_ts = time.monotonic()
+        await self.events.publish({"type": "frame", "data": data, "ts": time.time()})
+        return True
 
     def _on_screencast_frame(self, params: dict) -> None:
         """Sync CDP callback — schedule frame processing on the loop."""
@@ -499,19 +542,12 @@ class BrowserViewManager:
             )
 
     async def _screenshot_loop(self) -> None:
-        """Fallback capture path: poll page.screenshot() while running."""
+        """Fallback capture path during startup and while running."""
         while True:
             page = self._page
-            if page is None or self.status != "running":
+            if page is None or self.status not in ("starting", "running"):
                 break
-            try:
-                raw = await page.screenshot(type="jpeg", quality=55)
-                self._latest_frame = base64.b64encode(raw).decode()
-                await self.events.publish(
-                    {"type": "frame", "data": self._latest_frame, "ts": time.time()}
-                )
-            except Exception:
-                pass
+            await self._capture_and_publish_frame(page)
             await asyncio.sleep(0.8)
 
     # ── Input dispatch ─────────────────────────────────────────────────────

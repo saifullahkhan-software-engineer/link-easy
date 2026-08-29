@@ -41,6 +41,11 @@ export default function WhatsAppConnectPage() {
   const [captureFailed, setCaptureFailed] = useState(false);
   const [connectError, setConnectError] = useState(null);
   const connectionStartedRef = useRef(false);
+  // Prevent a very fast SSE "connected" event from being overwritten by the
+  // slightly later POST /connect response, which still carries waiting_qr for
+  // backward compatibility.
+  const sessionConnectedRef = useRef(false);
+  const statusRequestRef = useRef(0);
   const hideBrowserTimerRef = useRef(null);
   const prevStatus = useRef(null);
 
@@ -49,9 +54,14 @@ export default function WhatsAppConnectPage() {
   }, []);
 
   const loadStatus = useCallback(async () => {
+    const requestId = ++statusRequestRef.current;
     try {
       const { data } = await whatsappApi.getStatus();
+      // A request that started before an SSE connection event must not restore
+      // the older waiting_qr snapshot after the backend has committed success.
+      if (requestId !== statusRequestRef.current) return;
       const nextStatus = data.status || 'disconnected';
+      sessionConnectedRef.current = nextStatus === 'connected';
       setStatus(nextStatus);
       setReconnectRequired(nextStatus === 'connected' && Boolean(data.reconnect_required));
       setSessionMeta({
@@ -72,12 +82,28 @@ export default function WhatsAppConnectPage() {
     } catch {
       // Silently ignore — backend may be briefly unreachable.
     } finally {
-      setLoading(false);
+      if (requestId === statusRequestRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     loadStatus();
+  }, [loadStatus]);
+
+  const handleBrowserSessionStatus = useCallback((event) => {
+    if (event?.status !== 'connected') return;
+
+    // The backend publishes this only after the session database commit. Move
+    // to the existing connected account card immediately, then refresh dates
+    // and reconnect metadata from the authoritative status endpoint.
+    sessionConnectedRef.current = true;
+    connectionStartedRef.current = false;
+    statusRequestRef.current += 1;
+    setCaptureFailed(false);
+    setConnectError(null);
+    setReconnectRequired(false);
+    setStatus('connected');
+    void loadStatus();
   }, [loadStatus]);
 
   // Poll while a QR scan is in progress.
@@ -100,13 +126,22 @@ export default function WhatsAppConnectPage() {
       setConnecting(true);
       setConnectError(null);
       connectionStartedRef.current = true;
+      sessionConnectedRef.current = false;
       setCaptureFailed(false);
       setShowBrowserView(true);
       setReconnectRequired(false);
       const { data } = await whatsappApi.connect();
-      toast.success(data?.message || 'WhatsApp connection started — scan the QR code');
-      setStatus(data?.status || 'waiting_qr');
+      if (!sessionConnectedRef.current) {
+        toast.success(data?.message || 'WhatsApp connection started — scan the QR code');
+        setStatus(data?.status || 'waiting_qr');
+      }
     } catch (err) {
+      // If the stream already confirmed the committed session, a late client
+      // timeout from the original request must not revert the successful UI.
+      if (sessionConnectedRef.current) {
+        void loadStatus();
+        return;
+      }
       connectionStartedRef.current = false;
       setShowBrowserView(false);
       const message = getErrorMessage(err, 'Failed to start connection');
@@ -122,6 +157,7 @@ export default function WhatsAppConnectPage() {
       setCapturing(true);
       const { data } = await whatsappApi.captureSession(force);
       connectionStartedRef.current = false;
+      sessionConnectedRef.current = true;
       setCaptureFailed(false);
       setShowBrowserView(false);
       setStatus(data?.status || 'connected');
@@ -145,6 +181,7 @@ export default function WhatsAppConnectPage() {
       setDisconnecting(true);
       const { data } = await whatsappApi.disconnect();
       connectionStartedRef.current = false;
+      sessionConnectedRef.current = false;
       setCaptureFailed(false);
       setShowBrowserView(false);
       setStatus('disconnected');
@@ -373,7 +410,12 @@ export default function WhatsAppConnectPage() {
           </div>
 
           {/* ── Live browser view (QR scan) ──────────────────────── */}
-          {!loading && status !== 'connected' && <BrowserViewPanel controls={false} />}
+          {!loading && status !== 'connected' && (
+            <BrowserViewPanel
+              controls={false}
+              onSessionStatus={handleBrowserSessionStatus}
+            />
+          )}
         </>
       )}
     </div>
