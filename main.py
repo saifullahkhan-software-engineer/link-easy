@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 
 from contextlib import asynccontextmanager
@@ -67,6 +68,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Startup aborted: CREDENTIAL_ENCRYPTION_KEY is missing or malformed")
         raise
+
+    # Report every unset-but-important variable in the first lines of the
+    # deploy log. These no longer abort startup (see core/config.py), so
+    # without this they would only show up later as a broken feature.
+    for _name, _effect in settings.missing_optional_settings().items():
+        logger.warning("Configuration missing: %s is not set — %s", _name, _effect)
 
     # Ensure tables exist, then apply pending schema migrations.  This project
     # does not have Alembic revisions for the original/base tables, so a brand
@@ -202,7 +209,12 @@ async def log_api_calls(request: Request, call_next):
     Live-stream endpoints are excluded to prevent feedback loops.
     """
     path = request.url.path
-    if path.startswith("/api/v1/live"):
+    # Skip the live-stream endpoints (feedback loops) and the platform
+    # healthcheck. Railway probes the healthcheck path every few seconds, so
+    # logging each hit buries the lines that matter — and this codebase has
+    # already been bitten by Railway's log rate limit dropping the traceback
+    # that explained a crash-looping deploy.
+    if path.startswith("/api/v1/live") or path == "/health":
         return await call_next(request)
 
     start = time.perf_counter()
@@ -243,9 +255,47 @@ app.include_router(system_queues_router)
 app.include_router(admin_router)
 
 
+_BOOT_MONOTONIC = time.monotonic()
+
+
 @app.get("/")
 async def root():
     return {"message": "LinkeFlow auth service is running"}
+
+
+@app.get("/health")
+async def health():
+    """Liveness probe — this is Railway's ``healthcheckPath``.
+
+    Deliberately touches no database, cache, queue or browser. Its only job is
+    to prove the process is alive and its event loop is serving, so a slow or
+    briefly-unavailable Postgres can never fail a deploy by itself.
+
+    It also reports the two things that have actually broken deployments here
+    and are otherwise only visible by scrolling the deploy log:
+      * whether the browser-profile storage is writable (a Railway volume is
+        mounted root-owned, which shadows the appuser-owned mount point in the
+        image — start.sh then falls back to /tmp and profiles stop persisting);
+      * which important-but-optional settings are unset.
+    """
+    profile_dir = settings.PROFILE_STORAGE_DIR
+    try:
+        profile_writable = os.access(profile_dir, os.W_OK)
+    except Exception:  # a malformed path should not fail the probe
+        profile_writable = False
+
+    missing = settings.missing_optional_settings()
+    return {
+        "status": "ok",
+        "service": "link-easy",
+        "environment": settings.ENVIRONMENT,
+        "uptime_seconds": round(time.monotonic() - _BOOT_MONOTONIC, 1),
+        "profile_storage": {
+            "path": profile_dir,
+            "writable": profile_writable,
+        },
+        "missing_configuration": sorted(missing),
+    }
 
 
 @app.get("/api/v1/features")

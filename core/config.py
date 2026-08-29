@@ -1,5 +1,6 @@
 
 import os
+from typing import ClassVar
 
 from pydantic_settings import BaseSettings
 from pydantic import Field, model_validator
@@ -58,12 +59,21 @@ class Settings(BaseSettings):
     # is shorter (which it is by default).
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
-    PASSWORD_RESET_URL: str
-    BACKEND_CORS_ORIGINS: str
+    # The four settings below are used by exactly one feature each (password
+    # reset email, browser CORS, transactional email). They used to be
+    # *required*, and because `settings` is constructed at import time that
+    # meant one unset Railway variable raised a pydantic ValidationError while
+    # importing `main` — uvicorn never bound $PORT, so the platform reported a
+    # generic "Network › Healthcheck" failure minutes later with the real
+    # cause scrolled off in the deploy log. They now default to "" and are
+    # surfaced by `missing_optional_settings()` instead, so the service boots
+    # and tells you what is unset.
+    PASSWORD_RESET_URL: str = ""
+    BACKEND_CORS_ORIGINS: str = ""
 
     # Email settings
-    RESEND_API_KEY: str
-    FROM_EMAIL: str
+    RESEND_API_KEY: str = ""
+    FROM_EMAIL: str = ""
 
     # Redis settings
     REDIS_URL: str
@@ -195,6 +205,34 @@ class Settings(BaseSettings):
             for origin in self.BACKEND_CORS_ORIGINS.split(",")
             if origin.strip()
         ]
+
+    #: name -> what breaks when it is left unset. Used to warn at startup and
+    #: to report the gap over GET /health, so a half-configured deployment is
+    #: diagnosable without reading the deploy log. ClassVar, not a field:
+    #: pydantic must not treat it as an environment-backed setting.
+    OPTIONAL_SETTING_EFFECTS: ClassVar[dict[str, str]] = {
+        "JWT_SECRET": "login tokens cannot be signed or verified — authentication fails",
+        "BACKEND_CORS_ORIGINS": "browsers block every API call from the frontend (CORS)",
+        "PASSWORD_RESET_URL": "password-reset emails carry no link back to the app",
+        "RESEND_API_KEY": "no transactional email is sent (Resend key missing)",
+        "FROM_EMAIL": "no transactional email is sent (sender address missing)",
+    }
+
+    def missing_optional_settings(self) -> dict[str, str]:
+        """Unset-but-important settings, mapped to what they break.
+
+        JWT_SECRET is reported through its legacy alias too, so a deployment
+        that sets JWT_SECRET_KEY (docker-compose) is not flagged.
+        """
+        missing: dict[str, str] = {}
+        for name, effect in self.OPTIONAL_SETTING_EFFECTS.items():
+            if name == "JWT_SECRET":
+                if self.JWT_SECRET:
+                    continue
+            elif getattr(self, name, ""):
+                continue
+            missing[name] = effect
+        return missing
 
     class Config:
         env_file = ".env"
