@@ -16,6 +16,7 @@ from services.whatsapp_browser import (  # noqa: E402
     MAIN_PANE_SELECTOR,
     MSG_INPUT_SELECTOR,
     PANE_SIDE_SELECTOR,
+    wait_for_full_whatsapp_surface,
 )
 from services.whatsapp_live_browser import (  # noqa: E402
     DEFAULT_CHAT_LIMIT,
@@ -245,6 +246,47 @@ class WhatsAppLiveBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "error")
         release.assert_called_once_with(profile_lock)
         self.assertIsNone(manager._profile_lock)
+
+    async def test_wait_for_full_surface_recognizes_intro_screen_when_no_chat_open(self):
+        """When starting live chat, no conversation is open yet. Intro screen or chat rows must satisfy full surface wait."""
+        class _IntroPage:
+            async def query_selector(self, selector):
+                if selector == PANE_SIDE_SELECTOR:
+                    return _VisibleElement()
+                if 'intro-text' in selector or 'chatlist-header' in selector:
+                    return _VisibleElement()
+                return None
+
+        class _VisibleElement:
+            async def is_visible(self):
+                return True
+
+        page = _IntroPage()
+        with (
+            patch("services.whatsapp_browser.is_logged_in", AsyncMock(return_value=True)),
+            patch("services.whatsapp_browser.is_showing_qr", AsyncMock(return_value=False)),
+        ):
+            ready = await wait_for_full_whatsapp_surface(page, timeout_seconds=1.0)
+        self.assertTrue(ready)
+
+    async def test_wait_for_full_surface_recognizes_active_conversation_pane(self):
+        class _ConversationPage:
+            async def query_selector(self, selector):
+                if selector == PANE_SIDE_SELECTOR or selector == "#main":
+                    return _VisibleElement()
+                return None
+
+        class _VisibleElement:
+            async def is_visible(self):
+                return True
+
+        page = _ConversationPage()
+        with (
+            patch("services.whatsapp_browser.is_logged_in", AsyncMock(return_value=True)),
+            patch("services.whatsapp_browser.is_showing_qr", AsyncMock(return_value=False)),
+        ):
+            ready = await wait_for_full_whatsapp_surface(page, timeout_seconds=1.0)
+        self.assertTrue(ready)
 
 
 if __name__ == "__main__":
