@@ -33,6 +33,16 @@ MarkupSafe==3.0.3
 packaging==26.2
 patchright==1.60.0
 prompt_toolkit==3.0.52
+# Sync Postgres driver for the Celery worker/beat processes.
+# worker/tasks/*.py build a "postgresql+psycopg2://" URL and call
+# create_engine() at MODULE IMPORT time; SQLAlchemy resolves the DBAPI
+# eagerly there, so without this the worker and beat both die on startup
+# with "ModuleNotFoundError: No module named 'psycopg2'" and take the whole
+# container down with them. The API/Alembic keep using asyncpg (async).
+# Use the "-binary" wheel: it bundles libpq, so the slim image needs no
+# gcc/libpq-dev. 2.9.12 is the first release with cp314 manylinux wheels,
+# which the python:3.14-slim base image requires.
+psycopg2-binary==2.9.12
 pyasn1==0.6.3
 pycparser==3.0
 pydantic==2.13.4
