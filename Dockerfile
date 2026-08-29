@@ -74,15 +74,20 @@ RUN chmod +x /app/start.sh
 # fallback so the browser can create fresh profiles instead of failing at boot.
 RUN mkdir -p /app/profiles && chmod 700 /app/profiles
 
-# Create a non-root user.  Do this before declaring VOLUME so Docker's
-# anonymous fallback is initialized with an appuser-owned directory.
+# Create the non-root user and hand /app over to it, so the image-owned
+# /app/profiles fallback directory is writable by the runtime user even
+# before any platform volume is attached.
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /ms-playwright
 USER appuser
 
-# Declare the directory as a Docker volume as well.  A platform-provided
-# persistent volume mounted at /app/profiles takes precedence over the
-# anonymous fallback created by Docker when no platform volume is configured.
-VOLUME ["/app/profiles"]
+# NOTE: deliberately NO `VOLUME ["/app/profiles"]` instruction here.
+# Railway's Dockerfile builder rejects docker VOLUME directives
+# ("dockerfile invalid: docker VOLUME ... is not supported, use Railway
+# Volumes"). Persistent storage is instead attached as a Railway volume in
+# the service's Volumes settings, mounted at exactly /app/profiles; it
+# shadows the image-owned directory above at runtime. When no volume is
+# attached, start.sh re-creates the directory and the app runs with fresh,
+# ephemeral profiles instead of failing the deploy.
 
 # Expose port
 EXPOSE 8000

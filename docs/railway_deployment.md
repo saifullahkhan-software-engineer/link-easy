@@ -50,13 +50,17 @@ Railway service's **Volumes** settings; the repository cannot provision a named
 Railway volume by itself. The mount path must be exactly `/app/profiles` so the
 API and the worker share the same browser profiles.
 
-The image also declares `/app/profiles` as a Docker volume and creates the
-mount-point during the build. If no Railway volume is attached, `start.sh`
-creates the directory and the application starts with fresh profiles instead of
-failing deployment. This fallback is ephemeral: the database may still say an
-account is `ACTIVE` / `connected`, but the browser session will be gone after a
-restart or deploy and the account must be connected again. A persistent Railway
-volume is therefore strongly recommended for real use.
+The image creates the `/app/profiles` mount-point directory during the build.
+The Dockerfile deliberately does **not** declare a Docker `VOLUME`
+instruction — Railway's builder rejects it ("docker VOLUME ... is not
+supported, use Railway Volumes") — so persistent storage comes only from the
+service-level volume attached above. If no Railway volume is attached,
+`start.sh` creates the directory and the application starts with fresh
+profiles instead of failing deployment. This fallback is ephemeral: the
+database may still say an account is `ACTIVE` / `connected`, but the browser
+session will be gone after a restart or deploy and the account must be
+connected again. A persistent Railway volume is therefore strongly
+recommended for real use.
 
 `railway.json` deliberately does **not** set `requiredMountPath`. That setting
 would make Railway reject a deployment before the fallback can run. An attached
