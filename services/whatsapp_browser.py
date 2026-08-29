@@ -319,6 +319,27 @@ MAIN_PANE_SELECTOR = (
     '[role="main"][data-testid]'
 )
 
+# Selectors indicating the default intro / landing screen or hydrated app shell
+# when no conversation is currently selected.
+INTRO_PANE_SELECTORS = (
+    'div[data-testid="intro-text"]',
+    'div[data-testid="intro-title"]',
+    'div[data-testid="intro-md-beta-logo-light"]',
+    'span[data-icon="intro-md-beta-logo-light"]',
+    'span[data-icon="intro-md-beta-logo-dark"]',
+    'div[data-asset-intro-image-light="true"]',
+    'div[data-asset-intro-image-dark="true"]',
+    'div[data-testid="chatlist-header"]',
+    'header[data-testid="chatlist-header"]',
+    '#side header',
+    '#app div[role="region"]',
+    'div[data-testid="cell-frame-container"]',
+    '#pane-side div[role="row"]',
+    '#pane-side div[role="listitem"]',
+)
+
+INTRO_PANE_SELECTOR = ', '.join(INTRO_PANE_SELECTORS)
+
 # Candidate selectors that indicate "you are logged in" (the main interface).
 # Ordered from most- to least-reliable; the first match wins.  Old data-testid
 # entries are kept as fallbacks for older web builds.
@@ -528,7 +549,7 @@ async def is_showing_qr(page: Page) -> bool:
 async def wait_for_full_whatsapp_surface(
     page: Page, timeout_seconds: float = 60.0
 ) -> bool:
-    """Wait for both the sidebar and the conversation shell to be visible.
+    """Wait for both the sidebar and the conversation shell (or intro pane) to be visible.
 
     ``#pane-side`` alone appears before WhatsApp finishes hydrating.  Reusing
     the profile at that point is a race: the next live-chat browser inherits a
@@ -539,7 +560,7 @@ async def wait_for_full_whatsapp_surface(
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
-            if not await is_logged_in(page):
+            if not await is_logged_in(page) or await is_showing_qr(page):
                 await asyncio.sleep(0.75)
                 continue
             sidebar_visible = False
@@ -548,14 +569,31 @@ async def wait_for_full_whatsapp_surface(
                 if sidebar is not None and await sidebar.is_visible():
                     sidebar_visible = True
                     break
-            main_visible = False
+            if not sidebar_visible:
+                await asyncio.sleep(0.75)
+                continue
+
+            # Check if an active conversation pane is open
             for selector in MAIN_PANE_SELECTOR.split(","):
                 candidate = await page.query_selector(selector.strip())
                 if candidate is not None and await candidate.is_visible():
-                    main_visible = True
-                    break
-            if sidebar_visible and main_visible:
+                    return True
+
+            # Check if intro / welcome screen or chatlist header / rows are rendered
+            for selector in INTRO_PANE_SELECTORS:
+                candidate = await page.query_selector(selector)
+                if candidate is not None and await candidate.is_visible():
+                    return True
+
+            # Fallback: check if chat search box or any chat row is visible in sidebar
+            chat_row = await page.query_selector(CHAT_ROW_SELECTOR)
+            if chat_row is not None and await chat_row.is_visible():
                 return True
+
+            search_box = await page.query_selector(SEARCH_BOX_SELECTOR)
+            if search_box is not None and await search_box.is_visible():
+                return True
+
         except Exception:
             # Navigation/React hydration may detach one of the nodes briefly.
             pass

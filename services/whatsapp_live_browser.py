@@ -43,6 +43,7 @@ from services.whatsapp_browser import (
     SEND_BUTTON_SELECTOR,
     STEALTH_SCRIPT,
     USER_AGENT,
+    clear_stale_chromium_singleton,
     ensure_whatsapp_profile_dir,
     is_logged_in,
     navigate_to_whatsapp,
@@ -165,6 +166,7 @@ class LiveBrowserManager:
             self._set_status("starting", "Launching WhatsApp live-chat browser…")
 
             try:
+                clear_stale_chromium_singleton()
                 pw = await async_playwright().start()
                 try:
                     context = await pw.chromium.launch_persistent_context(
@@ -210,11 +212,14 @@ class LiveBrowserManager:
                         "the saved session may have expired. Reconnect via the "
                         "WhatsApp Scanner connect flow."
                     )
-                if not await wait_for_full_whatsapp_surface(page, timeout_seconds=60):
-                    raise RuntimeError(
-                        "WhatsApp chat list loaded but the full conversation surface "
-                        "did not render. Reconnect and try again."
-                    )
+                if not await wait_for_full_whatsapp_surface(page, timeout_seconds=30):
+                    # If wait_for_login passed, verify that the logged-in sidebar is still visible
+                    # before failing.
+                    if not await is_logged_in(page):
+                        raise RuntimeError(
+                            "WhatsApp chat list loaded but the full conversation surface "
+                            "did not render. Reconnect and try again."
+                        )
                 await asyncio.sleep(1.0)
 
                 self.active_chat_id = None
