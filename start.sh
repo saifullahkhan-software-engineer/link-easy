@@ -107,10 +107,12 @@ export CELERY_BEAT_SCHEDULE_FILE="${CELERY_BEAT_SCHEDULE_FILE:-/tmp/linkeasy-cel
 
 # Durable Chromium profiles. Railway can mount a persistent volume at this
 # exact path. If no volume is attached, the Dockerfile provides the directory
-# (and declares it as an anonymous Docker volume) and this preflight creates
-# it when the image is run directly. The app can therefore start with fresh,
-# ephemeral profiles instead of failing the build/deploy; existing sessions
-# will need to be connected again after a restart or deploy.
+# (created during the image build; no VOLUME instruction is declared —
+# Railway's builder rejects it) and this preflight creates it when the image
+# is run directly or the directory is missing. The app can therefore start
+# with fresh, ephemeral profiles instead of failing the build/deploy;
+# existing sessions will need to be connected again after a restart or
+# deploy.
 PROFILE_STORAGE_DIR="${PROFILE_STORAGE_DIR:-/app/profiles}"
 export PROFILE_STORAGE_DIR
 
