@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { liveApi } from '../../api/endpoints';
 import { getErrorMessage } from '../../api/client';
@@ -18,7 +18,7 @@ const STATUS_STYLES = {
  * The view is interactive: clicking or scrolling on the image dispatches the
  * equivalent input into the real browser via `/api/v1/live/browser/input`.
  */
-export default function BrowserViewPanel({ controls = true }) {
+export default function BrowserViewPanel({ controls = true, onSessionStatus = null }) {
   const [status, setStatus] = useState('idle');
   const [message, setMessage] = useState('');
   const [error, setError] = useState(null);
@@ -26,8 +26,13 @@ export default function BrowserViewPanel({ controls = true }) {
   const [connected, setConnected] = useState(false);
   const [starting, setStarting] = useState(false);
   const [interactive, setInteractive] = useState(true);
+  const onSessionStatusRef = useRef(onSessionStatus);
 
   const statusStyle = STATUS_STYLES[status] || STATUS_STYLES.idle;
+
+  useEffect(() => {
+    onSessionStatusRef.current = onSessionStatus;
+  }, [onSessionStatus]);
 
   // ── Stream ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -44,6 +49,20 @@ export default function BrowserViewPanel({ controls = true }) {
         setError(data.error || null);
       } catch {
         // ignore
+      }
+    });
+
+    // Connection progress is separate from browser lifecycle status. In
+    // particular, "capturing" and "connected" arrive while the browser is
+    // still running, allowing the account page to update immediately without
+    // removing its existing database-polling fallback.
+    es.addEventListener('session', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.message) setMessage(data.message);
+        onSessionStatusRef.current?.(data);
+      } catch {
+        // ignore malformed/late events; status polling remains authoritative
       }
     });
 
@@ -196,7 +215,7 @@ export default function BrowserViewPanel({ controls = true }) {
             {status === 'starting' ? (
               <>
                 <Spinner />
-                <p className="mt-3 text-sm text-zinc-400">Launching headless Chromium…</p>
+                <p className="mt-3 text-sm text-zinc-400">{message || 'Launching headless Chromium…'}</p>
               </>
             ) : status === 'error' ? (
               <>
