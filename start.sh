@@ -25,6 +25,14 @@
 #
 # Behaviour
 # ---------
+#   * Verifies the configuration the app cannot start without (DATABASE_URL,
+#     REDIS_URL, CREDENTIAL_ENCRYPTION_KEY) and exits with a one-line
+#     diagnosis naming the missing variable. Without this, a missing Railway
+#     variable killed uvicorn at import time — before it bound $PORT — and the
+#     only symptom was a generic "Network › Healthcheck" failure ~5 min later.
+#   * Makes sure the profile storage is writable, falling back to
+#     PROFILE_FALLBACK_DIR instead of aborting the deploy when a root-owned
+#     Railway volume shadows the mount point (see the preflight below).
 #   * Starts uvicorn first and waits until it is accepting TCP connections.
 #     Uvicorn binds its socket only AFTER the lifespan startup (init_db +
 #     Alembic migrations) completes, so this guarantees the worker never
@@ -52,6 +60,10 @@
 #   CELERY_LOGLEVEL             worker/beat log level      (default info)
 #   WAIT_FOR_WEB_SECONDS        API readiness timeout      (default 300)
 #   SHUTDOWN_GRACE_SECONDS      SIGTERM grace before KILL  (default 25)
+#   PROFILE_FALLBACK_DIR        where to keep profiles when the configured
+#                               PROFILE_STORAGE_DIR is not writable
+#                                                          (default
+#                                                           /tmp/linkeasy-profiles)
 #
 set -uo pipefail
 
@@ -114,34 +126,145 @@ export CELERY_BEAT_SCHEDULE_FILE="${CELERY_BEAT_SCHEDULE_FILE:-/tmp/linkeasy-cel
 # existing sessions will need to be connected again after a restart or
 # deploy.
 PROFILE_STORAGE_DIR="${PROFILE_STORAGE_DIR:-/app/profiles}"
+# Used only when the configured directory exists but cannot be written (the
+# usual cause: a Railway volume mounted over it, owned by root, while this
+# image runs as the non-root `appuser`). Overridable for testing.
+PROFILE_FALLBACK_DIR="${PROFILE_FALLBACK_DIR:-/tmp/linkeasy-profiles}"
 export PROFILE_STORAGE_DIR
 
-# ── Preflight ────────────────────────────────────────────────────────────────
+# ── Preflight: required configuration ────────────────────────────────────────
+#
+# Why this exists: core/config.py builds `settings` at IMPORT time, and
+# core.security.validate_encryption_key() runs in the FastAPI lifespan. A
+# missing variable therefore killed uvicorn before it ever bound $PORT, and
+# the platform's only symptom was a generic "Network › Healthcheck" failure
+# five minutes later. Checking here turns that into one explicit line naming
+# the variable, in the first second of the deploy log.
 
-PROFILE_STORAGE_FALLBACK=0
-if [ ! -d "$PROFILE_STORAGE_DIR" ]; then
-    PROFILE_STORAGE_FALLBACK=1
-fi
-if ! mkdir -p "$PROFILE_STORAGE_DIR" 2>/dev/null; then
-    log "FATAL: cannot create PROFILE_STORAGE_DIR=$PROFILE_STORAGE_DIR"
-    log "       On Railway, a mounted volume may be owned by root; set"
-    log "       RAILWAY_RUN_UID=0 on the service or pre-create the directory"
-    log "       with write permission for the container user."
+# True when $1 is set in the environment OR defined in a local .env file
+# (start.sh is also runnable outside the image, where .env is how config is
+# supplied; the Docker build excludes .env, so on the platform only the
+# environment matters).
+env_value_present() {
+    local name="$1"
+    if [ -n "${!name+x}" ]; then
+        return 0
+    fi
+    if [ -f .env ] && grep -qE "^[[:space:]]*(export[[:space:]]+)?${name}=" .env 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# True when ANY of the given names (a variable and its legacy aliases) is set.
+any_value_present() {
+    local name
+    for name in "$@"; do
+        if env_value_present "$name"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+MISSING_REQUIRED=""
+# DATABASE_URL — database.py builds the engine from it at import time.
+any_value_present DATABASE_URL || MISSING_REQUIRED="$MISSING_REQUIRED DATABASE_URL"
+# REDIS_URL — Celery broker/backend AND the per-account profile locks, so a
+# missing value breaks every connect path with a confusing 500.
+any_value_present REDIS_URL || MISSING_REQUIRED="$MISSING_REQUIRED REDIS_URL"
+# CREDENTIAL_ENCRYPTION_KEY — validated during lifespan startup; a missing or
+# malformed key aborts boot (ENCRYPTION_KEY is the accepted legacy alias).
+any_value_present CREDENTIAL_ENCRYPTION_KEY ENCRYPTION_KEY \
+    || MISSING_REQUIRED="$MISSING_REQUIRED CREDENTIAL_ENCRYPTION_KEY"
+
+if [ -n "$MISSING_REQUIRED" ]; then
+    log "FATAL: required configuration is missing:$MISSING_REQUIRED"
+    log "       The API cannot bind \$PORT without these, so the deploy would"
+    log "       otherwise sit in 'Healthcheck' for ${WAIT_FOR_WEB_SECONDS}s and fail"
+    log "       with no explanation. Set them on the Railway service's Variables"
+    log "       tab, e.g.:"
+    log "         DATABASE_URL=\${{Postgres.DATABASE_URL}}"
+    log "         REDIS_URL=\${{Redis.REDIS_URL}}"
+    log "         CREDENTIAL_ENCRYPTION_KEY=\$(python -c 'import secrets; print(secrets.token_hex(32))')"
     exit 1
 fi
+
+# These no longer abort boot (core/config.py defaults them to ""), but each
+# one silently disables a user-visible feature, so say so up front.
+MISSING_OPTIONAL=""
+any_value_present JWT_SECRET JWT_SECRET_KEY \
+    || MISSING_OPTIONAL="$MISSING_OPTIONAL JWT_SECRET"
+env_value_present BACKEND_CORS_ORIGINS || MISSING_OPTIONAL="$MISSING_OPTIONAL BACKEND_CORS_ORIGINS"
+env_value_present PASSWORD_RESET_URL || MISSING_OPTIONAL="$MISSING_OPTIONAL PASSWORD_RESET_URL"
+env_value_present RESEND_API_KEY || MISSING_OPTIONAL="$MISSING_OPTIONAL RESEND_API_KEY"
+env_value_present FROM_EMAIL || MISSING_OPTIONAL="$MISSING_OPTIONAL FROM_EMAIL"
+if [ -n "$MISSING_OPTIONAL" ]; then
+    log "WARN: optional configuration missing:$MISSING_OPTIONAL"
+    log "      The service still starts, but: JWT_SECRET unset = login tokens"
+    log "      cannot be signed/verified; BACKEND_CORS_ORIGINS unset = browsers"
+    log "      block every call from the frontend; the remaining three disable"
+    log "      password-reset email."
+fi
+
+# ── Preflight: profile storage ───────────────────────────────────────────────
+
+# Can this uid actually create files in $1? mkdir -p succeeds on an existing
+# root-owned directory, so the write test is the part that matters.
+profile_dir_writable() {
+    mkdir -p "$1" 2>/dev/null || return 1
+    touch "$1/.writable" 2>/dev/null || return 1
+    rm -f "$1/.writable" 2>/dev/null || true
+    return 0
+}
+
+PROFILE_STORAGE_FALLBACK=0
+PROFILE_STORAGE_MISSING=0
+if [ ! -d "$PROFILE_STORAGE_DIR" ]; then
+    PROFILE_STORAGE_MISSING=1
+fi
+
+if ! profile_dir_writable "$PROFILE_STORAGE_DIR" && [ "$(id -u)" = "0" ]; then
+    # Running as root (e.g. RAILWAY_RUN_UID=0) — a freshly mounted volume is
+    # owned by root, so we can just take it over.
+    chown -R "$(id -u):$(id -g)" "$PROFILE_STORAGE_DIR" 2>/dev/null || true
+fi
+
+if ! profile_dir_writable "$PROFILE_STORAGE_DIR"; then
+    # Railway mounts volumes as root:root, which shadows the appuser-owned
+    # mount point baked into the image; no chown/chmod done at build time can
+    # survive that. Rather than abort the whole deploy over a permissions
+    # problem — which surfaced only as "Healthcheck failure" — fall back to a
+    # writable directory and boot. Profiles then do not survive a restart, so
+    # the operator is told exactly which variable restores persistence.
+    if profile_dir_writable "$PROFILE_FALLBACK_DIR"; then
+        log "WARN: PROFILE_STORAGE_DIR=$PROFILE_STORAGE_DIR is not writable by uid $(id -u)."
+        log "      A Railway volume mounted there is owned by root, while this"
+        log "      image runs as the non-root 'appuser'."
+        log "      Falling back to $PROFILE_FALLBACK_DIR so the service can start."
+        log "      >>> Browser profiles will NOT persist across restarts/deploys. <<<"
+        log "      To use the persistent volume, set RAILWAY_RUN_UID=0 on the"
+        log "      Railway service and redeploy (that makes the container run as"
+        log "      root, which owns the mount)."
+        PROFILE_STORAGE_DIR="$PROFILE_FALLBACK_DIR"
+        PROFILE_STORAGE_FALLBACK=1
+    else
+        log "FATAL: neither $PROFILE_STORAGE_DIR nor $PROFILE_FALLBACK_DIR is"
+        log "       writable by uid $(id -u) — there is nowhere to put a browser"
+        log "       profile. On Railway set RAILWAY_RUN_UID=0 on the service."
+        exit 1
+    fi
+fi
+
+export PROFILE_STORAGE_DIR
 if ! chmod 700 "$PROFILE_STORAGE_DIR" 2>/dev/null; then
     log "WARN: could not chmod 700 $PROFILE_STORAGE_DIR (continuing)"
 fi
-if ! touch "$PROFILE_STORAGE_DIR/.writable" 2>/dev/null; then
-    log "FATAL: PROFILE_STORAGE_DIR=$PROFILE_STORAGE_DIR is not writable by uid $(id -u)."
-    log "       On Railway, a mounted volume may be owned by root; set"
-    log "       RAILWAY_RUN_UID=0 on the service or fix the volume permissions."
-    exit 1
-fi
-rm -f "$PROFILE_STORAGE_DIR/.writable" 2>/dev/null || true
 
 log "profiles     : $PROFILE_STORAGE_DIR (uid=$(id -u))"
 if [ "$PROFILE_STORAGE_FALLBACK" = "1" ]; then
+    log "              (ephemeral fallback — see the warning above)"
+elif [ "$PROFILE_STORAGE_MISSING" = "1" ]; then
     log "WARN: no profile volume/directory was present; fresh profiles will be"
     log "      created here and will be ephemeral unless a persistent volume is"
     log "      mounted at $PROFILE_STORAGE_DIR."

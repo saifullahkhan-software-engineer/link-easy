@@ -66,9 +66,41 @@ recommended for real use.
 would make Railway reject a deployment before the fallback can run. An attached
 volume at `/app/profiles` is still used automatically when present.
 
-Volumes may mount as **root**, while this image runs as the non-root `appuser`,
-so you may also need to set `RAILWAY_RUN_UID=0` on the service — otherwise
-`start.sh` exits at boot with a clear "not writable" error.
+Volumes may mount as **root**, while this image runs as the non-root `appuser`.
+That is the single most common cause of a failed deploy here, so:
+
+> **Set `RAILWAY_RUN_UID=0` on the app service whenever a volume is attached.**
+> It makes the container run as root, which owns the mount, so the profile
+> directory is writable and sessions survive a restart.
+
+If it is *not* set, the deploy still succeeds: `start.sh` detects the
+unwritable mount, falls back to `/tmp/linkeasy-profiles`, logs a loud warning
+naming `RAILWAY_RUN_UID=0`, and carries on. Profiles then live on ephemeral
+storage, so every browser session is lost on the next restart or deploy and
+each account must be connected again. `GET /health` reports the directory
+actually in use and whether it is writable:
+
+```json
+{"status":"ok","profile_storage":{"path":"/tmp/linkeasy-profiles","writable":true}}
+```
+
+## Healthcheck
+
+`railway.json` points the platform healthcheck at **`/health`**, not `/`. That
+endpoint touches no database, cache, queue or browser — it only proves the
+process is alive — so a Postgres that is still starting can never fail a
+deploy by itself. It also reports the two things that have actually broken
+deploys here and are otherwise buried in the deploy log: the resolved profile
+directory (see above) and any important-but-unset configuration
+(`missing_configuration`).
+
+Note that a healthcheck failure means the container never bound `$PORT`; the
+reason is always in the deploy log *above* it. `start.sh` fails fast with an
+explicit line when the configuration the API cannot start without is missing:
+
+```
+[start.sh] FATAL: required configuration is missing: DATABASE_URL
+```
 
 ## Environment variables
 
@@ -85,6 +117,12 @@ so you may also need to set `RAILWAY_RUN_UID=0` on the service — otherwise
 | `RESEND_API_KEY` | Transactional email. |
 | `FROM_EMAIL` | e.g. `noreply@yourdomain.com`. |
 
+`DATABASE_URL`, `REDIS_URL` and `CREDENTIAL_ENCRYPTION_KEY` are the only ones
+the process **cannot** start without — `start.sh` checks them in its first
+second and names whichever is missing. The remaining four each back exactly one
+feature (CORS for the frontend, password-reset email); an unset one is logged
+at startup and listed by `GET /health` instead of aborting the deploy.
+
 ### Strongly recommended
 
 | Variable | Value | Why |
@@ -92,7 +130,8 @@ so you may also need to set `RAILWAY_RUN_UID=0` on the service — otherwise
 | `PROFILE_STORAGE_DIR` | `/app/profiles` | Matches the persistent volume mount. The Docker image sets this default; only override it when deliberately using another storage path. |
 | `ENVIRONMENT` | `production` or `deployment` | `deployment` = public demo (no Beat, no recurring jobs, banner shown). See "Optional tuning". |
 | `PYTHONUNBUFFERED` | `1` | Logs appear immediately. |
-| `RAILWAY_RUN_UID` | `0` when needed | Lets the runtime user write a volume created with root ownership. Not needed when the attached volume already has permissions for `appuser`. |
+| `RAILWAY_RUN_UID` | `0` | **Set this whenever a volume is attached.** Railway mounts volumes as root, so without it the container's non-root `appuser` cannot write `/app/profiles` and profiles silently fall back to ephemeral `/tmp/linkeasy-profiles`. |
+| `PROFILE_FALLBACK_DIR` | `/tmp/linkeasy-profiles` | Where profiles go when the configured directory is not writable. Rarely worth changing. |
 
 `PORT` is injected by Railway and honoured by `start.sh`; do not set it.
 
@@ -151,9 +190,12 @@ per account permanently (see `docs/persistent_profiles_rollout.md`).
 
 | Symptom | Check |
 |---|---|
-| Profiles reset after a deploy/restart | Attach a persistent volume at `/app/profiles`; without one the app intentionally uses fresh ephemeral profiles. |
-| `FATAL: PROFILE_STORAGE_DIR ... not writable` | Set `RAILWAY_RUN_UID=0`, or fix the attached volume's ownership/permissions for `appuser`. |
+| Profiles reset after a deploy/restart | Attach a persistent volume at `/app/profiles` **and** set `RAILWAY_RUN_UID=0`; without one the app intentionally uses fresh ephemeral profiles. |
+| `Network › Healthcheck` failure, no other error | The container never bound `$PORT`. Read the deploy log *above* the healthcheck line: it is either `[start.sh] FATAL: required configuration is missing: …`, an unreachable `DATABASE_URL`, or a bad `CREDENTIAL_ENCRYPTION_KEY`. |
+| `WARN: PROFILE_STORAGE_DIR ... is not writable` + `Falling back to` | Expected when a volume is attached without `RAILWAY_RUN_UID=0`. The deploy still succeeds, but profiles are ephemeral — set the variable and redeploy to make them persist. |
+| `FATAL: neither … nor … is writable` | No writable storage at all; set `RAILWAY_RUN_UID=0`. |
 | `FATAL: the API never became ready` | `DATABASE_URL` unreachable, failed migration, or bad `CREDENTIAL_ENCRYPTION_KEY` — the traceback is directly above this line. |
+| Browser sessions lost after every restart, volume is attached | `GET /health` → `profile_storage.path` is `/tmp/linkeasy-profiles` instead of `/app/profiles`: the volume is not writable (see `RAILWAY_RUN_UID`) or is mounted at the wrong path. |
 | Connect returns 500 immediately | `REDIS_URL` missing/unreachable (profile lock). |
 | Connect works, campaigns/scans do nothing | Worker down — `GET /api/v1/system/queues/celery-inspect`. |
 | Connected, then logged out after deploy | The persistent volume is missing, mounted at the wrong path, or not writable. Attach it at `/app/profiles`. |

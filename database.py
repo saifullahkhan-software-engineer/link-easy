@@ -33,10 +33,14 @@ engine = create_async_engine(
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-# Startup retry knobs (env-tunable). Defaults keep the worst-case wait small
-# so a hopeless DATABASE_URL fails fast instead of stalling the deploy.
-DB_CONNECT_ATTEMPTS = max(1, int(os.getenv("DB_CONNECT_ATTEMPTS", "3")))
-DB_CONNECT_RETRY_DELAY = max(0.0, float(os.getenv("DB_CONNECT_RETRY_DELAY", "2")))
+# Startup retry knobs (env-tunable). The defaults give a cold start ~30s of
+# runway: on Railway the Postgres plugin is frequently still accepting
+# connections when the app container boots, and the previous 3x2s budget lost
+# that race often enough to fail deploys. A genuinely unreachable
+# DATABASE_URL still fails fast — see diagnose_connection_error(), which
+# returns a one-line cause instead of the ~70-frame asyncpg traceback.
+DB_CONNECT_ATTEMPTS = max(1, int(os.getenv("DB_CONNECT_ATTEMPTS", "10")))
+DB_CONNECT_RETRY_DELAY = max(0.0, float(os.getenv("DB_CONNECT_RETRY_DELAY", "3")))
 
 
 def database_target() -> str:
