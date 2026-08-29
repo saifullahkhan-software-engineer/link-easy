@@ -44,7 +44,9 @@ logger = get_logger(__name__)
 # workers all persist to disk continuously — the profile directory itself is
 # the session. Every WhatsApp browser (QR view, group scraping, scan task)
 # reuses this ONE profile, serialized by the redis profile lock, so there is
-# never more than one browser on the account at a time.
+# never more than one browser on the account at a time. The Docker image uses
+# /app/profiles (with an ephemeral fallback when no service volume is attached),
+# while local source runs default to ./profiles via core.config.Settings.
 
 WHATSAPP_PROFILE_SUBDIR = "whatsapp"
 

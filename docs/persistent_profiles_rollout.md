@@ -27,10 +27,12 @@ None of the old encrypted sessions carry over to persistent profiles.
    consistent with the decision to reset all previous account/session data.
 2. **Run the Alembic migration** `persistent_profiles`
    (`alembic upgrade head`) together with the code deploy.
-3. **Mount the profile storage** — set `PROFILE_STORAGE_DIR` (default
-   `./profiles`) and volume-mount it so profiles survive container restarts.
-   Restarting the app/worker/host must NOT require re-authentication as long
-   as the profile directory exists on disk.
+3. **Mount the profile storage** — in Railway, attach a persistent volume at
+   `/app/profiles` (the Docker image sets `PROFILE_STORAGE_DIR` to that path).
+   For local/self-hosted runs the source default remains `./profiles`. If no
+   volume is attached, the container creates fresh profiles and can still
+   start, but those profiles are ephemeral and accounts must be re-linked after
+   a restart or deploy.
 4. **Re-link every LinkedIn account** via `POST /api/v1/linkedin/account`.
 5. Assign each account a **sticky proxy** (one per account, permanently —
    written to `proxy_*` columns once; never rotated per session). Proxy

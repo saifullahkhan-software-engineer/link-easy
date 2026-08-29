@@ -41,5 +41,10 @@ like_action_debug.png
 session_verification_debug.png
 schema.sql
 
+# Browser profiles contain live cookies and device/session keys. They are
+# runtime storage, never build context; the Dockerfile creates a clean
+# /app/profiles mount point instead.
+profiles/
+
 # # Alembic
 # alembic.ini

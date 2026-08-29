@@ -10,7 +10,6 @@
     "numReplicas": 1,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
-    "requiredMountPath": "/app/profiles",
     "drainingSeconds": 30,
     "overlapSeconds": 0
   }

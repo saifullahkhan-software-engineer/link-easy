@@ -42,21 +42,29 @@ up) and `GET /api/v1/system/queues/overview` for queue backlog.
 3. **App** — this repo, built from the `Dockerfile` (`railway.json` sets
    `builder: DOCKERFILE`).
 
-## Volume — required
+## Volume — recommended, with a safe fallback
 
-Add a volume to the app service mounted at **`/app/profiles`**.
+Add a persistent volume to the app service mounted at **`/app/profiles`**.
+Railway volumes are service-level resources, so create/attach the volume in the
+Railway service's **Volumes** settings; the repository cannot provision a named
+Railway volume by itself. The mount path must be exactly `/app/profiles` so the
+API and the worker share the same browser profiles.
 
-`railway.json` sets `requiredMountPath: /app/profiles`, so the deploy refuses
-to start until the volume exists. Railway puts the app in `/app`, so a volume
-for the relative default `./profiles` must be mounted at `/app/profiles`.
+The image also declares `/app/profiles` as a Docker volume and creates the
+mount-point during the build. If no Railway volume is attached, `start.sh`
+creates the directory and the application starts with fresh profiles instead of
+failing deployment. This fallback is ephemeral: the database may still say an
+account is `ACTIVE` / `connected`, but the browser session will be gone after a
+restart or deploy and the account must be connected again. A persistent Railway
+volume is therefore strongly recommended for real use.
 
-Without it, `profiles/` is wiped on every deploy: the database still says the
-account is `ACTIVE` / `connected` while the Chromium profile is empty, so the
-app "connects" and is immediately logged out again.
+`railway.json` deliberately does **not** set `requiredMountPath`. That setting
+would make Railway reject a deployment before the fallback can run. An attached
+volume at `/app/profiles` is still used automatically when present.
 
-Volumes mount as **root**, and this image runs as the non-root `appuser`, so
-you must also set `RAILWAY_RUN_UID=0` on the service — otherwise `start.sh`
-aborts at boot with a clear "not writable" error.
+Volumes may mount as **root**, while this image runs as the non-root `appuser`,
+so you may also need to set `RAILWAY_RUN_UID=0` on the service — otherwise
+`start.sh` exits at boot with a clear "not writable" error.
 
 ## Environment variables
 
@@ -72,15 +80,15 @@ aborts at boot with a clear "not writable" error.
 | `BACKEND_CORS_ORIGINS` | Comma-separated. **Must include your exact frontend origin** or the browser blocks connect calls before they reach FastAPI. |
 | `RESEND_API_KEY` | Transactional email. |
 | `FROM_EMAIL` | e.g. `noreply@yourdomain.com`. |
-| `RAILWAY_RUN_UID` | `0` — required for the volume to be writable by `appuser`. |
 
 ### Strongly recommended
 
 | Variable | Value | Why |
 |---|---|---|
-| `PROFILE_STORAGE_DIR` | `/app/profiles` | Explicitly match the volume mount. |
+| `PROFILE_STORAGE_DIR` | `/app/profiles` | Matches the persistent volume mount. The Docker image sets this default; only override it when deliberately using another storage path. |
 | `ENVIRONMENT` | `production` or `deployment` | `deployment` = public demo (no Beat, no recurring jobs, banner shown). See "Optional tuning". |
 | `PYTHONUNBUFFERED` | `1` | Logs appear immediately. |
+| `RAILWAY_RUN_UID` | `0` when needed | Lets the runtime user write a volume created with root ownership. Not needed when the attached volume already has permissions for `appuser`. |
 
 `PORT` is injected by Railway and honoured by `start.sh`; do not set it.
 
@@ -139,12 +147,12 @@ per account permanently (see `docs/persistent_profiles_rollout.md`).
 
 | Symptom | Check |
 |---|---|
-| Deploy won't start, "volume required" | Attach the volume at `/app/profiles`. |
-| `FATAL: PROFILE_STORAGE_DIR ... not writable` | Set `RAILWAY_RUN_UID=0`. |
+| Profiles reset after a deploy/restart | Attach a persistent volume at `/app/profiles`; without one the app intentionally uses fresh ephemeral profiles. |
+| `FATAL: PROFILE_STORAGE_DIR ... not writable` | Set `RAILWAY_RUN_UID=0`, or fix the attached volume's ownership/permissions for `appuser`. |
 | `FATAL: the API never became ready` | `DATABASE_URL` unreachable, failed migration, or bad `CREDENTIAL_ENCRYPTION_KEY` — the traceback is directly above this line. |
 | Connect returns 500 immediately | `REDIS_URL` missing/unreachable (profile lock). |
 | Connect works, campaigns/scans do nothing | Worker down — `GET /api/v1/system/queues/celery-inspect`. |
-| Connected, then logged out after deploy | Volume not mounted, so profiles were wiped. |
+| Connected, then logged out after deploy | The persistent volume is missing, mounted at the wrong path, or not writable. Attach it at `/app/profiles`. |
 | QR code never appears / stuck | `WEB_CONCURRENCY` or `numReplicas` > 1. |
 | CORS errors in the browser console | `BACKEND_CORS_ORIGINS` missing the frontend origin. |
 | Connect dies with no logs | OOM — raise memory. |

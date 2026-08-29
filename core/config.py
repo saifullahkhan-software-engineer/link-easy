@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     # Root directory for durable per-account Chromium profile directories.
     # Each LinkedInAccount gets <PROFILE_STORAGE_DIR>/<account.id> as its
     # user-data-dir. Mount this path on a persistent volume in production.
+    # The Docker image overrides this source-tree default with /app/profiles;
+    # local runs continue to use ./profiles unless explicitly configured.
     PROFILE_STORAGE_DIR: str = "./profiles"
 
     # WhatsApp automation pacing (seconds) between forwarding each matched
