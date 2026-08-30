@@ -325,14 +325,15 @@ async def feature_flags():
         },
         "whatsapp": {"enabled": True, "message": None},
         # Timer-driven work (scheduled campaign steps, recurring feed/WhatsApp
-        # scans). Off on the hosted demo; on everywhere else.
+        # scans). On by default on every environment; an operator can switch
+        # it off with SCHEDULED_JOBS_ENABLED=false.
         "scheduled_jobs": {
             "enabled": settings.scheduled_jobs_enabled,
             "message": None if settings.scheduled_jobs_enabled
             else SCHEDULED_JOBS_DISABLED_DETAIL,
         },
-        # Hosted-demo banner. `notice` is null outside deployment mode, which
-        # is what the frontend keys off — the banner is shown ONLY when
+        # Hosted-instance banner. `notice` is null outside deployment mode,
+        # which is what the frontend keys off — the banner is shown ONLY when
         # ENVIRONMENT=deployment.
         "deployment": {
             "is_demo": settings.is_deployment,

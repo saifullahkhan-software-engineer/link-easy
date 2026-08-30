@@ -136,19 +136,23 @@ def linkedin_enabled() -> bool:
 def require_linkedin_enabled() -> None:
     """FastAPI dependency: 503 unless LinkedIn automation is enabled.
 
-    Guards every endpoint that would open a Chromium profile against
-    linkedin.com. From a datacenter IP those launches are overwhelmingly met
-    with a CAPTCHA or ``/checkpoint/challenge``, so letting a user submit
-    credentials only to fail is worse than saying plainly that the feature is
-    not ready yet.
+    Guards every endpoint that opens a Chromium profile against
+    linkedin.com — including campaign start/restart and feed-scroll job
+    activation/manual scan, so a campaign or feed job can never be started
+    while the LinkedIn surfaces are switched off. The switch defaults to ON
+    (``LINKEDIN_ENABLED=true``) on every deployment, so campaigns and feed
+    scans are startable out of the box; the gate exists purely as a
+    no-redeploy kill switch an operator can flip if LinkedIn starts broadly
+    challenging the host (set ``LINKEDIN_ENABLED=false``).
 
     503 (not 403/404) is deliberate: it means "temporarily unavailable, try
     later", and it is NOT one of the auth codes the frontend's axios
     interceptor treats as a dead LinkEasy session — a 401 here would bounce
     the user to /login for no reason.
 
-    Read-only and cleanup routes (GET/DELETE account) stay open so anyone who
-    connected before the gate can still see and remove their account.
+    Read-only and cleanup routes (GET/DELETE account, pause/stop) stay open
+    so anything running or connected before the kill switch is flipped can
+    still be seen, paused and removed.
     """
     if not linkedin_enabled():
         raise HTTPException(

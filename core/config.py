@@ -28,15 +28,13 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     # "development" | "production" | "deployment".
     #
-    # "deployment" is the public hosted demo. It is deliberately a REDUCED
-    # mode, not just a label: the free tier has one small container and no
-    # residential proxies, so anything that runs unattended on a timer is
-    # switched off (see SCHEDULED_JOBS_ENABLED below) and the UI tells people
-    # to run the app locally for the full feature set.
-    #
-    # Anything that is NOT "deployment" — including the default "production" —
-    # behaves exactly as before, so self-hosting and local development are
-    # unaffected.
+    # "deployment" labels the public hosted instance. It no longer reduces
+    # functionality: campaigns, feed scans and the schedulers run on every
+    # environment by default (a hosted user must be able to start the
+    # campaigns and feed jobs they create). ENVIRONMENT is now used only to
+    # surface the hosted-instance banner; feature switches are controlled
+    # individually below (LINKEDIN_ENABLED, SCHEDULED_JOBS_ENABLED) so any
+    # deployment — hosted or self-hosted — can opt a capability in or out.
     ENVIRONMENT: str = "production"
     # It's crucial to set a strong, secret key in your environment.
     # You can generate one with: openssl rand -hex 32
@@ -116,86 +114,79 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
 
     # ── LinkedIn availability ────────────────────────────────────────────────
-    # LinkedIn automation is DISABLED by default because it is not viable from
-    # a datacenter IP. Driving the sign-in form (or reusing a session) from a
-    # hosted platform such as Railway makes LinkedIn serve a CAPTCHA or a
-    # /checkpoint/challenge on a large share of attempts, so accounts either
-    # fail to connect or get challenged mid-campaign. The fix is one sticky
-    # residential proxy per account (the LinkedInAccount.proxy_* columns,
-    # already read by automation/browser.py) — that costs money, so it is
-    # deferred until the product is monetised or has enough users to justify
-    # it.
-    #
-    # Until then the connect/verify endpoints return 503 with a clear
-    # explanation and the UI shows a "coming soon" notice instead of a form
-    # that cannot succeed. WhatsApp is unaffected and stays fully available.
-    #
-    # Flip to true (LINKEDIN_ENABLED=true) once proxies are provisioned — no
-    # code change required.
-    LINKEDIN_ENABLED: bool = False
+    # LinkedIn automation is ENABLED by default on every environment, including
+    # the hosted deployment: users connect their LinkedIn account, create
+    # campaigns, add leads and create feed-scan jobs, and they must be able to
+    # START those campaigns and jobs from the same instance. The gate
+    # (require_linkedin_enabled) stays in place purely as a kill switch — an
+    # operator can set LINKEDIN_ENABLED=false to take the LinkedIn surfaces
+    # down instantly (they return 503 with LINKEDIN_DISABLED_MESSAGE) without
+    # a code change, for example if LinkedIn starts broadly challenging the
+    # host's IP range. Residential per-account proxies
+    # (LinkedInAccount.proxy_*, read by automation/browser.py) remain the
+    # recommended setup for hosted IPs.
+    LINKEDIN_ENABLED: bool = True
 
-    # Shown to users wherever LinkedIn is gated. Overridable so the message can
-    # be retuned (e.g. with an ETA) without a redeploy.
+    # Shown to users wherever LinkedIn is gated (only when LINKEDIN_ENABLED is
+    # explicitly turned off). Overridable so the message can be retuned
+    # without a redeploy.
     LINKEDIN_DISABLED_MESSAGE: str = (
-        "LinkedIn automation is temporarily unavailable. LinkedIn blocks "
-        "sign-ins from datacenter IP addresses, so each account needs its own "
-        "residential proxy to run reliably. We're adding proxy support as the "
-        "product grows — WhatsApp automation is fully available in the "
-        "meantime."
+        "LinkedIn automation is temporarily unavailable on this instance. "
+        "Please try again shortly or contact support — WhatsApp automation is "
+        "fully available in the meantime."
     )
 
-    # ── Hosted-demo (deployment) mode ────────────────────────────────────────
-    # Contact address shown in the hosted-demo banner. Users who want the full
-    # feature set are told to run LinkEasy locally and to email for help with
-    # the setup. Env-overridable so it can change without a redeploy.
+    # ── Hosted instance (ENVIRONMENT=deployment) ─────────────────────────────
+    # Contact address shown in the hosted-instance banner. Users who would
+    # rather run LinkEasy on their own machine/IP are told to email for help
+    # with the setup. Env-overridable so it can change without a redeploy.
     SUPPORT_EMAIL: str = "saifullahkhanofficial1@gmail.com"
 
     # Master switch for unattended, timer-driven work: Celery Beat's three
     # dispatchers (due campaign steps, recurring feed scans, recurring
     # WhatsApp scans) and the API's interval scheduling.
     #
-    # Default None = "decide from ENVIRONMENT": off in deployment mode, on
-    # everywhere else. Set it explicitly (true/false) to override that.
-    #
-    # Why it is off on the hosted demo: every timed job wakes a ~500 MB
-    # Chromium in a container that also serves the API, and it does so with
-    # nobody watching. On the free tier that means OOM-kills and half-finished
-    # sessions. On-demand actions the user clicks are unaffected — the Celery
-    # worker still runs, so manual WhatsApp scans, live chat and connects all
-    # work; only the *timers* are removed.
+    # Default None = ON for every environment. Started campaigns must keep
+    # processing their later steps and activated feed-scan jobs must keep
+    # recurring on the hosted instance, and that work is dispatched from the
+    # database-backed schedule by Beat. Set SCHEDULED_JOBS_ENABLED=false
+    # explicitly to switch the timers off on a given deployment (on-demand
+    # actions the user clicks are unaffected — the Celery worker still runs,
+    # so manual scans, live chat and connects all work; only the *timers*
+    # are removed). Beat itself is a lightweight publisher; it only wakes a
+    # browser when real due work exists.
     SCHEDULED_JOBS_ENABLED_OVERRIDE: bool | None = Field(
         default=None, alias="SCHEDULED_JOBS_ENABLED"
     )
 
     @property
     def is_deployment(self) -> bool:
-        """True on the public hosted demo (ENVIRONMENT=deployment)."""
+        """True on the public hosted instance (ENVIRONMENT=deployment)."""
         return self.ENVIRONMENT.strip().lower() == "deployment"
 
     @property
     def scheduled_jobs_enabled(self) -> bool:
         """Whether timer-driven background work may run.
 
-        Explicit SCHEDULED_JOBS_ENABLED wins; otherwise it is off in
-        deployment mode and on everywhere else (development, production,
-        self-hosted), so existing installs keep their schedulers.
+        Explicit SCHEDULED_JOBS_ENABLED always wins; otherwise it is ON for
+        every environment so hosted and self-hosted installs run the full
+        scheduler. The hosted mode is no longer a reduced mode.
         """
         if self.SCHEDULED_JOBS_ENABLED_OVERRIDE is not None:
             return self.SCHEDULED_JOBS_ENABLED_OVERRIDE
-        return not self.is_deployment
+        return True
 
     @property
     def deployment_notice(self) -> str | None:
-        """Banner copy for the hosted demo, or None when not in that mode."""
+        """Banner copy for the hosted instance, or None when not in that mode."""
         if not self.is_deployment:
             return None
         return (
-            "You're on the hosted demo. Scheduled campaigns and recurring "
-            "scans are turned off here, and LinkedIn automation needs a "
-            "residential proxy we don't run yet. LinkEasy works best on your "
-            "own machine, where everything is enabled and the browser runs on "
-            f"your own IP. Email {self.SUPPORT_EMAIL} and we'll help you set "
-            "it up."
+            "You're on the hosted LinkEasy instance. Campaigns, feed scans "
+            "and WhatsApp automation all run here, including scheduled and "
+            "recurring jobs. Prefer to run it on your own machine, where the "
+            "browser uses your own IP? LinkEasy is self-hostable — email "
+            f"{self.SUPPORT_EMAIL} and we'll help you set it up."
         )
 
     @property

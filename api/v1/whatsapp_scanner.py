@@ -1442,9 +1442,10 @@ async def reset_whatsapp_filter_messages(
 
 
 # Activating a filter arms a REPEATING scan (next_scan_at -> Beat -> rescan).
-# On the hosted demo Beat is not running, so allowing this would persist a
-# schedule that never fires and show the user an "active" job that does
-# nothing. Manual scans (/scan/trigger) stay open — the worker still runs.
+# The gate lets an instance with SCHEDULED_JOBS_ENABLED=false (and Beat
+# stopped) refuse cleanly rather than persist a schedule that never fires
+# and show the user an "active" job that does nothing. Manual scans
+# (/scan/trigger) stay open — the worker still runs even without timers.
 @router.post(
     "/filters/{filter_id}/activate",
     status_code=200,

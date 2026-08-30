@@ -157,23 +157,24 @@ async def require_admin(
 
 
 # ---------------------------------------------------------------------------
-# Scheduled-work gate (hosted demo)
+# Scheduled-work gate (kill switch; off only when SCHEDULED_JOBS_ENABLED=false)
 # ---------------------------------------------------------------------------
 
 SCHEDULED_JOBS_DISABLED_DETAIL = (
-    "Scheduled and recurring jobs are turned off on the hosted demo. Every "
-    "timed run wakes a full browser in the background, which this free "
-    "instance cannot do reliably. You can still run scans on demand here — "
-    "for automatic scheduling, run LinkEasy locally, where it is enabled by "
-    "default."
+    "Scheduled and recurring jobs are temporarily turned off on this "
+    "instance, so recurring scans cannot be armed right now. You can still "
+    "run scans on demand and start campaigns manually — please try again "
+    "shortly or contact support."
 )
 
 
 def scheduled_jobs_enabled() -> bool:
     """Whether timer-driven background work may run on this deployment.
 
-    Read at call time (not import time) so tests and operators can flip the
-    setting without reimporting the module.
+    Defaults to enabled on every environment; an operator can set
+    SCHEDULED_JOBS_ENABLED=false to switch the timers off. Read at call time
+    (not import time) so tests and operators can flip the setting without
+    reimporting the module.
     """
     return bool(settings.scheduled_jobs_enabled)
 
@@ -181,14 +182,15 @@ def scheduled_jobs_enabled() -> bool:
 def require_scheduled_jobs_enabled() -> None:
     """FastAPI dependency: 503 unless recurring/timed jobs are allowed.
 
-    Guards the endpoints that arm a *repeating* schedule. Without this the
-    hosted demo would happily write a ``next_scan_at`` that Beat is never
-    going to dispatch, leaving a job that claims to be active and silently
-    never runs — worse than saying plainly that scheduling is off.
+    Guards the endpoints that arm a *repeating* schedule. Without this an
+    instance with Beat switched off would happily write a ``next_scan_at``
+    that Beat is never going to dispatch, leaving a job that claims to be
+    active and silently never runs — worse than saying plainly that
+    scheduling is off.
 
     Deliberately does NOT guard one-shot, user-initiated actions (a manual
-    scan, connect, live chat): those are consumed by the Celery worker, which
-    keeps running in deployment mode.
+    scan, connect, live chat, campaign start): those are consumed by the
+    Celery worker, which keeps running even when the timers are off.
 
     503 matches the LinkedIn gate: "temporarily unavailable", and not one of
     the auth codes the frontend treats as a dead session.

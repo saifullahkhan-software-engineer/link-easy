@@ -58,12 +58,15 @@ celery_app.conf.update(
 
     # Celery Beat schedule for periodic tasks.
     #
-    # Empty in deployment mode (the hosted demo): every dispatcher below wakes
-    # a ~500 MB Chromium unattended, which OOM-kills a free-tier container
-    # that is also serving the API. Clearing the schedule — rather than
-    # letting Beat publish tasks nothing should act on — means no timer work
-    # is queued at all. On-demand actions still run: the worker keeps
-    # consuming, so manual WhatsApp scans and live chat are unaffected.
+    # The schedule is ON by default on every deployment: started campaigns
+    # rely on these dispatchers to pick up later drip steps from the
+    # database-backed schedule, and activated feed-scan / WhatsApp jobs rely
+    # on them for recurring scans. Beat itself only publishes a lightweight
+    # task once a minute — a browser is only opened when real due work
+    # exists. Setting SCHEDULED_JOBS_ENABLED=false clears the schedule
+    # entirely (no timer work is queued at all); on-demand actions still run
+    # because the worker keeps consuming, so manual scans, campaign starts
+    # and live chat are unaffected.
     beat_schedule = {} if not settings.scheduled_jobs_enabled else {
         # Database-backed dispatch: survives worker restarts unlike long ETA
         # tasks held in a worker's in-memory timer.

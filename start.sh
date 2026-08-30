@@ -83,26 +83,21 @@ RUN_WEB="${RUN_WEB:-1}"
 RUN_WORKER="${RUN_WORKER:-1}"
 RUN_BEAT="${RUN_BEAT:-1}"
 
-# ── Hosted-demo (ENVIRONMENT=deployment) ─────────────────────────────────────
-# On the public demo we do not run Celery Beat. Beat's three dispatchers fire
-# every 60s and each one can wake a ~500 MB Chromium with nobody watching; in
-# a free-tier container that also serves the API that means OOM-kills and
-# half-finished browser sessions. The Celery WORKER still runs, so everything
-# the user actually clicks — manual WhatsApp scans, connects, live chat —
-# still works. Only the unattended timers are removed.
-#
-# The backend enforces the same rule independently (settings.
-# scheduled_jobs_enabled clears beat_schedule and gates the "activate"
-# endpoints), so this is defence in depth, not the only guard.
-#
-# An explicit RUN_BEAT=1 still wins, for debugging the demo with schedules on.
+# ── Hosted instance (ENVIRONMENT=deployment) ─────────────────────────────────
+# ENVIRONMENT=deployment now labels the hosted instance but does NOT reduce
+# it: the API, worker and Celery Beat all run by default, so users can
+# connect accounts, create campaigns and feed-scan jobs AND start them —
+# Beat's dispatchers are what advance campaign drip steps and fire recurring
+# feed/WhatsApp scans from the database-backed schedule. Beat itself only
+# publishes a lightweight task once a minute; a browser is only opened when
+# real due work exists. To run the hosted instance without timers, set
+# RUN_BEAT=0 here (and SCHEDULED_JOBS_ENABLED=false so the API matches) —
+# the worker keeps serving everything the user clicks (manual scans,
+# campaign starts, connects, live chat).
 ENVIRONMENT_LOWER="$(printf '%s' "${ENVIRONMENT:-}" | tr '[:upper:]' '[:lower:]')"
 IS_DEPLOYMENT=0
 if [ "$ENVIRONMENT_LOWER" = "deployment" ]; then
     IS_DEPLOYMENT=1
-    if [ "$RUN_BEAT_WAS_EXPLICIT" = "0" ]; then
-        RUN_BEAT=0
-    fi
 fi
 
 PORT="${PORT:-8000}"
@@ -273,16 +268,19 @@ log "beat schedule: $CELERY_BEAT_SCHEDULE_FILE"
 log "processes    : web=$RUN_WEB worker=$RUN_WORKER beat=$RUN_BEAT"
 
 if [ "$IS_DEPLOYMENT" = "1" ]; then
-    log "ENVIRONMENT=deployment — hosted demo mode:"
+    log "ENVIRONMENT=deployment — hosted instance mode (full feature set):"
     if [ "$RUN_BEAT" = "1" ]; then
-        log "  * Beat is running because RUN_BEAT was set explicitly."
+        log "  * Celery Beat is running: scheduled campaign steps and recurring"
+        log "    feed/WhatsApp scans are dispatched from the database schedule."
     else
-        log "  * Celery Beat is DISABLED: no scheduled campaign steps, no"
-        log "    recurring feed/WhatsApp scans. Set RUN_BEAT=1 to override."
+        log "  * Celery Beat is DISABLED (RUN_BEAT=0): no scheduled campaign"
+        log "    steps and no recurring scans. On-demand actions (manual"
+        log "    scans, campaign starts, connects, live chat) still run on"
+        log "    the worker."
     fi
-    log "  * The Celery worker still runs, so on-demand actions (manual scans,"
-    log "    connects, live chat) work normally."
-    log "  * LinkEasy is intended to run locally for the full feature set."
+    log "  * LinkedIn automation is controlled by LINKEDIN_ENABLED (default"
+    log "    on); set it false to take the LinkedIn surfaces down without a"
+    log "    redeploy."
 fi
 
 if [ "$RUN_WEB" != "1" ] && [ "$RUN_WORKER" != "1" ] && [ "$RUN_BEAT" != "1" ]; then

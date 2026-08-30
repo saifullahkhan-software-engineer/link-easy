@@ -2,8 +2,8 @@ import { useFeatures } from '../hooks/useFeatures';
 
 /**
  * Inline notice for pages that manage recurring/scheduled scans, shown when
- * the backend has timer-driven work switched off (the hosted demo, where
- * Celery Beat does not run).
+ * the backend has timer-driven work switched off (SCHEDULED_JOBS_ENABLED=false
+ * and Celery Beat stopped for that instance).
  *
  * Renders nothing when scheduling is available, so local and self-hosted
  * installs see no change at all.
@@ -23,11 +23,11 @@ export default function SchedulingDisabledNotice({ className = '' }) {
       data-testid="scheduling-disabled"
     >
       <p className="text-sm font-medium text-amber-200">
-        Scheduled scans are off on this demo
+        Scheduled scans are temporarily off
       </p>
       <p className="mt-1 text-xs leading-relaxed text-amber-200/80">
         {scheduledJobsMessage ||
-          'Recurring jobs are disabled here. You can still run a scan on demand.'}
+          'Recurring jobs are temporarily disabled on this instance. You can still run a scan on demand and start campaigns manually.'}
       </p>
       {supportEmail && (
         <p className="mt-2 text-xs text-amber-200/80">
