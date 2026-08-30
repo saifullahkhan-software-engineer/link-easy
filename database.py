@@ -22,12 +22,57 @@ from models.whatsapp import WhatsAppSession, WhatsAppMonitoredGroup, WhatsAppFor
 from models.rbac import AppSetting, Role, UserRoleLink  # noqa: F401
 from models.rate_limit import RateLimitCounter  # noqa: F401
 
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    pool_pre_ping=True,
-    connect_args={"timeout": 10, "command_timeout": 10},
-)
+# Connection-pool sizing.
+#
+# All four database engines live in ONE container (the API, the Celery worker
+# and Beat run together via start.sh) and talk to the SAME Postgres. On
+# Railway's bundled Postgres, connections pass through PgBouncer, which on the
+# low-tier plans caps clients at 15 in total ("EMAXCONNSESSION: max clients
+# reached in session mode - pool_size: 15"). SQLAlchemy's default QueuePool
+# opens pool_size=5 plus max_overflow=10 — up to 15 connections PER ENGINE,
+# and there are four engines (this async one + one sync engine per worker
+# task module), so a burst (e.g. the long-lived live-view SSE streams during a
+# WhatsApp connect) blew straight past the cap and every authenticated
+# request 500'd with EMAXCONNSESSION until the connection finished.
+#
+# The pools are therefore bounded so their worst-case total stays well under
+# the PgBouncer cap:
+#   API async pool:  pool_size + max_overflow = 5
+#   worker sync pools (x3): 1 + 1 each = 2 each  →  6
+#   worst-case total: 11, leaving headroom for the PgBouncer/admin clients.
+# Values are env-tunable so a larger Postgres plan can raise them without a
+# code change.
+DB_POOL_SIZE = max(1, int(os.getenv("DB_POOL_SIZE", "3")))
+DB_MAX_OVERFLOW = max(0, int(os.getenv("DB_MAX_OVERFLOW", "2")))
+# Wait this long for a pooled connection instead of erroring the instant the
+# pool is saturated; far better to briefly queue than to 500 a request that a
+# second later would have succeeded.
+DB_POOL_TIMEOUT = float(os.getenv("DB_POOL_TIMEOUT", "30"))
+# Recycle connections periodically so PgBouncer/server-side idle timeouts never
+# hand back a dead connection (pool_pre_ping also guards this).
+DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
+
+# SQLite (used by the test suite and local file-backed dev runs) uses a
+# StaticPool/NullPool that does not accept pool_size/max_overflow, so only
+# pass the QueuePool tuning knobs for real Postgres backends.
+_is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+if _is_sqlite:
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=settings.DEBUG,
+        pool_pre_ping=True,
+    )
+else:
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=settings.DEBUG,
+        pool_pre_ping=True,
+        pool_size=DB_POOL_SIZE,
+        max_overflow=DB_MAX_OVERFLOW,
+        pool_timeout=DB_POOL_TIMEOUT,
+        pool_recycle=DB_POOL_RECYCLE,
+        connect_args={"timeout": 10, "command_timeout": 10},
+    )
 
 # Create a configured "Session" class.
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

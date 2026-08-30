@@ -81,7 +81,10 @@ def _make_sync_url(async_url: str) -> str:
 
 
 _sync_url = _make_sync_url(settings.DATABASE_URL)
-_engine = create_engine(_sync_url, pool_pre_ping=True)
+# Bounded pool — see worker/sync_engine.py for the PgBouncer/EMAXCONNSESSION
+# rationale (four engines share one Postgres behind Railway's 15-client cap).
+from worker.sync_engine import make_worker_engine
+_engine = make_worker_engine(_sync_url)
 SyncSession = sessionmaker(bind=_engine, expire_on_commit=False)
  
  

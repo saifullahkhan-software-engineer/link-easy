@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_current_user, get_current_user_from_token, get_db
+from database import async_session
 from core.live_hub import log_hub
 from models.user import User
 from services.browser_view import WHATSAPP_URL, get_browser_view
@@ -84,15 +85,35 @@ def sse_response(generator) -> StreamingResponse:
 async def sse_user(
     request: Request,
     token: str | None = Query(default=None),
-    db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Authenticate SSE clients via ``?token=`` or the Authorization header."""
-    if token:
-        return await get_current_user_from_token(token, db)
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        return await get_current_user_from_token(auth[7:].strip(), db)
+    """Authenticate SSE clients via ``?token=`` or the Authorization header.
+
+    IMPORTANT: this must NOT take ``Depends(get_db)``. An SSE connection stays
+    open for the whole browser-view session (minutes), and a FastAPI yield
+    dependency like ``get_db`` keeps its database connection checked out of
+    the pool for that entire response — so every open live stream pinned one
+    Postgres connection. With several streams open during a WhatsApp connect
+    plus the status polling, the pool hit Railway's PgBouncer cap
+    (EMAXCONNSESSION) and the whole app 500'd. Auth here uses a short-lived
+    session that is closed before the stream generator starts streaming.
+    """
+    async with async_session() as db:
+        if token:
+            return await get_current_user_from_token(token, db)
+        auth = request.headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            return await get_current_user_from_token(auth[7:].strip(), db)
     raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+async def _resolve_view(user: User):
+    """Resolve the caller's browser view using a short-lived DB session.
+
+    Used by the SSE/frame endpoints so they never hold a pooled connection
+    while the stream is open (see sse_user for why that mattered).
+    """
+    async with async_session() as db:
+        return await _resolve_browser_view(user, db)
 
 
 # ── Log stream ───────────────────────────────────────────────────────────────
@@ -197,10 +218,9 @@ async def browser_input(
 @router.get("/browser/frame")
 async def browser_frame(
     user: User = Depends(sse_user),
-    db: AsyncSession = Depends(get_db),
 ) -> Response:
     """Latest screencast frame as a plain JPEG (polling fallback)."""
-    view = await _resolve_browser_view(user, db)
+    view = await _resolve_view(user)
     frame = view.latest_frame()
     if not frame:
         raise HTTPException(
@@ -217,11 +237,12 @@ async def browser_frame(
 async def browser_stream(
     request: Request,
     user: User = Depends(sse_user),
-    db: AsyncSession = Depends(get_db),
 ):
     """SSE stream of the caller's browser status events + screencast frames."""
 
-    view = await _resolve_browser_view(user, db)
+    # Resolved with a short-lived session (see sse_user/_resolve_view): the
+    # stream itself must not hold a pooled DB connection for minutes.
+    view = await _resolve_view(user)
 
     async def generator():
         queue = await view.subscribe()
