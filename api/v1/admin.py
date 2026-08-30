@@ -20,6 +20,7 @@ route goes through :func:`require_admin`, which hard-blocks non-admins once
 """
 from datetime import datetime, timedelta, timezone
 
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -216,7 +217,7 @@ async def admin_delete_whatsapp_session(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Remove a WhatsApp session and its persisted credentials."""
+    """Remove a WhatsApp session, its persisted credentials, and profile dir."""
     session = await db.scalar(select(WhatsAppSession).where(WhatsAppSession.id == session_id))
     if session is None:
         raise HTTPException(status_code=404, detail="WhatsApp session not found")
@@ -226,6 +227,23 @@ async def admin_delete_whatsapp_session(
     session.status = "disconnected"
     await db.delete(session)
     await db.commit()
+
+    # Per-user rollout: the durable Chromium profile is the session, so a
+    # deleted row must not leave its profile directory behind.
+    from api.v1.whatsapp_sessions import session_profile_dir
+
+    import shutil as _shutil
+
+    try:
+        await asyncio.to_thread(_shutil.rmtree, session_profile_dir(session))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.warning(
+            "Could not remove WhatsApp profile dir for session %s",
+            session_id,
+            exc_info=True,
+        )
 
 
 @router.get("/accounts", response_model=AdminAccountsResponse)
@@ -249,8 +267,10 @@ async def admin_accounts(
     from core.profiles import profile_dir_missing
     from services.whatsapp_browser import whatsapp_profile_dir
 
-    # Single shared WhatsApp profile — computed once, not per row.
-    wa_profile_missing = profile_dir_missing(whatsapp_profile_dir())
+    def _wa_profile_dir(row) -> str:
+        # Per-user rollout: explicit column wins; legacy rows resolve to the
+        # shared flat directory.
+        return getattr(row, "profile_dir", None) or whatsapp_profile_dir()
 
     linkedin = [
         AdminLinkedInAccountRow(
@@ -272,7 +292,8 @@ async def admin_accounts(
             is_active=bool(row.is_active),
             created_at=row.created_at,
             updated_at=row.updated_at,
-            profile_missing=wa_profile_missing,
+            owner_email=getattr(row, "owner_email", None),
+            profile_missing=profile_dir_missing(_wa_profile_dir(row)),
         )
         for row in wa_rows
     ]

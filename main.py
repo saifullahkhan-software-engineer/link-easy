@@ -148,20 +148,30 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Error while cancelling cleanup task")
 
-        # Stop the embedded browser view (if any) so no orphan Chromium lingers.
+        # Stop every embedded browser view (one per WhatsApp session) so no
+        # orphan Chromium lingers.
         try:
-            from services.browser_view import browser_view
+            from services.browser_view import all_browser_views
 
-            await browser_view.stop()
+            for browser_view in all_browser_views():
+                try:
+                    await browser_view.stop()
+                except Exception:
+                    logger.exception("Error while stopping browser view")
         except Exception:
             logger.exception("Error while stopping browser view")
 
-        # Same for the dedicated live-chat browser — releasing the profile
-        # lock early lets the Celery scan task pick up where it left off.
+        # Same for the dedicated live-chat browsers — releasing each
+        # session's profile lock early lets the Celery scan task pick up
+        # where it left off.
         try:
-            from services.whatsapp_live_browser import live_browser
+            from services.whatsapp_live_browser import all_live_browsers
 
-            await live_browser.stop()
+            for live_browser in all_live_browsers():
+                try:
+                    await live_browser.stop()
+                except Exception:
+                    logger.exception("Error while stopping live chat browser")
         except Exception:
             logger.exception("Error while stopping live chat browser")
 

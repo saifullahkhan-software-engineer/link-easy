@@ -102,9 +102,10 @@ chat polls could not be served and the UI looked frozen while starting.
 
 ## Limitations
 
-* **One live session at a time** — the profile lock is global to the
-  WhatsApp account, not per-user. Starting live while already live is a
-  no-op (the manager is idempotent).
+* **One live session per user** — each user's live chat runs on their own
+  WhatsApp session (`profile_lock:whatsapp:{id}`), so many users can be
+  live simultaneously. Starting live while the *same user* is already live
+  is a no-op (the manager is idempotent).
 * **No persistence**: the live view is a read-then-render. Closing the
   panel doesn't persist messages; the scanner's table is the
   authoritative history.

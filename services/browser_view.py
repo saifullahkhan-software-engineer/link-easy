@@ -80,10 +80,39 @@ window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
 """
 
 
-class BrowserViewManager:
-    """Singleton-ish manager for the embedded, streamable browser."""
+def _registry_key(session_id: Optional[int]) -> str:
+    return str(int(session_id)) if session_id is not None else "legacy"
 
-    def __init__(self) -> None:
+
+# Per-user rollout: one BrowserViewManager per WhatsApp session so each user
+# has their own QR-connect browser. Keyed by session id; "legacy" is the
+# pre-migration shared session.
+_browser_views: dict[str, "BrowserViewManager"] = {}
+
+
+def get_browser_view(session_id: Optional[int]) -> "BrowserViewManager":
+    """Return (creating if needed) the browser view for one session."""
+    key = _registry_key(session_id)
+    view = _browser_views.get(key)
+    if view is None:
+        view = BrowserViewManager(session_id=session_id)
+        _browser_views[key] = view
+    return view
+
+
+def all_browser_views() -> list["BrowserViewManager"]:
+    """Every in-process browser view manager (used by shutdown)."""
+    return list(_browser_views.values())
+
+
+class BrowserViewManager:
+    """Per-session manager for the embedded, streamable browser."""
+
+    def __init__(self, session_id: Optional[int] = None) -> None:
+        # Which WhatsApp session (and therefore profile dir + Redis lock key)
+        # this browser view belongs to. None = legacy shared session.
+        self.session_id: Optional[int] = session_id
+
         # Frame/status event hub (no history — frames are big).
         self.events: EventHub = EventHub(max_history=0)
 
@@ -142,12 +171,13 @@ class BrowserViewManager:
     async def start(self, url: str = WHATSAPP_URL, headless: bool = True) -> dict:
         """Launch the headless browser, navigate to ``url``, start streaming.
 
-        Runs on the durable WhatsApp profile (``launch_persistent_context``):
-        the QR login and the connected session live in the same user-data-dir
-        that the group scraping and the periodic scan task reuse, so a fresh
-        connection is never broken by a second stateless browser. The redis
-        ``profile_lock:whatsapp`` serializes access across processes —
-        Chromium allows only one process per user-data-dir.
+        Runs on this session's durable WhatsApp profile
+        (``launch_persistent_context``): the QR login and the connected
+        session live in the same user-data-dir that the group scraping and
+        the periodic scan task reuse, so a fresh connection is never broken
+        by a second stateless browser. The redis
+        ``profile_lock:whatsapp:{session_id}`` serializes access across
+        processes — Chromium allows only one process per user-data-dir.
         """
         async with self._lock:
             if self.status == "starting":
@@ -206,7 +236,7 @@ class BrowserViewManager:
             pw = await async_playwright().start()
             try:
                 context = await pw.chromium.launch_persistent_context(
-                    user_data_dir=ensure_whatsapp_profile_dir(),
+                    user_data_dir=ensure_whatsapp_profile_dir(self.session_id),
                     headless=headless,
                     viewport=dict(VIEWPORT),
                     locale="en-US",
@@ -334,7 +364,7 @@ class BrowserViewManager:
             return self.snapshot()
 
     async def _claim_whatsapp_profile_lock(self):
-        """Acquire ``profile_lock:whatsapp``, stealing a leftover Redis key.
+        """Acquire this session's profile lock, stealing a leftover Redis key.
 
         A crashed API worker or scan task can leave the Redis lock for its
         30-minute TTL even though no browser is open and the UI shows no
@@ -342,15 +372,17 @@ class BrowserViewManager:
         error. If this process does not currently own the profile, delete
         the stale key and retry once.
         """
+        from services.whatsapp_browser import whatsapp_lock_id
         from worker.profile_lock import (
             ProfileInUseError,
             acquire_profile_lock,
             force_release_profile_lock,
         )
 
+        lock_id = whatsapp_lock_id(self.session_id)
         try:
             return await asyncio.to_thread(
-                acquire_profile_lock, "whatsapp", blocking_timeout=5
+                acquire_profile_lock, lock_id, blocking_timeout=5
             )
         except ProfileInUseError:
             if self._whatsapp_lock_has_local_owner():
@@ -359,27 +391,32 @@ class BrowserViewManager:
                 "🔓 WhatsApp profile lock is held but no local browser owns it "
                 "— treating it as stale and retrying"
             )
-            await asyncio.to_thread(force_release_profile_lock, "whatsapp")
+            await asyncio.to_thread(force_release_profile_lock, lock_id)
             try:
-                from services.whatsapp_browser import clear_stale_chromium_singleton
+                from services.whatsapp_browser import (
+                    clear_stale_chromium_singleton,
+                    ensure_whatsapp_profile_dir,
+                )
 
-                clear_stale_chromium_singleton()
+                clear_stale_chromium_singleton(
+                    profile_dir=ensure_whatsapp_profile_dir(self.session_id)
+                )
             except Exception:
                 pass
             return await asyncio.to_thread(
-                acquire_profile_lock, "whatsapp", blocking_timeout=5
+                acquire_profile_lock, lock_id, blocking_timeout=5
             )
 
-    @staticmethod
-    def _whatsapp_lock_has_local_owner() -> bool:
+    def _whatsapp_lock_has_local_owner(self) -> bool:
         """True when live chat in this process currently holds the profile."""
         try:
-            from services.whatsapp_live_browser import live_browser
+            from services.whatsapp_live_browser import get_live_browser
         except Exception:
             return False
+        live = get_live_browser(self.session_id)
         return (
-            getattr(live_browser, "_profile_lock", None) is not None
-            and live_browser.status in ("running", "starting")
+            getattr(live, "_profile_lock", None) is not None
+            and live.status in ("running", "starting")
         )
 
     async def stop(self) -> dict:
@@ -611,6 +648,8 @@ class BrowserViewManager:
             return {"ok": False, "error": str(exc)}
 
 
-# Process-wide singleton — the FastAPI app and the WhatsApp connect flow
-# share this instance so the QR browser lives for the whole session.
+# Legacy shared-session instance. New per-user flows resolve their manager
+# through ``get_browser_view(session_id)``; this singleton remains for the
+# pre-migration session and for tests/older callers.
 browser_view = BrowserViewManager()
+_browser_views[_registry_key(None)] = browser_view

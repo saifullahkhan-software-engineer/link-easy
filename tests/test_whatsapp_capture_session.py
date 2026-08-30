@@ -90,9 +90,17 @@ STORAGE_STATE = {"cookies": [{"name": "wa", "value": "1"}], "origins": []}
 
 class CaptureSessionTests(unittest.IsolatedAsyncioTestCase):
     def _patch_browser(self, view):
+        # Per-user rollout: the capture endpoint resolves the caller's own
+        # session view through get_browser_view(session_id).
         return patch.dict(
             sys.modules,
-            {"services.browser_view": SimpleNamespace(browser_view=view, WHATSAPP_URL="x")},
+            {
+                "services.browser_view": SimpleNamespace(
+                    browser_view=view,
+                    WHATSAPP_URL="x",
+                    get_browser_view=lambda _session_id: view,
+                )
+            },
         )
 
     def _patch_whatsapp_browser(self, *, logged_in, showing_qr=False):

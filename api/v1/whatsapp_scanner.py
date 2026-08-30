@@ -47,6 +47,7 @@ from api.dependencies import (
     get_current_user,
     require_scheduled_jobs_enabled,
 )
+from api.v1.whatsapp_sessions import get_owned_session, session_profile_dir
 from models.user import User
 from schemas.whatsapp import (
     WhatsAppConnectResponse,
@@ -180,11 +181,10 @@ async def _filter_response(
 # stop) — stale rows used to leave the UI stuck on the QR screen forever.
 _active_watchers: dict[int, asyncio.Task] = {}
 
-# Serializes WhatsApp browser operations inside the API process. Two browsers
-# on the same WhatsApp account at once (the live browser view + a group-fetch
-# browser) is exactly what used to break freshly-scanned connections; the
-# redis profile lock additionally coordinates with the Celery worker.
-_whatsapp_op_lock = asyncio.Lock()
+# Per-user rollout removed the old process-wide ``_whatsapp_op_lock``: each
+# session's browsers are serialized by that session's redis profile lock
+# (``profile_lock:whatsapp:{id}``) plus the manager's own asyncio lock, so
+# different users can drive their WhatsApp browsers concurrently.
 
 
 def _watcher_running(session_id: int) -> bool:
@@ -249,7 +249,7 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
     If 2FA is needed, the browser remains open for the user to enter the code.
     Once 2FA is completed (logged in), the browser is stopped.
     """
-    from services.browser_view import browser_view
+    from services.browser_view import get_browser_view
     from services.whatsapp_browser import (
         get_storage_state,
         wait_for_session_capture_ready,
@@ -257,6 +257,11 @@ async def _watch_qr_scan(session_id: int, max_wait_seconds: int = 300) -> None:
     from database import async_session
 
     logger.info("👀 Watching for WhatsApp QR scan (session id=%s)", session_id)
+
+    # Per-user rollout: each session owns its own embedded browser view, so
+    # this watcher must observe THIS session's view — never the legacy
+    # process-wide one.
+    browser_view = get_browser_view(session_id)
 
     watch_started = time.monotonic()
     deadline = watch_started + max_wait_seconds
@@ -535,34 +540,52 @@ async def connect_whatsapp(
     The browser is ONLY opened for QR scan and 2FA entry. After successful
     connection, the browser is stopped. Logs are written to the terminal.
     """
-    from services.browser_view import WHATSAPP_URL, browser_view
-    from services.whatsapp_live_browser import live_browser
+    from services.browser_view import WHATSAPP_URL, get_browser_view
+    from services.whatsapp_live_browser import get_live_browser
 
-    # A leftover live-chat or error-state browser still holds
-    # profile_lock:whatsapp even when the UI shows no connected account.
-    # Stop both managers first so Connect can open a fresh QR view.
-    if live_browser.status in ("running", "starting", "error"):
+    # Per-user rollout: every user gets their own session row + profile dir.
+    # Legacy installs with a single unowned row are adopted on first visit.
+    session = await get_owned_session(db, current_user)
+    if session is None:
+        session = WhatsAppSession(
+            status="waiting_qr",
+            is_active=True,
+            owner_email=current_user.email,
+        )
+        db.add(session)
+        await db.flush()  # assign the autoincrement id for the profile dir
+        session.assign_profile_dir()
+        await db.commit()
+        await db.refresh(session)
+        logger.info(
+            "📱 Created WhatsApp session %s for user=%s (profile=%s)",
+            session.id,
+            current_user.email,
+            session.profile_dir,
+        )
+
+    # Each session owns its managers; a leftover browser from THIS session
+    # (e.g. an error-state live chat) still holds the session's profile lock
+    # even when the UI shows no connected account. Stop both for this session
+    # only — other users' browsers belong to their own profiles.
+    view = get_browser_view(session.id)
+    live = get_live_browser(session.id)
+    if live.status in ("running", "starting", "error"):
         try:
-            await live_browser.stop()
+            await live.stop()
         except Exception as exc:
             logger.warning("Could not stop leftover live-chat browser before connect: %s", exc)
-    if browser_view.status == "error" or (
-        browser_view.status not in ("running", "starting") and browser_view.last_error
+    if view.status == "error" or (
+        view.status not in ("running", "starting") and view.last_error
     ):
         try:
-            await browser_view.stop()
+            await view.stop()
         except Exception as exc:
             logger.warning("Could not reset leftover browser view before connect: %s", exc)
 
-    # Check if there's already a connection in progress
-    result = await db.execute(
-        select(WhatsAppSession).order_by(WhatsAppSession.id.desc()).limit(1)
-    )
-    existing = result.scalars().first()
-
-    if existing and existing.status == "waiting_qr":
-        if _watcher_running(existing.id):
-            logger.info("📱 WhatsApp connection already in progress (session id=%s)", existing.id)
+    if session.status == "waiting_qr":
+        if _watcher_running(session.id):
+            logger.info("📱 WhatsApp connection already in progress (session id=%s)", session.id)
             return WhatsAppConnectResponse(
                 message="A WhatsApp connection is already in progress — scan the QR code in the Live Browser view.",
                 status="waiting_qr",
@@ -573,41 +596,37 @@ async def connect_whatsapp(
         # so the user always has a way out of the "stuck on QR" state.
         logger.info(
             "📱 Restarting stale WhatsApp connection (session id=%s) — no live watcher",
-            existing.id,
+            session.id,
         )
-        start_result = await _ensure_browser_view_ready(browser_view, WHATSAPP_URL)
+        start_result = await _ensure_browser_view_ready(view, WHATSAPP_URL)
         if start_result.get("status") == "error":
-            existing.status = "error"
-            existing.is_active = False
+            session.status = "error"
+            session.is_active = False
             await db.commit()
             error = start_result.get("error") or start_result.get("message") or "unknown error"
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Could not open the browser view: {error}",
             )
-        _spawn_qr_watcher(existing.id)
+        _spawn_qr_watcher(session.id)
         return WhatsAppConnectResponse(
             message="Restarted the WhatsApp connection — scan the new QR code in the Live Browser view.",
             status="waiting_qr",
         )
 
-    # Deactivate any existing sessions
-    if existing:
-        existing.is_active = False
-        await db.commit()
-
-    # Create a new pending session record
-    new_session = WhatsAppSession(status="waiting_qr", is_active=True)
-    db.add(new_session)
+    # (Re)connect on the same session row and profile dir. When the saved
+    # device session is still valid the watcher simply re-confirms it;
+    # when it expired WhatsApp renders a fresh QR over the same profile.
+    session.status = "waiting_qr"
+    session.is_active = True
     await db.commit()
-    await db.refresh(new_session)
 
-    # Launch (or reuse) the embedded headless browser on WhatsApp Web.
-    logger.info("📱 Starting browser view for WhatsApp QR scan (session id=%s)", new_session.id)
-    start_result = await _ensure_browser_view_ready(browser_view, WHATSAPP_URL)
+    # Launch (or reuse) this session's embedded headless browser on WhatsApp Web.
+    logger.info("📱 Starting browser view for WhatsApp QR scan (session id=%s)", session.id)
+    start_result = await _ensure_browser_view_ready(view, WHATSAPP_URL)
     if start_result.get("status") == "error":
-        new_session.status = "error"
-        new_session.is_active = False
+        session.status = "error"
+        session.is_active = False
         await db.commit()
         logger.error(
             "📱 WhatsApp connect failed to open browser view: %s",
@@ -618,9 +637,8 @@ async def connect_whatsapp(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "WhatsApp's browser profile is still busy. There is no "
-                    "need for a LinkedIn account — wait a few seconds and "
-                    "press Connect WhatsApp again."
+                    "Your WhatsApp browser is still busy with another operation. "
+                    "Wait a few seconds and press Connect WhatsApp again."
                 ),
             )
         raise HTTPException(
@@ -634,9 +652,9 @@ async def connect_whatsapp(
         )
 
     # Watch for the QR scan in the background (no Celery needed).
-    _spawn_qr_watcher(new_session.id)
+    _spawn_qr_watcher(session.id)
 
-    logger.info("📱 WhatsApp connect started — scan QR code in browser view (session id=%s)", new_session.id)
+    logger.info("📱 WhatsApp connect started — scan QR code in browser view (session id=%s)", session.id)
     return WhatsAppConnectResponse(
         message="WhatsApp connection started — scan the QR code in the Live Browser view below.",
         status="waiting_qr",
@@ -649,26 +667,18 @@ async def connect_whatsapp(
 async def _persist_captured_session(
     db: AsyncSession,
     storage_state: dict,
+    session: WhatsAppSession,
 ) -> tuple[int, datetime]:
-    """Save ``storage_state`` onto the newest session row (creating one)."""
-    result = await db.execute(
-        select(WhatsAppSession).order_by(WhatsAppSession.id.desc()).limit(1)
-    )
-    row = result.scalars().first()
-    if row is None:
-        row = WhatsAppSession(status="waiting_qr", is_active=True)
-        db.add(row)
-        await db.flush()
-
+    """Save ``storage_state`` onto the caller's own session row."""
     now = datetime.now(timezone.utc)
-    row.storage_state_json = storage_state
-    row.cookies_json = storage_state.get("cookies", [])
-    row.status = "connected"
-    row.is_active = True
-    row.updated_at = now
+    session.storage_state_json = storage_state
+    session.cookies_json = storage_state.get("cookies", [])
+    session.status = "connected"
+    session.is_active = True
+    session.updated_at = now
     await db.commit()
-    await db.refresh(row)
-    return row.id, row.updated_at or now
+    await db.refresh(session)
+    return session.id, session.updated_at or now
 
 
 @router.post("/session/capture", response_model=WhatsAppCaptureResponse)
@@ -681,7 +691,7 @@ async def capture_whatsapp_session(
             "keeps failing)."
         ),
     ),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppCaptureResponse:
     """Manually capture the WhatsApp session from the open browser view.
@@ -693,7 +703,7 @@ async def capture_whatsapp_session(
     browser context's cookies/storage right now, marks the session connected,
     cancels the watcher (so it can't undo the capture) and stops the browser.
     """
-    from services.browser_view import browser_view
+    from services.browser_view import get_browser_view
     from services.whatsapp_browser import (
         get_storage_state,
         is_logged_in,
@@ -701,6 +711,19 @@ async def capture_whatsapp_session(
         wait_for_login,
     )
 
+    # Per-user rollout: capture only ever touches the caller's own session
+    # and its own browser view.
+    session = await get_owned_session(db, current_user)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "You have no WhatsApp session to capture. "
+                'Press "Connect WhatsApp" and scan the QR code first.'
+            ),
+        )
+
+    browser_view = get_browser_view(session.id)
     page = browser_view.page
     context = browser_view.context
     if page is None or context is None or browser_view.status not in ("running", "starting"):
@@ -767,7 +790,9 @@ async def capture_whatsapp_session(
             ),
         )
 
-    session_id, updated_at = await _persist_captured_session(db, storage_state)
+    session_id, updated_at = await _persist_captured_session(
+        db, storage_state, session
+    )
     _cancel_qr_watcher(session_id)
 
     logger.info(
@@ -808,13 +833,8 @@ async def get_whatsapp_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppStatusResponse:
-    """Return the current WhatsApp connection status."""
-    result = await db.execute(
-        select(WhatsAppSession)
-        .order_by(WhatsAppSession.id.desc())
-        .limit(1)
-    )
-    session = result.scalars().first()
+    """Return the caller's WhatsApp connection status (per-user sessions)."""
+    session = await get_owned_session(db, current_user)
 
     if not session:
         return WhatsAppStatusResponse(status="disconnected", is_active=False)
@@ -828,9 +848,8 @@ async def get_whatsapp_status(
     reconnect_required = False
     if session.status == "connected":
         from core.profiles import profile_dir_missing
-        from services.whatsapp_browser import whatsapp_profile_dir
 
-        reconnect_required = profile_dir_missing(whatsapp_profile_dir())
+        reconnect_required = profile_dir_missing(session_profile_dir(session))
 
     return WhatsAppStatusResponse(
         status=session.status,
@@ -846,72 +865,89 @@ async def get_whatsapp_status(
 
 @router.delete("/connection", response_model=WhatsAppDisconnectResponse)
 async def disconnect_whatsapp(
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppDisconnectResponse:
-    """Disconnect WhatsApp and remove all durable browser credentials.
+    """Disconnect the caller's WhatsApp and remove its durable credentials.
 
     Merely changing the database status is not sufficient: WhatsApp's device
     keys live in the persistent Chromium profile (IndexedDB), so a later
-    browser launch would silently reconnect. Stop both in-process browser
-    managers, reserve the cross-process profile lock, clear the session rows,
-    and then remove that profile before reporting success.
+    browser launch would silently reconnect. Stop the caller's in-process
+    browser managers, reserve that session's cross-process profile lock,
+    clear the session row, and then remove that profile before reporting
+    success. Other users' sessions are untouched.
     """
-    from services.browser_view import browser_view
-    from services.whatsapp_browser import whatsapp_profile_dir
-    from services.whatsapp_live_browser import live_browser
+    from services.browser_view import get_browser_view
+    from services.whatsapp_browser import whatsapp_lock_id
+    from services.whatsapp_live_browser import get_live_browser
     from worker.profile_lock import (
         ProfileInUseError,
         acquire_profile_lock,
         release_profile_lock,
     )
 
-    async with _whatsapp_op_lock:
-        # Either manager may own profile_lock:whatsapp. Their idempotent stop
-        # methods close Chromium and release it before we reserve the profile.
-        await live_browser.stop()
-        await browser_view.stop()
+    session = await get_owned_session(db, current_user)
+    if session is None:
+        return WhatsAppDisconnectResponse(
+            message="WhatsApp is already disconnected.",
+            status="disconnected",
+        )
 
-        try:
-            profile_lock = await asyncio.to_thread(
-                acquire_profile_lock, "whatsapp", blocking_timeout=10
+    view = get_browser_view(session.id)
+    live = get_live_browser(session.id)
+
+    # Either manager may own this session's profile lock. Their idempotent
+    # stop methods close Chromium and release it before we reserve it.
+    await live.stop()
+    await view.stop()
+
+    try:
+        profile_lock = await asyncio.to_thread(
+            acquire_profile_lock,
+            whatsapp_lock_id(session.id),
+            blocking_timeout=10,
+        )
+    except ProfileInUseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "WhatsApp is busy with a scanner operation. Wait a few seconds "
+                "and try disconnecting again."
+            ),
+        ) from exc
+
+    try:
+        await db.execute(
+            sa_update(WhatsAppSession)
+            .where(WhatsAppSession.owner_email == current_user.email)
+            .values(
+                status="disconnected",
+                is_active=False,
+                cookies_json=None,
+                storage_state_json=None,
+                updated_at=datetime.now(timezone.utc),
             )
-        except ProfileInUseError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "WhatsApp is busy with a scanner operation. Wait a few seconds "
-                    "and try disconnecting again."
-                ),
-            ) from exc
+        )
+        await db.commit()
 
+        profile_dir = session_profile_dir(session)
         try:
-            await db.execute(
-                sa_update(WhatsAppSession).values(
-                    status="disconnected",
-                    is_active=False,
-                    cookies_json=None,
-                    storage_state_json=None,
-                    updated_at=datetime.now(timezone.utc),
-                )
-            )
-            await db.commit()
+            await asyncio.to_thread(shutil.rmtree, profile_dir)
+        except FileNotFoundError:
+            pass
+    except Exception as exc:
+        logger.exception("Could not disconnect WhatsApp")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not remove the saved WhatsApp session. Try again.",
+        ) from exc
+    finally:
+        release_profile_lock(profile_lock)
 
-            profile_dir = whatsapp_profile_dir()
-            try:
-                await asyncio.to_thread(shutil.rmtree, profile_dir)
-            except FileNotFoundError:
-                pass
-        except Exception as exc:
-            logger.exception("Could not disconnect WhatsApp")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Could not remove the saved WhatsApp session. Try again.",
-            ) from exc
-        finally:
-            release_profile_lock(profile_lock)
-
-    logger.info("📱 WhatsApp disconnected and durable profile removed")
+    logger.info(
+        "📱 WhatsApp disconnected for user=%s and durable profile removed",
+        current_user.email,
+    )
     return WhatsAppDisconnectResponse(
         message="WhatsApp disconnected successfully.",
         status="disconnected",
@@ -928,13 +964,14 @@ async def list_whatsapp_groups(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppGroupListResponse:
-    """Get the list of WhatsApp groups from the sidebar.
+    """Get the list of WhatsApp groups from the caller's sidebar.
 
-    Runs against the durable WhatsApp profile. If the live browser view is
-    already open it is REUSED — launching a second browser on the same
-    account while one is running is exactly what used to break freshly
-    scanned connections. Otherwise a headless persistent-context browser is
-    launched under the profile lock.
+    Runs against the caller's durable WhatsApp profile. If that session's
+    live browser view is already open it is REUSED — launching a second
+    browser on the same account while one is running is exactly what used to
+    break freshly scanned connections. Otherwise a headless
+    persistent-context browser is launched under that session's profile lock.
+    Other users' sessions are never touched.
 
     A slow-loading page is never treated as an expired session: we wait up to
     30s for the chat list and only mark the session disconnected when the QR
@@ -943,22 +980,10 @@ async def list_whatsapp_groups(
     if filter_id is not None:
         await _load_owned_filter(filter_id, current_user, db)
 
-    # Check if we have an active session
-    result = await db.execute(
-        select(WhatsAppSession)
-        .filter(WhatsAppSession.is_active == True)
-        .order_by(WhatsAppSession.id.desc())
-        .limit(1)
-    )
-    session = result.scalars().first()
+    # Per-user rollout: only the caller's own session drives their groups.
+    session = await get_owned_session(db, current_user, require_connected=True)
 
-    if not session or session.status != "connected":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="WhatsApp is not connected. Please connect first.",
-        )
-
-    from services.browser_view import browser_view
+    from services.browser_view import get_browser_view
     from services.whatsapp_browser import (
         fetch_group_list,
         is_showing_qr,
@@ -966,6 +991,7 @@ async def list_whatsapp_groups(
         navigate_to_whatsapp,
         safe_close,
         wait_for_login,
+        whatsapp_lock_id,
     )
     from worker.profile_lock import (
         ProfileInUseError,
@@ -973,69 +999,77 @@ async def list_whatsapp_groups(
         release_profile_lock,
     )
 
-    async with _whatsapp_op_lock:
-        pw = None
-        context = None
-        page = None
-        profile_lock = None
-        try:
-            # 1) Reuse the live browser view when it is already running on
-            #    WhatsApp — no second browser, no session conflict.
-            if browser_view.status == "running" and browser_view.page is not None:
-                try:
-                    live_page = browser_view.page
-                    if "web.whatsapp.com" not in (live_page.url or ""):
-                        await navigate_to_whatsapp(live_page)
-                    page = live_page
-                except Exception as exc:
-                    logger.warning("Live browser view page unusable (%s) — launching a fresh browser", exc)
-                    page = None
+    browser_view = get_browser_view(session.id)
 
-            # 2) Otherwise launch the persistent-profile browser ourselves.
-            if page is None:
-                try:
-                    profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=20)
-                except ProfileInUseError:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            "The WhatsApp browser is busy with another operation "
-                            "(e.g. a scan). Please try again in a few seconds."
-                        ),
-                    )
-                try:
-                    pw, context, page = await launch_whatsapp_persistent(headless=True)
-                except Exception as exc:
-                    logger.error("Failed to launch WhatsApp browser: %s", exc)
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Could not open the WhatsApp browser: {exc}",
-                    )
-                await navigate_to_whatsapp(page)
+    pw = None
+    context = None
+    page = None
+    profile_lock = None
+    try:
+        # 1) Reuse this session's live browser view when it is already
+        #    running on WhatsApp — no second browser, no session conflict.
+        if browser_view.status == "running" and browser_view.page is not None:
+            try:
+                live_page = browser_view.page
+                if "web.whatsapp.com" not in (live_page.url or ""):
+                    await navigate_to_whatsapp(live_page)
+                page = live_page
+            except Exception as exc:
+                logger.warning("Live browser view page unusable (%s) — launching a fresh browser", exc)
+                page = None
 
-            # Give WhatsApp Web real time to finish loading before deciding
-            # anything about the session.
-            if not await wait_for_login(page, timeout_seconds=30):
-                if await is_showing_qr(page):
-                    session.status = "disconnected"
-                    session.is_active = False
-                    await db.commit()
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="WhatsApp session expired. Please reconnect.",
-                    )
-                raise HTTPException(
-                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                    detail="WhatsApp Web did not finish loading in time. Please try again.",
+        # 2) Otherwise launch this session's persistent-profile browser.
+        if page is None:
+            try:
+                profile_lock = await asyncio.to_thread(
+                    acquire_profile_lock,
+                    whatsapp_lock_id(session.id),
+                    blocking_timeout=20,
                 )
+            except ProfileInUseError:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "Your WhatsApp browser is busy with another operation "
+                        "(e.g. a scan or live chat). Please try again in a few seconds."
+                    ),
+                )
+            try:
+                pw, context, page = await launch_whatsapp_persistent(
+                    headless=True,
+                    profile_dir=session_profile_dir(session),
+                )
+            except Exception as exc:
+                logger.error("Failed to launch WhatsApp browser: %s", exc)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Could not open the WhatsApp browser: {exc}",
+                )
+            await navigate_to_whatsapp(page)
 
-            groups = await fetch_group_list(page, search=search.strip() if search else None)
-        finally:
-            # Only close browsers we launched ourselves — never the live view.
-            if context is not None:
-                await safe_close(pw, context)
-            if profile_lock is not None:
-                release_profile_lock(profile_lock)
+        # Give WhatsApp Web real time to finish loading before deciding
+        # anything about the session.
+        if not await wait_for_login(page, timeout_seconds=30):
+            if await is_showing_qr(page):
+                session.status = "disconnected"
+                session.is_active = False
+                await db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="WhatsApp session expired. Please reconnect.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="WhatsApp Web did not finish loading in time. Please try again.",
+            )
+
+        groups = await fetch_group_list(page, search=search.strip() if search else None)
+    finally:
+        # Only close browsers we launched ourselves — never the live view.
+        if context is not None:
+            await safe_close(pw, context)
+        if profile_lock is not None:
+            release_profile_lock(profile_lock)
 
     try:
         monitored_query = select(WhatsAppMonitoredGroup).order_by(WhatsAppMonitoredGroup.id)
@@ -1674,20 +1708,9 @@ async def trigger_whatsapp_scan(
     if filter_id is not None:
         await _load_owned_filter(filter_id, current_user, db)
 
-    # Verify we have an active session
-    result = await db.execute(
-        select(WhatsAppSession)
-        .filter(WhatsAppSession.is_active == True)
-        .order_by(WhatsAppSession.id.desc())
-        .limit(1)
-    )
-    session = result.scalars().first()
-
-    if not session or session.status != "connected":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="WhatsApp is not connected. Please connect first.",
-        )
+    # Per-user rollout: the worker resolves the session from the filter's
+    # owner, so the caller must have their own connected session first.
+    await get_owned_session(db, current_user, require_connected=True)
 
     # Pre-flight: ensure groups are configured, otherwise the Celery task
     # will immediately skip with "No monitored groups" and the user sees

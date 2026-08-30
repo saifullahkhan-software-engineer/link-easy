@@ -69,6 +69,12 @@ def profile_in_use_message(account_id: str) -> str:
             "WhatsApp is currently in use by another session "
             "(its browser profile is locked). Please try again in a few minutes."
         )
+    if str(account_id).startswith("whatsapp:"):
+        return (
+            "This WhatsApp connection is currently in use by another browser "
+            "(live chat or a scan is running on it). Please try again in a few "
+            "minutes."
+        )
     return (
         f"LinkedIn account {account_id} is currently in use by another "
         f"session (its browser profile is locked). Please try again in a "

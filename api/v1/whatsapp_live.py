@@ -1,21 +1,23 @@
 """
-WhatsApp live chat — REST API.
+WhatsApp live chat — REST API (per-user sessions).
 
 FILE: api/v1/whatsapp_live.py
 
-POST   /api/v1/whatsapp/live/start             → launch the live-chat browser
-POST   /api/v1/whatsapp/live/stop              → close the live-chat browser
-GET    /api/v1/whatsapp/live/status            → snapshot of the live manager
+POST   /api/v1/whatsapp/live/start             → launch the caller's live-chat browser
+POST   /api/v1/whatsapp/live/stop              → close the caller's live-chat browser
+GET    /api/v1/whatsapp/live/status            → snapshot of the caller's live manager
 GET    /api/v1/whatsapp/live/chats            → list chats (q= filter)
 POST   /api/v1/whatsapp/live/chats/open        → open a chat by id
 POST   /api/v1/whatsapp/live/chats/close       → leave the active chat
 GET    /api/v1/whatsapp/live/messages          → read the active chat's messages
 POST   /api/v1/whatsapp/live/messages/send     → send a manual message
 
-The manager singleton lives in services.whatsapp_live_browser.py. It holds
-the shared ``profile_lock:whatsapp`` Redis key, so while live chat is active
-the periodic Celery scan task pauses with ProfileInUseError instead of
-fighting the browser and disconnecting the user.
+Per-user rollout: every WhatsApp session owns a LiveBrowserManager
+(``services.whatsapp_live_browser.get_live_browser(session_id)``), so ten
+users can run live chat on ten different WhatsApp numbers simultaneously.
+Each manager holds its own session's ``profile_lock:whatsapp:{id}``, so while
+one user's live chat is active only that user's scan task pauses with
+ProfileInUseError — every other user is unaffected.
 
 Each /send call is paced by ``WHATSAPP_FORWARD_DELAY_SECONDS`` (10s default)
 so a rapid-typing user does not trip WhatsApp's spam/blocking filter. The
@@ -26,10 +28,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from api.dependencies import get_current_user, get_db
 from api.rate_limit_deps import rate_limit
+from api.v1.whatsapp_sessions import get_owned_session
 from core.logging_config import get_logger
 from models.user import User
 from models.whatsapp import WhatsAppSession
@@ -47,7 +49,7 @@ from schemas.whatsapp_live import (
 from services.whatsapp_live_browser import (
     DEFAULT_CHAT_LIMIT,
     DEFAULT_MESSAGE_LIMIT,
-    live_browser,
+    get_live_browser,
 )
 
 logger = get_logger(__name__)
@@ -58,33 +60,32 @@ router = APIRouter(prefix="/api/v1/whatsapp/live", tags=["whatsapp-live"])
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-async def _require_connection(db: AsyncSession) -> None:
-    """Block the live browser from starting when WhatsApp isn't connected."""
-    session_row = (
-        (
-            await db.execute(
-                select(WhatsAppSession)
-                .filter(WhatsAppSession.is_active == True)
-                .order_by(WhatsAppSession.id.desc())
-                .limit(1)
-            )
-        )
-        .scalars()
-        .first()
-    )
-    if not session_row or session_row.status != "connected":
+async def _require_connection(
+    db: AsyncSession, current_user: User
+) -> WhatsAppSession:
+    """Resolve the caller's connected session or raise a readable 400."""
+    return await get_owned_session(db, current_user, require_connected=True)
+
+
+def _manager_for(session: Optional[WhatsAppSession]):
+    """The live-chat manager that owns ``session`` (legacy when None)."""
+    return get_live_browser(getattr(session, "id", None) if session else None)
+
+
+async def _require_running(db: AsyncSession, current_user: User):
+    """Return the caller's running manager or raise the uniform 409."""
+    session = await get_owned_session(db, current_user)
+    manager = _manager_for(session)
+    if manager.status != "running":
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "WhatsApp is not connected. Connect via the WhatsApp Scanner "
-                "page before opening live chat."
-            ),
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Live chat is not running. Call POST /live/start first.",
         )
+    return manager
 
 
-def _snapshot_response() -> LiveStartResponse:
-    snap = live_browser.snapshot()
-    return LiveStartResponse(**snap)
+def _snapshot_response(manager) -> LiveStartResponse:
+    return LiveStartResponse(**manager.snapshot())
 
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -99,11 +100,12 @@ async def start_live_chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> LiveStartResponse:
-    await _require_connection(db)
+    session = await _require_connection(db, current_user)
+    manager = _manager_for(session)
 
-    # Run on the API event loop. launch_whatsapp_persistent + is_logged_in
-    # takes a few seconds; not an issue for an explicit user action.
-    result = await live_browser.start()
+    # Run on the API event loop. Browser launch + is_logged_in takes a few
+    # seconds; not an issue for an explicit user action.
+    result = await manager.start()
     resp = LiveStartResponse(**result)
     if resp.status == "error":
         # Surface a 503 with a *string* detail. Passing the Pydantic model
@@ -121,17 +123,22 @@ async def start_live_chat(
 
 @router.post("/stop", response_model=LiveStartResponse)
 async def stop_live_chat(
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> LiveStartResponse:
-    result = await live_browser.stop()
+    session = await get_owned_session(db, current_user)
+    manager = _manager_for(session)
+    result = await manager.stop()
     return LiveStartResponse(**result)
 
 
 @router.get("/status", response_model=LiveStartResponse)
 async def live_status(
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> LiveStartResponse:
-    return _snapshot_response()
+    session = await get_owned_session(db, current_user)
+    return _snapshot_response(_manager_for(session))
 
 
 # ── Chat list ────────────────────────────────────────────────────────────────
@@ -141,15 +148,12 @@ async def live_status(
 async def list_live_chats(
     q: Optional[str] = Query(None, description="Filter chats via WhatsApp search"),
     limit: int = Query(DEFAULT_CHAT_LIMIT, ge=1, le=200),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> LiveChatListResponse:
-    if live_browser.status != "running":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Live chat is not running. Call POST /live/start first.",
-        )
+    manager = await _require_running(db, current_user)
 
-    chats = await live_browser.list_chats(filter_text=q, limit=limit)
+    chats = await manager.list_chats(filter_text=q, limit=limit)
     items = [LiveChatItem(**c) for c in chats]
     return LiveChatListResponse(
         chats=items,
@@ -164,14 +168,11 @@ async def list_live_chats(
 @router.post("/chats/open", response_model=LiveOpenChatResponse)
 async def open_live_chat(
     payload: LiveOpenChatRequest,
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> LiveOpenChatResponse:
-    if live_browser.status != "running":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Live chat is not running.",
-        )
-    result = await live_browser.open_chat(payload.chat_id)
+    manager = await _require_running(db, current_user)
+    result = await manager.open_chat(payload.chat_id)
     if not result.get("ok"):
         return LiveOpenChatResponse(ok=False, error=result.get("error"))
     return LiveOpenChatResponse(
@@ -183,14 +184,11 @@ async def open_live_chat(
 
 @router.post("/chats/close", response_model=LiveOpenChatResponse)
 async def close_live_chat(
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> LiveOpenChatResponse:
-    if live_browser.status != "running":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Live chat is not running.",
-        )
-    result = await live_browser.close_active_chat()
+    manager = await _require_running(db, current_user)
+    result = await manager.close_active_chat()
     return LiveOpenChatResponse(**result)
 
 
@@ -200,14 +198,11 @@ async def close_live_chat(
 @router.get("/messages", response_model=LiveMessagesResponse)
 async def get_live_messages(
     limit: int = Query(DEFAULT_MESSAGE_LIMIT, ge=1, le=200),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> LiveMessagesResponse:
-    if live_browser.status != "running":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Live chat is not running.",
-        )
-    if not live_browser.active_chat_id:
+    manager = await _require_running(db, current_user)
+    if not manager.active_chat_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -216,11 +211,11 @@ async def get_live_messages(
         )
 
     try:
-        messages = await live_browser.read_messages(limit=limit)
+        messages = await manager.read_messages(limit=limit)
         items = [LiveMessageItem(**m) for m in messages]
         return LiveMessagesResponse(
-            chat_id=live_browser.active_chat_id,
-            chat_name=live_browser.active_chat_name,
+            chat_id=manager.active_chat_id,
+            chat_name=manager.active_chat_name,
             messages=items,
             count=len(items),
         )
@@ -229,7 +224,7 @@ async def get_live_messages(
     except Exception as exc:
         logger.exception(
             "Failed to read WhatsApp live messages (active_chat_id=%r)",
-            live_browser.active_chat_id,
+            manager.active_chat_id,
         )
         detail = str(exc).strip() or exc.__class__.__name__
         raise HTTPException(
@@ -241,14 +236,11 @@ async def get_live_messages(
 @router.post("/messages/send", response_model=LiveSendResponse)
 async def send_live_message(
     payload: LiveSendRequest,
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> LiveSendResponse:
-    if live_browser.status != "running":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Live chat is not running.",
-        )
-    if not live_browser.active_chat_id:
+    manager = await _require_running(db, current_user)
+    if not manager.active_chat_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Open a chat before sending.",
@@ -259,7 +251,7 @@ async def send_live_message(
     # reflects the actual send outcome (browser errors) and the cooldown
     # duration, both of which the frontend can render.
     t0 = asyncio.get_running_loop().time()
-    result = await live_browser.send_message(payload.text)
+    result = await manager.send_message(payload.text)
     elapsed = asyncio.get_running_loop().time() - t0
 
     if not result.get("ok"):

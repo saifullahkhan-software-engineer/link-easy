@@ -35,9 +35,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.dependencies import get_current_user, get_current_user_from_token, get_db
 from core.live_hub import log_hub
 from models.user import User
-from services.browser_view import WHATSAPP_URL, browser_view
+from services.browser_view import WHATSAPP_URL, get_browser_view
 
 router = APIRouter(prefix="/api/v1/live", tags=["live"])
+
+
+async def _resolve_browser_view(user: User, db: AsyncSession):
+    """Resolve the embedded browser view owned by ``user``'s WhatsApp session.
+
+    Per-user rollout: every session owns its own browser view (QR connect
+    screen), so control/stream endpoints must target the caller's view —
+    never a process-wide singleton.
+    """
+    from api.v1.whatsapp_sessions import get_owned_session
+
+    session = await get_owned_session(db, user)
+    if session is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "WhatsApp is not connected on this account. "
+                'Press "Connect WhatsApp" first.'
+            ),
+        )
+    return get_browser_view(session.id)
 
 
 # ── SSE helpers ──────────────────────────────────────────────────────────────
@@ -106,9 +127,13 @@ async def stream_logs(request: Request, _: User = Depends(sse_user)):
 
 
 @router.get("/browser/status")
-async def browser_status(_: User = Depends(get_current_user)) -> dict:
-    """Current browser view status."""
-    return browser_view.snapshot()
+async def browser_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """The caller's browser view status."""
+    view = await _resolve_browser_view(current_user, db)
+    return view.snapshot()
 
 
 class BrowserStartRequest(BaseModel):
@@ -118,11 +143,13 @@ class BrowserStartRequest(BaseModel):
 @router.post("/browser/start")
 async def browser_start(
     payload: BrowserStartRequest | None = None,
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Launch (or reuse) the embedded headless browser."""
+    """Launch (or reuse) the caller's embedded headless browser."""
+    view = await _resolve_browser_view(current_user, db)
     url = (payload.url if payload and payload.url else WHATSAPP_URL).strip()
-    result = await browser_view.ensure_started(url)
+    result = await view.ensure_started(url)
     if result.get("status") == "error":
         raise HTTPException(
             status_code=500,
@@ -132,9 +159,13 @@ async def browser_start(
 
 
 @router.post("/browser/stop")
-async def browser_stop(_: User = Depends(get_current_user)) -> dict:
-    """Stop the embedded browser."""
-    return await browser_view.stop()
+async def browser_stop(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Stop the caller's embedded browser."""
+    view = await _resolve_browser_view(current_user, db)
+    return await view.stop()
 
 
 class BrowserInputRequest(BaseModel):
@@ -151,19 +182,26 @@ class BrowserInputRequest(BaseModel):
 
 @router.post("/browser/input")
 async def browser_input(
-    payload: BrowserInputRequest, _: User = Depends(get_current_user)
+    payload: BrowserInputRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Dispatch an input event (click / scroll / type / key / navigate)."""
-    result = await browser_view.send_input(payload.model_dump(exclude_none=True))
+    """Dispatch an input event into the caller's view (click/scroll/type/key)."""
+    view = await _resolve_browser_view(current_user, db)
+    result = await view.send_input(payload.model_dump(exclude_none=True))
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error", "Input failed"))
     return result
 
 
 @router.get("/browser/frame")
-async def browser_frame(_: User = Depends(sse_user)) -> Response:
+async def browser_frame(
+    user: User = Depends(sse_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
     """Latest screencast frame as a plain JPEG (polling fallback)."""
-    frame = browser_view.latest_frame()
+    view = await _resolve_browser_view(user, db)
+    frame = view.latest_frame()
     if not frame:
         raise HTTPException(
             status_code=404, detail="No frame yet — start the browser view first"
@@ -176,14 +214,20 @@ async def browser_frame(_: User = Depends(sse_user)) -> Response:
 
 
 @router.get("/browser/stream")
-async def browser_stream(request: Request, _: User = Depends(sse_user)):
-    """SSE stream of browser status events + screencast JPEG frames."""
+async def browser_stream(
+    request: Request,
+    user: User = Depends(sse_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """SSE stream of the caller's browser status events + screencast frames."""
+
+    view = await _resolve_browser_view(user, db)
 
     async def generator():
-        queue = await browser_view.subscribe()
+        queue = await view.subscribe()
         try:
-            yield sse("status", {"type": "status", **browser_view.snapshot()})
-            latest = browser_view.latest_frame()
+            yield sse("status", {"type": "status", **view.snapshot()})
+            latest = view.latest_frame()
             if latest:
                 yield sse("frame", {"type": "frame", "data": latest})
             while True:
@@ -195,6 +239,6 @@ async def browser_stream(request: Request, _: User = Depends(sse_user)):
                 except asyncio.TimeoutError:
                     yield sse("ping", {"t": time.time()})
         finally:
-            await browser_view.unsubscribe(queue)
+            await view.unsubscribe(queue)
 
     return sse_response(generator())

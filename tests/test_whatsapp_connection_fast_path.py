@@ -247,7 +247,8 @@ class ConnectionWatcherFastPathTests(unittest.IsolatedAsyncioTestCase):
         import services.whatsapp_browser as whatsapp_module
 
         with (
-            patch.object(browser_module, "browser_view", browser),
+            # Per-user rollout: the watcher observes the session's own view.
+            patch.object(browser_module, "get_browser_view", return_value=browser),
             patch.object(database, "async_session", fake_session),
             patch.object(
                 whatsapp_module,

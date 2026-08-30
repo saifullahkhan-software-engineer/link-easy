@@ -1,5 +1,11 @@
 # WhatsApp Persistent Profile — Rollout Notes
 
+> **Updated by the per-user rollout** (`docs/whatsapp_per_user_sessions.md`):
+> the single shared profile described below is now only the *legacy* layout.
+> New sessions get their own per-user dir at
+> `{PROFILE_STORAGE_DIR}/whatsapp/session-{id}` and their own lock key
+> `profile_lock:whatsapp:{id}`.
+
 ## What changed
 
 The WhatsApp connection no longer round-trips through `storage_state` in the

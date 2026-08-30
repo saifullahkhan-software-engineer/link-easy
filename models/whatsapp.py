@@ -28,6 +28,19 @@ class WhatsAppSession(Base):
     __tablename__ = "whatsapp_sessions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # One WhatsApp session per platform user (same multi-account model as
+    # linkedin_accounts). Nullable keeps the original singleton-session rows
+    # valid; the first authenticated user without a session adopts them on
+    # their next WhatsApp request (see api/v1/whatsapp_scanner.py).
+    owner_email = Column(
+        String, ForeignKey("users.email", ondelete="CASCADE"), nullable=True
+    )
+    # Durable per-session Chromium profile directory, mirroring
+    # LinkedInAccount.profile_dir. Set once at session creation time as
+    # f"{PROFILE_STORAGE_DIR}/whatsapp/session-{id}". NULL means "the legacy
+    # shared flat profile {PROFILE_STORAGE_DIR}/whatsapp" so pre-migration
+    # installations keep their working session without moving files.
+    profile_dir = Column(String, nullable=True)
     cookies_json = Column(JSON, nullable=True)
     storage_state_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -41,6 +54,21 @@ class WhatsAppSession(Base):
     status = Column(
         String, nullable=False, default="disconnected"
     )  # disconnected | waiting_qr | connected | error
+
+    def assign_profile_dir(self) -> None:
+        """Derive this session's profile dir from its server-generated id.
+
+        Call after the row has been flushed (id assigned) and before
+        persisting. Only fills a NULL value: adopted legacy sessions keep
+        resolving to the shared flat profile directory.
+        """
+        if not self.profile_dir and self.id is not None:
+            from core.config import settings
+
+            self.profile_dir = (
+                f"{settings.PROFILE_STORAGE_DIR.rstrip('/')}"
+                f"/whatsapp/session-{self.id}"
+            )
 
 
 class WhatsAppMonitoredGroup(Base):
