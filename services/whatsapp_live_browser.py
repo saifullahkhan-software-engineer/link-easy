@@ -72,10 +72,39 @@ DEFAULT_MESSAGE_LIMIT = 50
 VIEWPORT = {"width": 1280, "height": 900}
 
 
-class LiveBrowserManager:
-    """Process-wide singleton managing the live-chat Playwright browser."""
+def _registry_key(session_id: Optional[int]) -> str:
+    return str(int(session_id)) if session_id is not None else "legacy"
 
-    def __init__(self) -> None:
+
+# Per-user rollout: one LiveBrowserManager per WhatsApp session, so every
+# user runs their own live-chat browser on their own profile. "legacy" is the
+# pre-migration shared session.
+_live_browsers: dict[str, "LiveBrowserManager"] = {}
+
+
+def get_live_browser(session_id: Optional[int]) -> "LiveBrowserManager":
+    """Return (creating if needed) the live-chat manager for one session."""
+    key = _registry_key(session_id)
+    manager = _live_browsers.get(key)
+    if manager is None:
+        manager = LiveBrowserManager(session_id=session_id)
+        _live_browsers[key] = manager
+    return manager
+
+
+def all_live_browsers() -> list["LiveBrowserManager"]:
+    """Every in-process live-chat manager (used by shutdown)."""
+    return list(_live_browsers.values())
+
+
+class LiveBrowserManager:
+    """Per-session manager for the live-chat Playwright browser."""
+
+    def __init__(self, session_id: Optional[int] = None) -> None:
+        # Which WhatsApp session (and therefore profile dir + Redis lock key)
+        # this manager belongs to. None = legacy shared session.
+        self.session_id: Optional[int] = session_id
+
         self._pw = None
         self._context = None
         self._page = None
@@ -118,11 +147,12 @@ class LiveBrowserManager:
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
     async def start(self) -> dict:
-        """Launch the live browser on the durable WhatsApp profile.
+        """Launch the live browser on this session's durable WhatsApp profile.
 
-        Acquires ``profile_lock:whatsapp`` so the Celery scan task pauses
-        for the duration of this session. If WhatsApp is not connected, or
-        if the lock is already held by someone else, returns immediately
+        Acquires ``profile_lock:whatsapp:{session_id}`` so the Celery scan
+        task for this same session pauses for the duration of this session
+        (other users' sessions are unaffected). If WhatsApp is not connected,
+        or if the lock is already held by someone else, returns immediately
         with a clear error.
         """
         async with self._op_lock:
@@ -131,6 +161,7 @@ class LiveBrowserManager:
 
             # Verify the user has a connected WhatsApp session first —
             # there's nothing for the live browser to read otherwise.
+            from services.whatsapp_browser import whatsapp_lock_id
             from worker.profile_lock import ProfileInUseError, acquire_profile_lock
 
             try:
@@ -146,7 +177,9 @@ class LiveBrowserManager:
                 # hung while starting. Run it in a worker thread — the same
                 # pattern api/v1/whatsapp_scanner.py already uses.
                 profile_lock = await asyncio.to_thread(
-                    acquire_profile_lock, "whatsapp", blocking_timeout=30
+                    acquire_profile_lock,
+                    whatsapp_lock_id(self.session_id),
+                    blocking_timeout=30,
                 )
             except ProfileInUseError:
                 # Should not happen often — we hold the only locks — but make
@@ -170,7 +203,7 @@ class LiveBrowserManager:
                 pw = await async_playwright().start()
                 try:
                     context = await pw.chromium.launch_persistent_context(
-                        user_data_dir=ensure_whatsapp_profile_dir(),
+                        user_data_dir=ensure_whatsapp_profile_dir(self.session_id),
                         headless=True,
                         viewport=dict(VIEWPORT),
                         locale="en-US",
@@ -713,5 +746,8 @@ async def _read_active_chat_name(page) -> Optional[str]:
     return None
 
 
-# Process-wide singleton — the FastAPI app owns one live browser at a time.
+# Legacy shared-session instance. New per-user flows resolve their manager
+# through ``get_live_browser(session_id)``; this singleton remains for the
+# pre-migration session and for tests/older callers.
 live_browser = LiveBrowserManager()
+_live_browsers[_registry_key(None)] = live_browser

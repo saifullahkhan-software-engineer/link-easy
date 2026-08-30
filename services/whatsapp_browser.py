@@ -78,9 +78,31 @@ window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
 """
 
 
-def whatsapp_profile_dir() -> str:
-    """Path of the durable WhatsApp Chromium profile directory."""
-    return os.path.join(settings.PROFILE_STORAGE_DIR, WHATSAPP_PROFILE_SUBDIR)
+def whatsapp_profile_dir(session_id: Optional[int] = None) -> str:
+    """Path of the durable WhatsApp Chromium profile directory.
+
+    Per-user rollout: every session gets its own subdirectory
+    ``whatsapp/session-{id}`` so two users can run their own WhatsApp
+    browsers simultaneously (mirroring LinkedInAccount.profile_dir).
+    ``session_id=None`` returns the legacy shared flat directory used by
+    pre-migration session rows.
+    """
+    base = os.path.join(settings.PROFILE_STORAGE_DIR, WHATSAPP_PROFILE_SUBDIR)
+    if session_id is None:
+        return base
+    return os.path.join(base, f"session-{int(session_id)}")
+
+
+def whatsapp_lock_id(session_id: Optional[int] = None) -> str:
+    """Redis profile-lock key for one WhatsApp session.
+
+    New sessions lock ``profile_lock:whatsapp:{id}`` so different users'
+    browsers never block each other; the legacy shared session keeps the
+    plain ``profile_lock:whatsapp`` key.
+    """
+    if session_id is None:
+        return "whatsapp"
+    return f"whatsapp:{int(session_id)}"
 
 
 _CHROMIUM_SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
@@ -146,14 +168,14 @@ def clear_stale_chromium_singleton(profile_dir: str | None = None) -> bool:
     return removed
 
 
-def ensure_whatsapp_profile_dir() -> str:
+def ensure_whatsapp_profile_dir(session_id: Optional[int] = None) -> str:
     """Create the WhatsApp profile dir with restrictive 0o700 permissions.
 
     The profile contains live session material on disk (cookies, IndexedDB),
     so it is treated as secret — same policy as the per-account LinkedIn
     profiles in automation/browser.py. Idempotent.
     """
-    path = whatsapp_profile_dir()
+    path = whatsapp_profile_dir(session_id)
     os.makedirs(path, mode=0o700, exist_ok=True)
     try:
         os.chmod(path, 0o700)
@@ -162,7 +184,10 @@ def ensure_whatsapp_profile_dir() -> str:
     return path
 
 
-async def launch_whatsapp_persistent(headless: bool = True) -> tuple:
+async def launch_whatsapp_persistent(
+    headless: bool = True,
+    profile_dir: Optional[str] = None,
+) -> tuple:
     """Launch Chromium on the durable WhatsApp profile.
 
     The QR login happens inside this profile and every later launch
@@ -170,7 +195,9 @@ async def launch_whatsapp_persistent(headless: bool = True) -> tuple:
     disk — no storage_state round-trip, and never two browsers racing on the
     same account.
 
-    Callers MUST hold the ``profile_lock:whatsapp`` redis lock (see
+    ``profile_dir`` selects WHICH session's profile to open (defaults to the
+    legacy shared flat directory). Callers MUST hold that session's profile
+    lock (``profile_lock:whatsapp:{id}``, see
     worker/profile_lock.py): Chromium allows only one process per
     user-data-dir.
 
@@ -178,7 +205,7 @@ async def launch_whatsapp_persistent(headless: bool = True) -> tuple:
         (playwright_instance, context, page) — a persistent context has no
         separate Browser object; clean up with ``safe_close(pw, context)``.
     """
-    profile_dir = ensure_whatsapp_profile_dir()
+    profile_dir = profile_dir or ensure_whatsapp_profile_dir()
 
     pw = await async_playwright().start()
     try:

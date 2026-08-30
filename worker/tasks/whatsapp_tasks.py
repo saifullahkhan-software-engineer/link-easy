@@ -265,6 +265,7 @@ async def _check_whatsapp_messages_async(
         scrape_messages_from_current_chat,
         forward_message_to_group,
         safe_close,
+        whatsapp_lock_id,
     )
     from services.whatsapp_ocr import extract_text_from_image
     from services.whatsapp_matcher import compute_match_score
@@ -274,9 +275,10 @@ async def _check_whatsapp_messages_async(
         release_profile_lock,
     )
 
-    # Load the current session, one filter job, and that job's groups from DB.
-    # A NULL filter_id intentionally selects the legacy singleton rows so old
-    # manual tasks continue to work while the new scheduler passes an id.
+    # Load the filter job, the session that owns it, and that job's groups
+    # from DB. A NULL filter_id intentionally selects the legacy singleton
+    # rows so old manual tasks continue to work while the new scheduler
+    # passes an id.
     with get_sync_db() as db:
         from models.whatsapp import (
             WhatsAppSession,
@@ -284,18 +286,6 @@ async def _check_whatsapp_messages_async(
             WhatsAppForwardGroup,
             WhatsAppScanFilter,
         )
-
-        session_row = (
-            db.query(WhatsAppSession)
-            .filter(WhatsAppSession.is_active == True)
-            .order_by(WhatsAppSession.id.desc())
-            .first()
-        )
-        if not session_row or session_row.status != "connected":
-            logger.warning("⚠️  No active WhatsApp session — skipping check")
-            return {"status": "skipped", "reason": "No active session"}
-
-        session_id = session_row.id
 
         filter_query = db.query(WhatsAppScanFilter)
         if filter_id is not None:
@@ -332,6 +322,46 @@ async def _check_whatsapp_messages_async(
             if not filters_row:
                 logger.info("⏭️ No active WhatsApp filter — ignoring legacy scan task")
                 return {"status": "skipped", "reason": "No active WhatsApp filter"}
+
+        # Per-user rollout: the scan runs on the filter owner's own WhatsApp
+        # session, never a global singleton. Legacy (unowned) filters keep
+        # the legacy unowned session, falling back to the newest connected
+        # session so old manual scan tasks keep working.
+        owner_email = getattr(filters_row, "owner_email", None)
+        session_query = db.query(WhatsAppSession).filter(
+            WhatsAppSession.is_active == True,
+            WhatsAppSession.status == "connected",
+        )
+        if owner_email:
+            session_row = (
+                session_query.filter(WhatsAppSession.owner_email == owner_email)
+                .order_by(WhatsAppSession.id.desc())
+                .first()
+            )
+            if not session_row:
+                logger.warning(
+                    "⚠️  No connected WhatsApp session for filter owner %s — skipping check",
+                    owner_email,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "Filter owner has no connected session",
+                }
+        else:
+            session_row = (
+                session_query.filter(WhatsAppSession.owner_email.is_(None))
+                .order_by(WhatsAppSession.id.desc())
+                .first()
+            )
+            if not session_row:
+                session_row = (
+                    session_query.order_by(WhatsAppSession.id.desc()).first()
+                )
+            if not session_row:
+                logger.warning("⚠️  No active WhatsApp session — skipping check")
+                return {"status": "skipped", "reason": "No active session"}
+
+        session_id = session_row.id
 
         group_query = db.query(WhatsAppMonitoredGroup)
         forward_query = db.query(WhatsAppForwardGroup)
@@ -414,28 +444,33 @@ async def _check_whatsapp_messages_async(
     )
 
     try:
-        profile_lock = acquire_profile_lock("whatsapp", blocking_timeout=5)
+        profile_lock = acquire_profile_lock(
+            whatsapp_lock_id(session_id), blocking_timeout=5
+        )
     except ProfileInUseError:
         logger.info("🔒 WhatsApp profile in use by another browser — skipping this check")
         return {"status": "skipped", "reason": "WhatsApp profile in use"}
 
-    # Browser-free fast path: the guard above already proved the latest
-    # session row says "connected", so a missing/empty durable profile here
-    # means it was wiped (a deploy without the /app/profiles volume).
-    # Launching Chromium would just reveal a blank QR screen, so mark the
-    # session disconnected up front instead of paying for a launch.
-    # (A missing profile under a *disconnected* row is the normal
-    # pre-first-connect state and never reaches this point.)
+    # Browser-free fast path: the guard above already proved the session row
+    # says "connected", so a missing/empty durable profile here means it was
+    # wiped (a deploy without the /app/profiles volume). Launching Chromium
+    # would just reveal a blank QR screen, so mark the session disconnected
+    # up front instead of paying for a launch. (A missing profile under a
+    # *disconnected* row is the normal pre-first-connect state and never
+    # reaches this point.)
     from core.profiles import profile_dir_missing
     from services.whatsapp_browser import whatsapp_profile_dir
 
-    if profile_dir_missing(whatsapp_profile_dir()):
+    profile_dir = getattr(session_row, "profile_dir", None) or whatsapp_profile_dir()
+    if profile_dir_missing(profile_dir):
         release_profile_lock(profile_lock)
         with get_sync_db() as db:
             from models.whatsapp import WhatsAppSession
 
             row = (
-                db.query(WhatsAppSession).order_by(WhatsAppSession.id.desc()).first()
+                db.query(WhatsAppSession)
+                .filter(WhatsAppSession.id == session_id)
+                .first()
             )
             if row and row.status == "connected":
                 row.status = "disconnected"
@@ -448,7 +483,9 @@ async def _check_whatsapp_messages_async(
         return {"status": "error", "reason": "Profile missing — reconnect required"}
 
     try:
-        pw, context, page = await launch_whatsapp_persistent(headless=True)
+        pw, context, page = await launch_whatsapp_persistent(
+            headless=True, profile_dir=profile_dir
+        )
     except Exception as exc:
         release_profile_lock(profile_lock)
         logger.warning("⚠️  Could not open the WhatsApp profile (%s) — skipping check", exc)

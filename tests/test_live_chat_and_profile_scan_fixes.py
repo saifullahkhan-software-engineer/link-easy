@@ -130,6 +130,7 @@ class WhatsAppLiveStartErrorContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def _post_start(self, snapshot):
         from starlette.testclient import TestClient
+        from types import SimpleNamespace
 
         import main
         from api.dependencies import get_current_user, get_db
@@ -141,12 +142,18 @@ class WhatsAppLiveStartErrorContractTests(unittest.IsolatedAsyncioTestCase):
         try:
             with (
                 patch.object(
-                    whatsapp_live, "_require_connection", AsyncMock(return_value=None)
+                    whatsapp_live,
+                    "_require_connection",
+                    # Per-user rollout: the resolver returns the caller's own
+                    # session row (id=1).
+                    AsyncMock(return_value=SimpleNamespace(id=1)),
                 ),
                 patch.object(
-                    whatsapp_live.live_browser,
-                    "start",
-                    AsyncMock(return_value=snapshot),
+                    whatsapp_live,
+                    "get_live_browser",
+                    return_value=SimpleNamespace(
+                        start=AsyncMock(return_value=snapshot)
+                    ),
                 ),
             ):
                 # raise_server_exceptions=False so an unserializable detail

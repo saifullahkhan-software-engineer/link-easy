@@ -111,7 +111,10 @@ class AdminWhatsAppSessionRow(BaseModel):
     is_active: bool
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    # Same fact as the LinkedIn rows, for the single shared WhatsApp profile.
+    # Per-user rollout: which platform user owns this session (NULL = legacy
+    # unowned row).
+    owner_email: Optional[str] = None
+    # Same fact as the LinkedIn rows, now computed per session profile.
     profile_missing: bool = False
 
 

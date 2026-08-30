@@ -73,7 +73,7 @@ class BrowserViewStaleLockTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("worker.profile_lock.acquire_profile_lock", acquire),
             patch("worker.profile_lock.force_release_profile_lock", force),
-            patch("services.whatsapp_live_browser.live_browser", live),
+            patch("services.whatsapp_live_browser.get_live_browser", return_value=live),
         ):
             with self.assertRaises(ProfileInUseError):
                 await manager._claim_whatsapp_profile_lock()
@@ -150,8 +150,6 @@ class BrowserViewStaleLockTests(unittest.IsolatedAsyncioTestCase):
 class ConnectClearsLeftoverBrowsersTests(unittest.IsolatedAsyncioTestCase):
     async def test_connect_stops_error_state_browsers_before_starting(self):
         from api.v1.whatsapp_scanner import connect_whatsapp
-        from services.browser_view import browser_view
-        from services.whatsapp_live_browser import live_browser
 
         class _Database:
             def __init__(self):
@@ -166,29 +164,42 @@ class ConnectClearsLeftoverBrowsersTests(unittest.IsolatedAsyncioTestCase):
             def add(self, _row):
                 return None
 
+            async def flush(self):
+                return None
+
             async def refresh(self, row):
                 row.id = 1
 
         db = _Database()
+        # Per-user rollout: connect resolves the caller's session first, then
+        # its own per-session managers (never a process-wide singleton).
+        session_row = SimpleNamespace(
+            id=1, status="waiting_qr", is_active=True, owner_email="owner@test.dev"
+        )
+        view = SimpleNamespace(
+            status="error",
+            last_error="stale lock",
+            stop=AsyncMock(),
+            ensure_started=AsyncMock(return_value={"status": "running", "error": None}),
+            snapshot=lambda: {"status": "running", "error": None},
+        )
+        live = SimpleNamespace(status="error", stop=AsyncMock())
+
         with (
-            patch.object(live_browser, "status", "error"),
-            patch.object(live_browser, "stop", AsyncMock()) as stop_live,
-            patch.object(browser_view, "status", "error"),
-            patch.object(browser_view, "last_error", "stale lock"),
-            patch.object(browser_view, "stop", AsyncMock()) as stop_view,
-            patch.object(
-                browser_view,
-                "ensure_started",
-                AsyncMock(return_value={"status": "running", "error": None}),
+            patch(
+                "api.v1.whatsapp_sessions.get_owned_session",
+                AsyncMock(return_value=session_row),
             ),
+            patch("services.browser_view.get_browser_view", return_value=view),
+            patch("services.whatsapp_live_browser.get_live_browser", return_value=live),
             patch("api.v1.whatsapp_scanner._spawn_qr_watcher"),
         ):
             response = await connect_whatsapp(
                 SimpleNamespace(email="owner@test.dev"), db
             )
 
-        stop_live.assert_awaited()
-        stop_view.assert_awaited()
+        live.stop.assert_awaited()
+        view.stop.assert_awaited()
         self.assertEqual(response.status, "waiting_qr")
 
 
