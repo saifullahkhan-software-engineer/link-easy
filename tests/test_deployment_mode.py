@@ -1,16 +1,19 @@
-"""Hosted-demo (ENVIRONMENT=deployment) must be a reduced, honest mode.
+"""ENVIRONMENT=deployment labels the hosted instance but no longer reduces it.
 
-The public demo runs on one small container with no residential proxies, so
-unattended timer work is switched off: Celery Beat publishes nothing, and the
-endpoints that arm a *repeating* schedule refuse with 503 rather than writing
-a ``next_scan_at`` that will never be dispatched.
+Hosted users must be able to start the campaigns and feed-scan jobs they
+create, so scheduling (Celery Beat's dispatchers) and LinkedIn automation
+are ON by default on every environment. The switches remain as explicit
+kill switches: SCHEDULED_JOBS_ENABLED=false clears the Beat schedule and
+makes the recurring-job endpoints return 503, while LINKEDIN_ENABLED=false
+takes the LinkedIn surfaces down — on-demand worker work is unaffected.
 
-Two properties matter most and are asserted here:
+Three properties matter most and are asserted here:
 
-1. Turning scheduling off must NOT disable on-demand work. The Celery worker
-   still runs on the demo, so a manual WhatsApp scan must stay reachable.
-2. Every other ENVIRONMENT — including the default "production" — must behave
-   exactly as it did before, so local and self-hosted installs are untouched.
+1. Deployment mode keeps the schedulers running by default; the explicit
+   override still wins in both directions on every environment.
+2. Turning scheduling off must NOT disable on-demand work. The Celery
+   worker keeps running, so a manual WhatsApp scan stays reachable.
+3. The hosted-instance banner payload still keys off is_demo/notice.
 """
 import asyncio
 import importlib
@@ -62,10 +65,13 @@ def build_settings(**env):
 class EnvironmentModeTests(unittest.TestCase):
     """ENVIRONMENT decides the mode; SCHEDULED_JOBS_ENABLED can override it."""
 
-    def test_deployment_disables_scheduling(self):
+    def test_deployment_keeps_scheduling_on(self):
         s = build_settings(ENVIRONMENT="deployment")
         self.assertTrue(s.is_deployment)
-        self.assertFalse(s.scheduled_jobs_enabled)
+        self.assertTrue(
+            s.scheduled_jobs_enabled,
+            "hosted users must be able to start campaigns and recurring jobs",
+        )
 
     def test_deployment_match_is_case_insensitive(self):
         self.assertTrue(build_settings(ENVIRONMENT="Deployment").is_deployment)
@@ -127,15 +133,18 @@ class RequireScheduledJobsEnabledTests(unittest.TestCase):
             require_scheduled_jobs_enabled()
         self.assertEqual(ctx.exception.status_code, 503)
 
-    def test_message_points_users_at_running_locally(self):
+    def test_message_reads_as_temporary_and_mentions_on_demand(self):
         settings.SCHEDULED_JOBS_ENABLED_OVERRIDE = False
         with self.assertRaises(HTTPException) as ctx:
             require_scheduled_jobs_enabled()
-        self.assertIn("locally", str(ctx.exception.detail).lower())
+        detail = str(ctx.exception.detail).lower()
+        self.assertIn("on demand", detail)
+        self.assertIn("temporarily", detail)
 
 
 class BeatScheduleTests(unittest.TestCase):
-    """Beat must publish nothing on the demo, and everything elsewhere."""
+    """Beat must publish every dispatcher everywhere by default; the
+    explicit SCHEDULED_JOBS_ENABLED override is the only off switch."""
 
     EXPECTED = {
         "dispatch-due-account-sessions",
@@ -143,34 +152,47 @@ class BeatScheduleTests(unittest.TestCase):
         "dispatch-due-whatsapp-scans",
     }
 
-    def _beat_schedule_for(self, environment):
-        """Rebuild celery_app under a given ENVIRONMENT.
+    def _beat_schedule_for(self, environment, scheduled_override=None):
+        """Rebuild celery_app under a given ENVIRONMENT/override.
 
         Mutates the shared settings singleton and reloads only
         worker.celery_app, so no other module ends up pointing at a stale
         Settings object.
         """
-        saved = settings.ENVIRONMENT
+        saved_env = settings.ENVIRONMENT
+        saved_override = settings.SCHEDULED_JOBS_ENABLED_OVERRIDE
         try:
             settings.ENVIRONMENT = environment
+            settings.SCHEDULED_JOBS_ENABLED_OVERRIDE = scheduled_override
             import worker.celery_app as celery_module
 
             importlib.reload(celery_module)
             return set(celery_module.celery_app.conf.beat_schedule)
         finally:
-            settings.ENVIRONMENT = saved
+            settings.ENVIRONMENT = saved_env
+            settings.SCHEDULED_JOBS_ENABLED_OVERRIDE = saved_override
             import worker.celery_app as celery_module
 
             importlib.reload(celery_module)
 
-    def test_deployment_has_no_periodic_tasks(self):
-        self.assertEqual(self._beat_schedule_for("deployment"), set())
+    def test_deployment_keeps_every_dispatcher(self):
+        self.assertEqual(self._beat_schedule_for("deployment"), self.EXPECTED)
 
     def test_production_keeps_every_dispatcher(self):
         self.assertEqual(self._beat_schedule_for("production"), self.EXPECTED)
 
     def test_development_keeps_every_dispatcher(self):
         self.assertEqual(self._beat_schedule_for("development"), self.EXPECTED)
+
+    def test_explicit_override_clears_the_schedule(self):
+        self.assertEqual(
+            self._beat_schedule_for("deployment", scheduled_override=False),
+            set(),
+        )
+        self.assertEqual(
+            self._beat_schedule_for("production", scheduled_override=False),
+            set(),
+        )
 
 
 class FeaturesPayloadTests(unittest.TestCase):
@@ -192,12 +214,15 @@ class FeaturesPayloadTests(unittest.TestCase):
         finally:
             settings.ENVIRONMENT = saved
 
-    def test_deployment_payload_flags_the_demo(self):
+    def test_deployment_payload_flags_the_instance(self):
         body = self._payload("deployment")
         self.assertTrue(body["deployment"]["is_demo"])
         self.assertTrue(body["deployment"]["notice"])
-        self.assertFalse(body["scheduled_jobs"]["enabled"])
-        self.assertTrue(body["scheduled_jobs"]["message"])
+        # Scheduling is ON even on the hosted instance.
+        self.assertTrue(body["scheduled_jobs"]["enabled"])
+        self.assertIsNone(body["scheduled_jobs"]["message"])
+        # LinkedIn automation is ON by default too.
+        self.assertTrue(body["linkedin"]["enabled"])
 
     def test_production_payload_shows_no_banner(self):
         body = self._payload("production")

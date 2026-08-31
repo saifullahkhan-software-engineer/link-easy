@@ -4,16 +4,16 @@ import { useFeatures } from '../hooks/useFeatures';
 const STORAGE_KEY = 'linkeasy_hosted_demo_notice_dismissed';
 
 /**
- * "You're on the hosted demo — LinkEasy works best locally" notice.
+ * "You're on the hosted LinkEasy instance — also self-hostable" notice.
  *
  * Shown ONLY when the backend reports ENVIRONMENT=deployment (`is_demo`).
  * Self-hosted and local installs never see it, which is why the flag comes
  * from the API rather than a build-time env var: the same frontend bundle is
  * served in both cases.
  *
- * The hosted demo is deliberately reduced — no Celery Beat, so no scheduled
- * campaign steps and no recurring scans, and no residential proxies, so no
- * LinkedIn. Running locally lifts all of that, so the banner points there and
+ * The hosted instance runs the full feature set (LinkedIn automation,
+ * campaigns, feed scans, WhatsApp, scheduled and recurring jobs); the banner
+ * simply tells users they can also self-host on their own machine/IP and
  * offers a contact address for setup help.
  *
  * Dismissible, persisted in localStorage, same pattern as BetaBanner.

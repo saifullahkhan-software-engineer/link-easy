@@ -1,10 +1,13 @@
-"""LinkedIn automation must be gated off until residential proxies exist.
+"""LinkedIn automation ships ENABLED; the gate is a kill switch.
 
-LinkedIn blocks sign-ins originating from datacenter IPs, so every endpoint
-that opens a Chromium session against linkedin.com returns 503 with an
-explanation instead of failing halfway through a login. Read-only and cleanup
-routes stay open so anyone who connected earlier can still see and remove
-their account.
+Every endpoint that opens a Chromium session against linkedin.com carries
+``require_linkedin_enabled`` so an operator can set LINKEDIN_ENABLED=false
+and get a clean 503 (instead of failures halfway through a campaign run or
+login) without a redeploy. Default is ON for every deployment — hosted
+users must be able to connect accounts, start campaigns and activate feed-
+scan jobs. Read-only and cleanup routes stay open even when the switch is
+off, so anything connected or running can still be seen, paused and
+removed.
 """
 import os
 import unittest
@@ -31,25 +34,26 @@ class RequireLinkedInEnabledTests(unittest.TestCase):
     def tearDown(self):
         settings.LINKEDIN_ENABLED = self._original
 
-    def test_disabled_by_default(self):
-        """Shipping default must be OFF — the feature cannot work yet."""
-        self.assertFalse(
+    def test_enabled_by_default(self):
+        """Shipping default must be ON — campaigns/feed scans must start."""
+        self.assertTrue(
             type(settings).model_fields["LINKEDIN_ENABLED"].default,
-            "LINKEDIN_ENABLED must default to False",
+            "LINKEDIN_ENABLED must default to True",
         )
 
-    def test_raises_503_when_disabled(self):
+    def test_raises_503_when_kill_switch_off(self):
         settings.LINKEDIN_ENABLED = False
         with self.assertRaises(HTTPException) as ctx:
             require_linkedin_enabled()
         self.assertEqual(ctx.exception.status_code, 503)
 
-    def test_error_explains_the_proxy_reason(self):
+    def test_error_is_temporary_and_points_at_whatsapp(self):
         settings.LINKEDIN_ENABLED = False
         with self.assertRaises(HTTPException) as ctx:
             require_linkedin_enabled()
         detail = str(ctx.exception.detail).lower()
-        self.assertIn("proxy", detail)
+        # A temporary-outage message, not a "we never built this" message.
+        self.assertIn("temporarily", detail)
         # Must point users at the alternative that does work.
         self.assertIn("whatsapp", detail)
 
@@ -147,7 +151,20 @@ class GatedRouteCoverageTests(unittest.TestCase):
 
 
 class FeatureFlagEndpointTests(unittest.IsolatedAsyncioTestCase):
-    async def test_reports_linkedin_disabled_with_message(self):
+    async def test_reports_linkedin_enabled_by_default(self):
+        import main
+
+        original = settings.LINKEDIN_ENABLED
+        try:
+            settings.LINKEDIN_ENABLED = True
+            payload = await main.feature_flags()
+            self.assertTrue(payload["linkedin"]["enabled"])
+            self.assertIsNone(payload["linkedin"]["message"])
+            self.assertTrue(payload["whatsapp"]["enabled"])
+        finally:
+            settings.LINKEDIN_ENABLED = original
+
+    async def test_reports_disabled_with_message_when_kill_switch_off(self):
         import main
 
         original = settings.LINKEDIN_ENABLED
@@ -155,8 +172,8 @@ class FeatureFlagEndpointTests(unittest.IsolatedAsyncioTestCase):
             settings.LINKEDIN_ENABLED = False
             payload = await main.feature_flags()
             self.assertFalse(payload["linkedin"]["enabled"])
-            self.assertIn("proxy", payload["linkedin"]["message"].lower())
-            self.assertTrue(payload["whatsapp"]["enabled"])
+            self.assertTrue(payload["linkedin"]["message"])
+            self.assertIn("temporarily", payload["linkedin"]["message"].lower())
         finally:
             settings.LINKEDIN_ENABLED = original
 

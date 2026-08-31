@@ -33,7 +33,7 @@ export default function LinkedInFeatureRoute({ title, children }) {
           <div>
             <h1 className="text-2xl font-bold text-zinc-50">{title}</h1>
             <p className="mt-1 text-sm text-zinc-400">
-              LinkedIn automation is paused on this deployment.
+              LinkedIn automation is temporarily paused on this instance.
             </p>
           </div>
           <Link to="/app/account" className="btn-secondary text-xs">

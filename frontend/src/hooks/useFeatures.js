@@ -5,27 +5,28 @@ import { featuresApi } from '../api/endpoints';
 /**
  * Deployment feature flags, fetched once and cached for the tab's lifetime.
  *
- * LinkedIn automation is disabled until each account can be given a
- * residential proxy — LinkedIn blocks sign-ins from datacenter IPs — so the
- * UI must not offer forms that cannot succeed. WhatsApp is unaffected.
+ * All automation surfaces — LinkedIn campaigns and feed scans, WhatsApp, and
+ * the recurring-job schedulers — are enabled by default on every
+ * deployment. The backend still ships the gates as kill switches
+ * (LINKEDIN_ENABLED / SCHEDULED_JOBS_ENABLED), so the UI trusts whatever the
+ * /features endpoint reports.
  *
- * Fails OPEN for WhatsApp and CLOSED for LinkedIn: if the flags endpoint is
- * unreachable we keep LinkedIn hidden rather than showing a form that would
- * 503 anyway.
+ * Fails OPEN: if the flags endpoint is unreachable (same origin as the API,
+ * so the app is unlikely to be working anyway), every feature is assumed
+ * available rather than hiding working surfaces.
  */
 
 const FALLBACK = {
   linkedin: {
-    enabled: false,
-    message:
-      'LinkedIn automation is temporarily unavailable while we add proxy support.',
+    enabled: true,
+    message: null,
   },
   whatsapp: { enabled: true, message: null },
   // Assume scheduling works when we cannot reach the backend: hiding a
   // working feature is worse than showing one that will return a clear 503.
   scheduled_jobs: { enabled: true, message: null },
-  // Never claim to be the hosted demo on a failed fetch — a self-hosted user
-  // should not be told to "run it locally".
+  // Never claim to be the hosted instance on a failed fetch — a self-hosted
+  // user should not see the hosted-instance banner.
   deployment: { is_demo: false, notice: null, support_email: null },
 };
 
