@@ -23,6 +23,7 @@ celery_app = Celery(
         "worker.tasks.campaign_tasks",
         "worker.tasks.feed_scroll_tasks",
         "worker.tasks.whatsapp_tasks",
+        "worker.tasks.social_scheduler_tasks",
     ],
 )
  
@@ -87,6 +88,14 @@ celery_app.conf.update(
         # touching the WhatsApp profile, so pause/resume is safe across restarts.
         'dispatch-due-whatsapp-scans': {
             'task': 'tasks.dispatch_due_whatsapp_scans',
+            'schedule': 60.0,  # Every minute
+        },
+        # Social post scheduler: publishes pending YouTube/Instagram/TikTok
+        # posts whose scheduled_at has passed. Same database-backed model —
+        # the dispatcher only reads social_posts and claims a Redis lease per
+        # post; the publish task re-checks the row before uploading anything.
+        'dispatch-due-social-posts': {
+            'task': 'tasks.dispatch_due_social_posts',
             'schedule': 60.0,  # Every minute
         },
     },
