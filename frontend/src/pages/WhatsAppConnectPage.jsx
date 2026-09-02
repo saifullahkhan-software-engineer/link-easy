@@ -106,11 +106,24 @@ export default function WhatsAppConnectPage() {
     void loadStatus();
   }, [loadStatus]);
 
-  // Poll while a QR scan is in progress.
+  // Poll sequentially while a QR scan is in progress. A setInterval would
+  // start more requests while a slow Railway database response is still in
+  // flight, eventually exhausting the API connection pool.
   useEffect(() => {
     if (status !== 'waiting_qr') return undefined;
-    const interval = setInterval(loadStatus, 3000);
-    return () => clearInterval(interval);
+    let cancelled = false;
+    let timerId;
+
+    const poll = async () => {
+      await loadStatus();
+      if (!cancelled) timerId = setTimeout(poll, 5000);
+    };
+
+    timerId = setTimeout(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timerId);
+    };
   }, [status, loadStatus]);
 
   // Toast once when the scan completes.

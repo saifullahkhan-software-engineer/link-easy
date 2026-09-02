@@ -91,8 +91,19 @@ export default function WhatsAppScannerPage() {
 
   useEffect(() => {
     if (status !== 'waiting_qr') return undefined;
-    const interval = setInterval(loadStatus, 3000);
-    return () => clearInterval(interval);
+    let cancelled = false;
+    let timerId;
+
+    const poll = async () => {
+      await loadStatus();
+      if (!cancelled) timerId = setTimeout(poll, 5000);
+    };
+
+    timerId = setTimeout(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timerId);
+    };
   }, [status]);
 
   const loadStatus = async () => {
