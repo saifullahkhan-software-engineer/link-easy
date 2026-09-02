@@ -159,6 +159,43 @@ class Settings(BaseSettings):
         default=None, alias="SCHEDULED_JOBS_ENABLED"
     )
 
+    # ── Social post scheduler (YouTube Shorts / Instagram Reels / TikTok) ────
+    # OAuth app credentials for each platform. A platform whose client id /
+    # key is empty is reported as "not configured" by
+    # GET /api/v1/social-scheduler/platforms and its connect button is
+    # disabled in the UI; nothing else breaks. Redirect URIs must match the
+    # ones registered in each developer console exactly and point at THIS
+    # API's callback routes (the UI is redirected onwards from there).
+    YOUTUBE_CLIENT_ID: str = ""
+    YOUTUBE_CLIENT_SECRET: str = ""
+    YOUTUBE_REDIRECT_URI: str = ""
+    INSTAGRAM_APP_ID: str = ""
+    INSTAGRAM_APP_SECRET: str = ""
+    INSTAGRAM_REDIRECT_URI: str = ""
+    TIKTOK_CLIENT_KEY: str = ""
+    TIKTOK_CLIENT_SECRET: str = ""
+    TIKTOK_REDIRECT_URI: str = ""
+
+    # Where uploaded videos are stored. Files are served back under
+    # /uploads/social/<generated-name> (a mount in main.py) because Instagram
+    # downloads the video from a public URL rather than accepting an upload —
+    # so in production this must be a durable volume AND the API must be
+    # reachable at PUBLIC_API_URL. Defaults next to the profile storage so a
+    # single volume mount covers both.
+    UPLOAD_DIR: str = "./uploads/social"
+    # Per-file upload cap in bytes (default 500 MB — Instagram's own ceiling is
+    # ~650 MB and TikTok's 287 MB, so anything larger can't be published anyway).
+    MAX_UPLOAD_SIZE: int = 500 * 1024 * 1024
+    # Public base URL of this API (no trailing slash), used to build the
+    # absolute video URL handed to Instagram and, when a platform's
+    # *_REDIRECT_URI is unset, the default OAuth callback URL. Empty → the
+    # request's own origin is used for callbacks and Instagram publishing
+    # fails with an actionable error.
+    PUBLIC_API_URL: str = ""
+    # Where the browser is sent after an OAuth callback completes (the
+    # frontend's settings page). Empty → derived from the first CORS origin.
+    SOCIAL_OAUTH_RETURN_URL: str = ""
+
     @property
     def is_deployment(self) -> bool:
         """True on the public hosted instance (ENVIRONMENT=deployment)."""
@@ -196,6 +233,28 @@ class Settings(BaseSettings):
             for origin in self.BACKEND_CORS_ORIGINS.split(",")
             if origin.strip()
         ]
+
+    @property
+    def social_oauth_return_url(self) -> str:
+        """Frontend page the browser lands on after a platform OAuth callback.
+
+        Explicit SOCIAL_OAUTH_RETURN_URL wins; otherwise the first CORS origin
+        (the frontend) + the settings page path. Falls back to a relative path
+        so a same-origin dev proxy setup still works.
+        """
+        if self.SOCIAL_OAUTH_RETURN_URL:
+            return self.SOCIAL_OAUTH_RETURN_URL.rstrip("/")
+        origins = self.cors_origins
+        base = origins[0].rstrip("/") if origins else ""
+        return f"{base}/app/social-scheduler/settings"
+
+    def social_platform_configured(self, platform: str) -> bool:
+        """True when the OAuth app credentials for ``platform`` are set."""
+        return {
+            "youtube": bool(self.YOUTUBE_CLIENT_ID and self.YOUTUBE_CLIENT_SECRET),
+            "instagram": bool(self.INSTAGRAM_APP_ID and self.INSTAGRAM_APP_SECRET),
+            "tiktok": bool(self.TIKTOK_CLIENT_KEY and self.TIKTOK_CLIENT_SECRET),
+        }.get(platform, False)
 
     #: name -> what breaks when it is left unset. Used to warn at startup and
     #: to report the gap over GET /health, so a half-configured deployment is
