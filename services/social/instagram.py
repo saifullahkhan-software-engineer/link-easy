@@ -23,6 +23,8 @@ import aiohttp
 
 from core.config import settings
 
+from .meta_graph import PAGES_SHOW_LIST, token_scopes
+
 logger = logging.getLogger(__name__)
 
 # The Graph API reaches an Instagram Business/Creator account *through* a
@@ -195,23 +197,12 @@ class InstagramService:
         carries. If that call fails for any reason, fall back to the
         "no Page" explanation rather than masking the original problem.
         """
-        try:
-            async with session.get(
-                f"{self.GRAPH_API}/debug_token",
-                params={"input_token": access_token, "access_token": f"{self.app_id}|{self.app_secret}"},
-            ) as response:
-                debug = await response.json()
-            _raise_on_error(debug, "debug_token failed")
-            raw_scopes = (debug.get("data") or {}).get("scopes")
-            if not isinstance(raw_scopes, (list, tuple, set)):
-                raise ValueError("debug_token response carries no data.scopes list")
-            scopes = {str(scope) for scope in raw_scopes}
-        except Exception as exc:
-            logger.warning("Instagram connect: /me/accounts was empty and debug_token failed: %s", exc)
+        scopes = await token_scopes(session, self.GRAPH_API, access_token, self.app_id, self.app_secret)
+        if scopes is None:
+            logger.warning("Instagram connect: /me/accounts was empty and the token could not be inspected")
             return NO_FACEBOOK_PAGE
-
         logger.info("Instagram connect: /me/accounts was empty; token scopes=%s", sorted(scopes))
-        if "pages_show_list" not in scopes:
+        if PAGES_SHOW_LIST not in scopes:
             return MISSING_PAGES_PERMISSION
         return NO_FACEBOOK_PAGE
 
