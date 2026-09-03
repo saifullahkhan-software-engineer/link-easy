@@ -137,6 +137,69 @@ LINKEDIN_ENABLED=true
 
 From a home connection it works without a proxy.
 
+## Social post scheduler OAuth
+
+The scheduler can connect YouTube, Instagram, TikTok and Facebook Pages. Each
+provider needs its own OAuth app credentials (set them in the `.env` file for
+the manual setup above, or in the `.env` file next to `docker-compose.yml` for
+the Docker setup). A platform with empty credentials is reported as "not
+configured" and its connect button is simply disabled — nothing else breaks.
+
+```env
+# YouTube (Google Cloud Console → OAuth client of type "Web application")
+YOUTUBE_CLIENT_ID=
+YOUTUBE_CLIENT_SECRET=
+YOUTUBE_REDIRECT_URI=http://localhost:8000/api/v1/social-scheduler/platforms/youtube/callback
+
+# Instagram (Meta for Developers app)
+INSTAGRAM_APP_ID=
+INSTAGRAM_APP_SECRET=
+INSTAGRAM_REDIRECT_URI=http://localhost:8000/api/v1/social-scheduler/platforms/instagram/callback
+
+# Facebook Page (same Meta app)
+FACEBOOK_APP_ID=
+FACEBOOK_APP_SECRET=
+FACEBOOK_REDIRECT_URI=http://localhost:8000/api/v1/social-scheduler/platforms/facebook/callback
+
+# TikTok (TikTok for Developers app)
+TIKTOK_CLIENT_KEY=
+TIKTOK_CLIENT_SECRET=
+TIKTOK_REDIRECT_URI=http://localhost:8000/api/v1/social-scheduler/platforms/tiktok/callback
+
+# Public base URL of this API (no trailing slash). Used to build absolute
+# video URLs handed to Instagram and, when a *_REDIRECT_URI is left empty, the
+# default callback URL. For local dev: http://localhost:8000
+PUBLIC_API_URL=http://localhost:8000
+
+# Where uploaded videos are stored locally.
+UPLOAD_DIR=./uploads/social
+
+# Optional: where the browser lands after a successful OAuth callback
+# (the frontend settings page). Defaults to the first BACKEND_CORS_ORIGINS
+# origin + /app/social-scheduler/settings.
+SOCIAL_OAUTH_RETURN_URL=http://localhost:5173/app/social-scheduler/settings
+```
+
+Register the `*_REDIRECT_URI` values **exactly** as written above in each
+provider's console. They all point at the API on port `8000` — the frontend
+dev-server port (`5173` by default, or `3000` if you configured it) is only the
+page the browser is sent to *after* the callback completes
+(`SOCIAL_OAUTH_RETURN_URL`). Never put the frontend port in a provider's
+redirect URI; the provider callback must reach the API or the token exchange
+(and CSRF state check) cannot run.
+
+Notes:
+
+* YouTube uses PKCE automatically: the app generates one code verifier at
+  authorization time, signs it into the short-lived OAuth `state` JWT and
+  reuses the exact same verifier when exchanging the code. Re-using a Google
+  authorization code is never valid — each code is single-use, so always start
+  a fresh connection from the UI.
+* `PUBLIC_API_URL` must be reachable from the server itself for Instagram
+  publishing; for local dev `http://localhost:8000` is fine.
+* Credentials are never written to logs or returned by the API; tokens are
+  AES-256-GCM encrypted before they touch the database.
+
 ## Troubleshooting
 
 **Chromium won't launch** — run `patchright install chromium`. On bare Linux

@@ -13,7 +13,9 @@ Ported from the standalone social_scheduler/main.py into the main app:
   ``/platforms/{platform}/callback`` → frontend settings page. The callback
   is a bare browser redirect (no Authorization header), so the caller's
   identity travels in a short-lived signed ``state`` JWT minted by the
-  auth-url route — that same token is the CSRF check;
+  auth-url route — that same token is the CSRF check. For YouTube the state
+  also carries the PKCE ``code_verifier`` so the callback's token exchange
+  uses the same verifier that produced the authorization URL's challenge;
 * tokens are AES-256-GCM encrypted before they touch the database
   (services/social/connections.py) and never appear in a response.
 
@@ -77,6 +79,7 @@ from schemas.social_scheduler import (
 )
 from services.social import get_service
 from services.social.connections import apply_tokens, reconnect_required
+from services.social.pkce import generate_code_verifier, is_valid_code_verifier
 
 logger = logging.getLogger(__name__)
 
@@ -191,24 +194,37 @@ def _service_for(request: Request, platform: str):
     return service
 
 
-def _mint_oauth_state(owner_email: str, platform: str) -> str:
+def _mint_oauth_state(
+    owner_email: str, platform: str, code_verifier: Optional[str] = None
+) -> str:
     now = _now()
-    return jwt.encode(
-        {
-            "sub": owner_email,
-            "platform": platform,
-            "nonce": uuid.uuid4().hex,
-            "iat": now,
-            "exp": now + OAUTH_STATE_TTL,
-            "token_type": OAUTH_STATE_TOKEN_TYPE,
-        },
-        settings.JWT_SECRET,
-        algorithm=settings.JWT_ALGORITHM,
-    )
+    payload = {
+        "sub": owner_email,
+        "platform": platform,
+        "nonce": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + OAUTH_STATE_TTL,
+        "token_type": OAUTH_STATE_TOKEN_TYPE,
+    }
+    # YouTube requires PKCE. The verifier is generated once, signed into the
+    # state (integrity-protected, 10-minute TTL) and restored at the callback
+    # so the exact verifier that produced the authorization URL's
+    # code_challenge is sent in the token exchange. google-auth-oauthlib's
+    # auto-generated verifier must NOT be used — the callback builds a fresh
+    # Flow and would otherwise lose it ("Missing code verifier").
+    if code_verifier:
+        payload["code_verifier"] = code_verifier
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
-def _read_oauth_state(state: Optional[str], platform: str) -> str:
-    """Return the owner email carried by a valid state token, else raise."""
+def _read_oauth_state(state: Optional[str], platform: str) -> dict:
+    """Return the validated signed-state payload, else raise.
+
+    Signature, algorithm, expiry, ``token_type``, platform binding and owner
+    are all verified exactly as before; the optional PKCE verifier is
+    additionally checked against the RFC 7636 shape so a malformed claim is
+    rejected rather than sent to Google.
+    """
     if not state:
         raise ValueError("missing state")
     try:
@@ -220,7 +236,10 @@ def _read_oauth_state(state: Optional[str], platform: str) -> str:
     owner = payload.get("sub")
     if not owner:
         raise ValueError("state carries no user")
-    return owner
+    verifier = payload.get("code_verifier")
+    if verifier is not None and not is_valid_code_verifier(verifier):
+        raise ValueError("state carries an invalid PKCE code verifier")
+    return payload
 
 
 def _frontend_redirect(platform: str, *, connected: bool = False, error: Optional[str] = None) -> RedirectResponse:
@@ -483,9 +502,10 @@ async def platform_auth_url(
             detail=f"{PLATFORM_LABELS[platform]} is not configured on this instance "
             f"(missing OAuth app credentials). Ask the operator to set them.",
         )
-    state = _mint_oauth_state(current_user.email, platform)
+    code_verifier = generate_code_verifier() if platform == "youtube" else None
+    state = _mint_oauth_state(current_user.email, platform, code_verifier=code_verifier)
     try:
-        auth_url = _service_for(request, platform).get_auth_url(state)
+        auth_url = _service_for(request, platform).get_auth_url(state, code_verifier=code_verifier)
     except Exception as exc:
         logger.exception("Could not build %s auth URL", platform)
         raise HTTPException(status_code=502, detail=f"Could not start {PLATFORM_LABELS[platform]} sign-in: {exc}")
@@ -515,7 +535,8 @@ async def platform_oauth_callback(
         return _frontend_redirect(platform, error=error_description or error)
 
     try:
-        owner_email = _read_oauth_state(state, platform)
+        state_payload = _read_oauth_state(state, platform)
+        owner_email = state_payload["sub"]
     except ValueError as exc:
         logger.warning("Rejected %s OAuth callback: %s", platform, exc)
         return _frontend_redirect(platform, error="Sign-in expired or was tampered with. Try again.")
@@ -529,7 +550,11 @@ async def platform_oauth_callback(
 
     service = _service_for(request, platform)
     try:
-        tokens = await service.exchange_code(code)
+        # Only YouTube carries a verifier; the other providers receive None
+        # and ignore it (uniform service interface).
+        tokens = await service.exchange_code(
+            code, code_verifier=state_payload.get("code_verifier")
+        )
         info = await service.get_account_info(tokens["access_token"])
     except Exception as exc:
         logger.warning("%s OAuth for %s failed: %s", platform, owner_email, exc)

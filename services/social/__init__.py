@@ -2,8 +2,8 @@
 
 One service per platform, each exposing the same surface:
 
-    get_auth_url(state)                 -> str
-    exchange_code(code)                 -> {"access_token", "refresh_token", "expires_in"}
+    get_auth_url(state, code_verifier=None)  -> str
+    exchange_code(code, code_verifier=None)  -> {"access_token", "refresh_token", "expires_in"}
     refresh_access_token(refresh_token) -> same shape (None where unsupported)
     get_account_info(access_token)      -> {"account_id", "account_name", ...}
     publish(...)                        -> {"platform_id", "platform_url"}

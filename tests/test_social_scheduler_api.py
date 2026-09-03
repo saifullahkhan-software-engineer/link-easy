@@ -13,6 +13,8 @@ the real router on an in-memory database:
   * stats and calendar aggregate the caller's rows only.
 """
 import asyncio
+import base64
+import hashlib
 import os
 import shutil
 import tempfile
@@ -42,6 +44,7 @@ from api.v1.social_scheduler import router  # noqa: E402
 from core.config import settings  # noqa: E402
 from core.security import decrypt_credential, encrypt_credential  # noqa: E402
 from database import Base  # noqa: E402
+from services.social.pkce import is_valid_code_verifier  # noqa: E402
 import models  # noqa: E402,F401
 from models.social_scheduler import SocialPlatformConnection, SocialPost, SocialPostResult  # noqa: E402
 from models.user import User  # noqa: E402
@@ -74,7 +77,7 @@ class SocialSchedulerApiTests(unittest.TestCase):
             MAX_UPLOAD_SIZE=1024 * 1024,
             YOUTUBE_CLIENT_ID="yt-id",
             YOUTUBE_CLIENT_SECRET="yt-secret",
-            YOUTUBE_REDIRECT_URI="",
+            YOUTUBE_REDIRECT_URI="http://localhost:8000/api/v1/social-scheduler/platforms/youtube/callback",
             INSTAGRAM_APP_ID="",
             INSTAGRAM_APP_SECRET="",
             TIKTOK_CLIENT_KEY="tt-key",
@@ -285,9 +288,10 @@ class SocialSchedulerApiTests(unittest.TestCase):
             res = await client.get("/api/v1/social-scheduler/platforms")
             self.assertEqual(res.status_code, 200)
             by_name = {p["platform"]: p for p in res.json()}
-            self.assertEqual(set(by_name), {"youtube", "instagram", "tiktok"})
+            self.assertEqual(set(by_name), {"youtube", "instagram", "tiktok", "facebook"})
             self.assertTrue(by_name["youtube"]["configured"])
             self.assertFalse(by_name["instagram"]["configured"])
+            self.assertFalse(by_name["facebook"]["configured"])
             self.assertFalse(any(p["connected"] for p in by_name.values()))
 
             async with self.Session() as s:
@@ -331,6 +335,59 @@ class SocialSchedulerApiTests(unittest.TestCase):
             self.assertEqual(payload["sub"], OWNER)
             self.assertEqual(payload["platform"], "tiktok")
             self.assertEqual(payload["token_type"], "social_oauth_state")
+
+        self.run_async(run)
+
+    def test_youtube_auth_url_carries_pkce_verifier_and_callback_reuses_it(self):
+        async def run(client):
+            res = await client.get("/api/v1/social-scheduler/platforms/youtube/auth-url")
+            self.assertEqual(res.status_code, 200, res.text)
+            auth_url = res.json()["auth_url"]
+            from urllib.parse import parse_qs, urlparse
+
+            qs = parse_qs(urlparse(auth_url).query)
+            self.assertEqual(
+                qs["redirect_uri"],
+                ["http://localhost:8000/api/v1/social-scheduler/platforms/youtube/callback"],
+            )
+            state_param = qs["state"][0]
+            payload = jwt.decode(state_param, "test-secret", algorithms=["HS256"])
+            verifier = payload.get("code_verifier")
+            self.assertTrue(is_valid_code_verifier(verifier), "state must carry a PKCE code verifier")
+            self.assertEqual(payload["sub"], OWNER)
+            self.assertEqual(payload["platform"], "youtube")
+            self.assertEqual(payload["token_type"], "social_oauth_state")
+            # The authorization URL's S256 challenge must be derived from the
+            # verifier signed into the state (this is what Google validates at
+            # token-exchange time).
+            expected = (
+                base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+            )
+            self.assertEqual(qs["code_challenge"], [expected])
+            self.assertEqual(qs["code_challenge_method"], ["S256"])
+
+            fake_tokens = {"access_token": "at-yt", "refresh_token": "rt-yt", "expires_in": 3600}
+            fake_info = {"account_id": "UC123", "account_name": "Channel", "extra_data": {}}
+            with patch.object(_youtube_cls(), "exchange_code", AsyncMock(return_value=fake_tokens)) as exchange, \
+                 patch.object(_youtube_cls(), "get_account_info", AsyncMock(return_value=fake_info)):
+                # Callback is a bare browser redirect: make the user dependency
+                # unusable to prove identity still comes from the signed state.
+                self.current_email = "nobody@test.dev"
+                res = await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/callback",
+                    params={"code": "yt-code", "state": state_param},
+                    follow_redirects=False,
+                )
+            self.assertEqual(res.status_code, 302, res.text)
+            self.assertEqual(
+                res.headers["location"],
+                "http://localhost:5173/app/social-scheduler/settings?platform=youtube&connected=1",
+            )
+            # The exact verifier from the signed state must reach the token
+            # exchange — never a fresh auto-generated one (the old bug).
+            self.assertEqual(exchange.call_args.args, ("yt-code",))
+            self.assertEqual(exchange.call_args.kwargs.get("code_verifier"), verifier)
+            self.assertNotIn(fake_tokens["access_token"], res.headers["location"])
 
         self.run_async(run)
 

@@ -13,6 +13,14 @@ from the fixes needed for the OAuth routes and the worker to actually work:
   token and persist it (the original refreshed implicitly and discarded it).
 * The blocking google-api-python-client calls run in a worker thread
   (``asyncio.to_thread``) so they no longer stall the API's event loop.
+* PKCE is fully deterministic: the verifier is generated once by the caller
+  and passed into ``_flow`` for BOTH the authorization URL and the token
+  exchange, with ``autogenerate_code_verifier=False``. The authorization URL
+  carries the matching S256 ``code_challenge`` and the callback's
+  ``fetch_token`` sends the exact same ``code_verifier``, which is what Google
+  validates against the stored challenge. Without this the callback built a
+  fresh Flow whose auto-generated verifier never matched, and Google rejected
+  the exchange with ``invalid_grant: Missing code verifier``.
 """
 import asyncio
 import os
@@ -20,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from core.config import settings
+from services.social.pkce import generate_code_verifier
 
 
 class YouTubeService:
@@ -50,16 +59,34 @@ class YouTubeService:
             }
         }
 
-    def _flow(self):
+    def _flow(self, code_verifier: Optional[str] = None):
         from google_auth_oauthlib.flow import Flow
 
         return Flow.from_client_config(
-            self._client_config(), scopes=self.SCOPES, redirect_uri=self.redirect_uri
+            self._client_config(),
+            scopes=self.SCOPES,
+            redirect_uri=self.redirect_uri,
+            code_verifier=code_verifier,
+            # Never let the library generate its own verifier: the verifier
+            # chosen at authorization-url time must be the one used to fetch
+            # the token, or Google rejects the code ("Missing code verifier").
+            autogenerate_code_verifier=False,
         )
 
-    def get_auth_url(self, state: str) -> str:
-        """Generate the OAuth authorization URL."""
-        auth_url, _ = self._flow().authorization_url(
+    def get_auth_url(
+        self, state: str, *, code_verifier: Optional[str] = None
+    ) -> str:
+        """Generate the OAuth authorization URL.
+
+        ``code_verifier`` must be the value the caller will persist in the
+        signed ``state`` and pass back to :meth:`exchange_code`. When omitted
+        (direct service use outside the API routes) a fresh verifier is
+        generated so the URL is still valid; the API routes always supply one
+        and keep it in the signed state.
+        """
+        if code_verifier is None:
+            code_verifier = generate_code_verifier()
+        auth_url, _ = self._flow(code_verifier).authorization_url(
             access_type="offline",
             prompt="consent",
             include_granted_scopes="true",
@@ -67,11 +94,21 @@ class YouTubeService:
         )
         return auth_url
 
-    async def exchange_code(self, code: str) -> Dict[str, Any]:
-        """Exchange an authorization code for tokens."""
+    async def exchange_code(
+        self, code: str, *, code_verifier: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Exchange an authorization code for tokens.
+
+        The verifier generated for the authorization URL is required here —
+        without it the token exchange is rejected by Google.
+        """
+        if not code_verifier:
+            raise ValueError(
+                "YouTube OAuth state is missing its PKCE code verifier. Start the connection again."
+            )
 
         def _exchange():
-            flow = self._flow()
+            flow = self._flow(code_verifier)
             flow.fetch_token(code=code)
             return flow.credentials
 
