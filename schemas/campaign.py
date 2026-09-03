@@ -14,7 +14,7 @@ from models.campaign import CampaignStatus, CampaignStepType
 
 class CampaignCreate(BaseModel):
     """Payload to create a new campaign."""
-    account_email: str = Field(..., description="LinkedIn account email to use for this campaign")
+    account_email: str | None = Field(None, description="LinkedIn account email; optional for hosted demo campaigns")
     name: str = Field(..., min_length=1, max_length=255, description="Campaign name")
     description: str | None = Field(None, description="Campaign description")
     search_filters: dict | None = Field(None, description="LinkedIn search filters as JSON")

@@ -177,6 +177,7 @@ def _redirect_uri(request: Request, platform: str) -> str:
         "youtube": settings.YOUTUBE_REDIRECT_URI,
         "instagram": settings.INSTAGRAM_REDIRECT_URI,
         "tiktok": settings.TIKTOK_REDIRECT_URI,
+        "facebook": settings.FACEBOOK_REDIRECT_URI,
     }[platform]
     if configured:
         return configured

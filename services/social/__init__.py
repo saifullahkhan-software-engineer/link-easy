@@ -14,11 +14,13 @@ the originals (upload_short / publish_reel / upload_video) are kept as-is.
 from .instagram import InstagramService
 from .tiktok import TikTokService
 from .youtube import YouTubeService
+from .facebook import FacebookService
 
 SERVICES = {
     "youtube": YouTubeService,
     "instagram": InstagramService,
     "tiktok": TikTokService,
+    "facebook": FacebookService,
 }
 
 

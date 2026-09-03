@@ -6,6 +6,7 @@ import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
 import Modal from '../components/Modal';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
+import { useFeatures } from '../hooks/useFeatures';
 
 function ScoreBadge({ score }) {
   if (score == null) return <span className="text-xs text-zinc-500">—</span>;
@@ -259,7 +260,7 @@ export default function WhatsAppScannerPage() {
           >
             <span aria-hidden="true">✎</span> Edit Filter
           </Link>
-          {filterJob.status === 'active' ? (
+          {!isDemo && (filterJob.status === 'active' ? (
             <button
               onClick={handlePause}
               disabled={lifecycleLoading}
@@ -275,7 +276,7 @@ export default function WhatsAppScannerPage() {
             >
               {lifecycleLoading ? <Spinner /> : filterJob.status === 'paused' ? '▶ Resume' : '▶ Start'}
             </button>
-          )}
+          ))}
         </div>
       </header>
 
@@ -326,10 +327,12 @@ export default function WhatsAppScannerPage() {
             <p className="text-xs text-zinc-500">Latest / group</p>
             <p className="mt-1 text-lg font-semibold text-zinc-100">{filterJob.latest_messages_limit || 20}</p>
           </div>
-          <div className="rounded-lg bg-surface-900 p-3">
-            <p className="text-xs text-zinc-500">Scan interval</p>
-            <p className="mt-1 text-lg font-semibold text-zinc-100">{filterJob.interval_hours}h</p>
-          </div>
+          {!isDemo && (
+            <div className="rounded-lg bg-surface-900 p-3">
+              <p className="text-xs text-zinc-500">Scan interval</p>
+              <p className="mt-1 text-lg font-semibold text-zinc-100">{filterJob.interval_hours}h</p>
+            </div>
+          )}
           <div className="rounded-lg bg-surface-900 p-3">
             <p className="text-xs text-zinc-500">Threshold</p>
             <p className="mt-1 text-lg font-semibold text-zinc-100">{filterJob.match_threshold}</p>
@@ -392,8 +395,8 @@ export default function WhatsAppScannerPage() {
             </div>
             <button
               onClick={handleTriggerScan}
-              disabled={scanning || status !== 'connected' || filterJob.status !== 'active' || monitoredGroups.length === 0}
-              title={filterJob.status !== 'active' ? 'Start the filter before running a manual scan' : ''}
+              disabled={scanning || status !== 'connected' || (!isDemo && filterJob.status !== 'active') || monitoredGroups.length === 0}
+              title={!isDemo && filterJob.status !== 'active' ? 'Start the filter before running a manual scan' : ''}
               className="inline-flex items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {scanning ? <Spinner /> : 'Trigger Manual Scan'}

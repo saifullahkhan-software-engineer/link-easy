@@ -17,6 +17,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import or_
 
 from api.dependencies import get_current_user, get_db
 from models.lead import Lead, LeadSource, LeadStatus
@@ -102,9 +103,9 @@ async def _get_lead_or_404(
     result = await db.execute(
         select(Lead).join(
             Campaign, Lead.campaign_id == Campaign.id
-        ).join(
+        ).outerjoin(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
-        ).where(Lead.id == lead_id, LinkedInAccount.owner_email == owner_email)
+        ).where(Lead.id == lead_id, or_(LinkedInAccount.owner_email == owner_email, Campaign.account_email == f"demo:{owner_email}"))
     )
     lead = result.scalars().first()
     if lead is None:
@@ -137,9 +138,9 @@ async def create_lead(
     from models.campaign import Campaign
     from models.linkedin_account import LinkedInAccount
     campaign_result = await db.execute(
-        select(Campaign).join(
+        select(Campaign).outerjoin(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
-        ).where(Campaign.id == payload.campaign_id, LinkedInAccount.owner_email == payload.owner_email)
+        ).where(Campaign.id == payload.campaign_id, or_(LinkedInAccount.owner_email == payload.owner_email, Campaign.account_email == f"demo:{payload.owner_email}"))
     )
     campaign = campaign_result.scalars().first()
     if not campaign:
@@ -184,9 +185,9 @@ async def get_leads(
     
     query = select(Lead).join(
         Campaign, Lead.campaign_id == Campaign.id
-    ).join(
+    ).outerjoin(
         LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
-    ).where(LinkedInAccount.owner_email == owner_email)
+    ).where(or_(LinkedInAccount.owner_email == owner_email, Campaign.account_email == f"demo:{owner_email}"))
     
     if campaign_id:
         query = query.where(Lead.campaign_id == campaign_id)
@@ -226,9 +227,9 @@ async def upload_leads_csv(
     from models.campaign import Campaign
     from models.linkedin_account import LinkedInAccount
     campaign_result = await db.execute(
-        select(Campaign).join(
+        select(Campaign).outerjoin(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
-        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
+        ).where(Campaign.id == campaign_id, or_(LinkedInAccount.owner_email == owner_email, Campaign.account_email == f"demo:{owner_email}"))
     )
     campaign = campaign_result.scalars().first()
     if not campaign:

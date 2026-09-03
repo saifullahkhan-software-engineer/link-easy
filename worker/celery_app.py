@@ -59,44 +59,37 @@ celery_app.conf.update(
 
     # Celery Beat schedule for periodic tasks.
     #
-    # The schedule is ON by default on every deployment: started campaigns
-    # rely on these dispatchers to pick up later drip steps from the
-    # database-backed schedule, and activated feed-scan / WhatsApp jobs rely
-    # on them for recurring scans. Beat itself only publishes a lightweight
-    # task once a minute — a browser is only opened when real due work
-    # exists. Setting SCHEDULED_JOBS_ENABLED=false clears the schedule
-    # entirely (no timer work is queued at all); on-demand actions still run
-    # because the worker keeps consuming, so manual scans, campaign starts
-    # and live chat are unaffected.
-    beat_schedule = {} if not settings.scheduled_jobs_enabled else {
-        # Database-backed dispatch: survives worker restarts unlike long ETA
-        # tasks held in a worker's in-memory timer.
-        'dispatch-due-account-sessions': {
-            'task': 'tasks.dispatch_due_account_sessions',
-            'schedule': 60.0,  # Every minute
-        },
-        'dispatch-due-feed-scans': {
-            'task': 'tasks.dispatch_due_feed_scans',
-            'schedule': 60.0,  # Every minute
-        },
-        # ``dispatch_due_account_sessions`` now covers the durable initial
-        # lead schedule as well as delayed steps.  The old reconciliation Beat
-        # entry only created noisy no-op tasks when no campaign was active and
-        # could revive legacy lead rows, so it is intentionally not scheduled.
-        # Filter jobs are dispatched from their database-backed next_scan_at,
-        # just like Feed Scroll jobs.  The task itself re-checks status before
-        # touching the WhatsApp profile, so pause/resume is safe across restarts.
-        'dispatch-due-whatsapp-scans': {
-            'task': 'tasks.dispatch_due_whatsapp_scans',
-            'schedule': 60.0,  # Every minute
-        },
-        # Social post scheduler: publishes pending YouTube/Instagram/TikTok
-        # posts whose scheduled_at has passed. Same database-backed model —
-        # the dispatcher only reads social_posts and claims a Redis lease per
-        # post; the publish task re-checks the row before uploading anything.
-        'dispatch-due-social-posts': {
-            'task': 'tasks.dispatch_due_social_posts',
-            'schedule': 60.0,  # Every minute
-        },
-    },
+    # Local and self-hosted environments keep the complete scheduler. The
+    # public demo is intentionally different: Beat remains alive for social
+    # uploads, but does not wake the browser for LinkedIn drip sessions, feed
+    # scans, or recurring WhatsApp scans. This keeps demo traffic from
+    # saturating Celery while preserving user-triggered operations.
+    beat_schedule = {} if not settings.scheduled_jobs_enabled else (
+        {
+            'dispatch-due-social-posts': {
+                'task': 'tasks.dispatch_due_social_posts',
+                'schedule': 60.0,
+            },
+        }
+        if settings.is_deployment else {
+            # Database-backed dispatch survives worker restarts unlike long
+            # ETA tasks held in a worker's in-memory timer.
+            'dispatch-due-account-sessions': {
+                'task': 'tasks.dispatch_due_account_sessions',
+                'schedule': 60.0,
+            },
+            'dispatch-due-feed-scans': {
+                'task': 'tasks.dispatch_due_feed_scans',
+                'schedule': 60.0,
+            },
+            'dispatch-due-whatsapp-scans': {
+                'task': 'tasks.dispatch_due_whatsapp_scans',
+                'schedule': 60.0,
+            },
+            'dispatch-due-social-posts': {
+                'task': 'tasks.dispatch_due_social_posts',
+                'schedule': 60.0,
+            },
+        }
+    ),
 )

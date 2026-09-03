@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     TIKTOK_CLIENT_KEY: str = ""
     TIKTOK_CLIENT_SECRET: str = ""
     TIKTOK_REDIRECT_URI: str = ""
+    FACEBOOK_APP_ID: str = ""
+    FACEBOOK_APP_SECRET: str = ""
+    FACEBOOK_REDIRECT_URI: str = ""
 
     # Where uploaded videos are stored. Files are served back under
     # /uploads/social/<generated-name> (a mount in main.py) because Instagram
@@ -203,15 +206,26 @@ class Settings(BaseSettings):
 
     @property
     def scheduled_jobs_enabled(self) -> bool:
-        """Whether timer-driven background work may run.
+        """Whether the Celery scheduler is enabled at all.
 
-        Explicit SCHEDULED_JOBS_ENABLED always wins; otherwise it is ON for
-        every environment so hosted and self-hosted installs run the full
-        scheduler. The hosted mode is no longer a reduced mode.
+        This remains enabled in development and production by default. The
+        hosted demo uses the same Beat process, but its Beat schedule is
+        deliberately narrowed to social uploads (see ``worker.celery_app``).
         """
         if self.SCHEDULED_JOBS_ENABLED_OVERRIDE is not None:
             return self.SCHEDULED_JOBS_ENABLED_OVERRIDE
         return True
+
+    @property
+    def whatsapp_scheduled_jobs_enabled(self) -> bool:
+        """Whether recurring WhatsApp filters may be armed.
+
+        WhatsApp connection, chat and an explicitly requested scan are
+        on-demand operations and remain available on the hosted demo. Only
+        the recurring scanner is paused there to avoid putting browser load on
+        Celery. Local/development behavior is unchanged.
+        """
+        return self.scheduled_jobs_enabled and not self.is_deployment
 
     @property
     def deployment_notice(self) -> str | None:
@@ -254,6 +268,7 @@ class Settings(BaseSettings):
             "youtube": bool(self.YOUTUBE_CLIENT_ID and self.YOUTUBE_CLIENT_SECRET),
             "instagram": bool(self.INSTAGRAM_APP_ID and self.INSTAGRAM_APP_SECRET),
             "tiktok": bool(self.TIKTOK_CLIENT_KEY and self.TIKTOK_CLIENT_SECRET),
+            "facebook": bool(self.FACEBOOK_APP_ID and self.FACEBOOK_APP_SECRET),
         }.get(platform, False)
 
     #: name -> what breaks when it is left unset. Used to warn at startup and

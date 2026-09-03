@@ -84,16 +84,12 @@ RUN_WORKER="${RUN_WORKER:-1}"
 RUN_BEAT="${RUN_BEAT:-1}"
 
 # ── Hosted instance (ENVIRONMENT=deployment) ─────────────────────────────────
-# ENVIRONMENT=deployment now labels the hosted instance but does NOT reduce
-# it: the API, worker and Celery Beat all run by default, so users can
-# connect accounts, create campaigns and feed-scan jobs AND start them —
-# Beat's dispatchers are what advance campaign drip steps and fire recurring
-# feed/WhatsApp scans from the database-backed schedule. Beat itself only
-# publishes a lightweight task once a minute; a browser is only opened when
-# real due work exists. To run the hosted instance without timers, set
-# RUN_BEAT=0 here (and SCHEDULED_JOBS_ENABLED=false so the API matches) —
-# the worker keeps serving everything the user clicks (manual scans,
-# campaign starts, connects, live chat).
+# ENVIRONMENT=deployment labels the hosted demo. The API and worker still run
+# normally, and Beat remains enabled for scheduled social uploads. The Beat
+# schedule itself omits LinkedIn drip dispatch, feed scans, and recurring
+# WhatsApp scans to protect Celery capacity. User-triggered actions (manual
+# scans, campaign starts when an account exists, connects, and live chat) are
+# still handled by the worker.
 ENVIRONMENT_LOWER="$(printf '%s' "${ENVIRONMENT:-}" | tr '[:upper:]' '[:lower:]')"
 IS_DEPLOYMENT=0
 if [ "$ENVIRONMENT_LOWER" = "deployment" ]; then
@@ -268,19 +264,15 @@ log "beat schedule: $CELERY_BEAT_SCHEDULE_FILE"
 log "processes    : web=$RUN_WEB worker=$RUN_WORKER beat=$RUN_BEAT"
 
 if [ "$IS_DEPLOYMENT" = "1" ]; then
-    log "ENVIRONMENT=deployment — hosted instance mode (full feature set):"
+    log "ENVIRONMENT=deployment — hosted demo mode:"
     if [ "$RUN_BEAT" = "1" ]; then
-        log "  * Celery Beat is running: scheduled campaign steps and recurring"
-        log "    feed/WhatsApp scans are dispatched from the database schedule."
+        log "  * Celery Beat is running for scheduled social uploads only."
+        log "    LinkedIn/feed/recurring WhatsApp dispatchers are paused."
     else
-        log "  * Celery Beat is DISABLED (RUN_BEAT=0): no scheduled campaign"
-        log "    steps and no recurring scans. On-demand actions (manual"
-        log "    scans, campaign starts, connects, live chat) still run on"
-        log "    the worker."
+        log "  * Celery Beat is DISABLED (RUN_BEAT=0): no scheduled work."
     fi
-    log "  * LinkedIn automation is controlled by LINKEDIN_ENABLED (default"
-    log "    on); set it false to take the LinkedIn surfaces down without a"
-    log "    redeploy."
+    log "  * On-demand WhatsApp scans, live chat, connects, and other worker"
+    log "    actions remain available."
 fi
 
 if [ "$RUN_WEB" != "1" ] && [ "$RUN_WORKER" != "1" ] && [ "$RUN_BEAT" != "1" ]; then

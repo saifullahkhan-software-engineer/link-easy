@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import { campaignsApi, linkedinApi, leadsApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { useFeatures } from '../hooks/useFeatures';
 import { Spinner } from '../components/Spinner';
 import ManualLeadForm from '../components/leads/ManualLeadForm';
 import CsvUpload from '../components/leads/CsvUpload';
@@ -94,6 +95,7 @@ function formatTotalHours(hours) {
 
 export default function CampaignCreatePage() {
   const { email: ownerEmail } = useAuth();
+  const { isDemo } = useFeatures();
   const navigate = useNavigate();
 
   const [booting, setBooting] = useState(true);
@@ -291,7 +293,8 @@ export default function CampaignCreatePage() {
       });
 
       const payload = {
-        account_email: account.linkedin_email,
+        // Hosted demo campaigns are saved as drafts without a real account.
+        account_email: account?.linkedin_email || null,
         name: form.name.trim(),
         description: form.description.trim() || null,
         daily_connection_limit: Number(form.daily_connection_limit) || 15,
@@ -441,7 +444,7 @@ export default function CampaignCreatePage() {
     );
   }
 
-  if (!account) {
+  if (!account && !isDemo) {
     return (
       <div className="flex max-w-xl flex-col items-start gap-4 pt-8">
         <h1 className="text-2xl font-bold text-zinc-50">Create Campaign</h1>

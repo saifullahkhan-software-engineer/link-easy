@@ -2,7 +2,9 @@
 
 Campaign step delays are stored in `leads.next_action_at`. The value is calculated from the **next** campaign step's `delay_hours` when the current action succeeds. This makes the database, rather than a Celery worker's in-memory ETA queue, the source of truth for scheduled work.
 
-Celery Beat runs the three due-work dispatchers every minute. They only publish work for active database rows:
+Celery Beat runs the due-work dispatchers every minute. In local and self-hosted environments they only publish work for active database rows. On the public `ENVIRONMENT=deployment` demo, Beat runs only the social-upload dispatcher; LinkedIn drip work, feed scans, and recurring WhatsApp scans are intentionally paused to protect Celery. User-triggered actions such as manual WhatsApp scans, live chat, and campaign starts (when an account is connected) continue through the worker.
+
+The local/self-hosted dispatchers publish work for active database rows:
 
 - `tasks.dispatch_due_account_sessions` finds active campaigns with an initial lead or a lead whose `next_action_at` has passed, then queues an account session.
 - `tasks.dispatch_due_feed_scans` finds active feed jobs and claims a short-lived Redis lease before publishing a scan. It leaves `next_scan_at` untouched until the worker really finishes.

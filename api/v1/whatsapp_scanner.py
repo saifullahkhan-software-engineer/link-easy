@@ -45,7 +45,7 @@ from sqlalchemy import func as sa_func, update as sa_update
 from api.dependencies import (
     get_db,
     get_current_user,
-    require_scheduled_jobs_enabled,
+    require_whatsapp_scheduled_jobs_enabled,
 )
 from api.v1.whatsapp_sessions import get_owned_session, session_profile_dir
 from models.user import User
@@ -1449,12 +1449,12 @@ async def reset_whatsapp_filter_messages(
 @router.post(
     "/filters/{filter_id}/activate",
     status_code=200,
-    dependencies=[Depends(require_scheduled_jobs_enabled)],
+    dependencies=[Depends(require_whatsapp_scheduled_jobs_enabled)],
 )
 @router.post(
     "/filters/jobs/{filter_id}/activate",
     status_code=200,
-    dependencies=[Depends(require_scheduled_jobs_enabled)],
+    dependencies=[Depends(require_whatsapp_scheduled_jobs_enabled)],
 )
 async def activate_whatsapp_filter_job(
     filter_id: int,

@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 from models.social_scheduler import SocialPlatform, SocialPostStatus
 
 PLATFORM_VALUES = tuple(p.value for p in SocialPlatform)
-PLATFORM_LABELS = {"youtube": "YouTube Shorts", "instagram": "Instagram Reels", "tiktok": "TikTok"}
+PLATFORM_LABELS = {"youtube": "YouTube Shorts", "instagram": "Instagram Reels", "tiktok": "TikTok", "facebook": "Facebook Page"}
 
 
 def _validate_platforms(values: list[str]) -> list[str]:

@@ -45,7 +45,7 @@ function FilterStatus({ status }) {
   );
 }
 
-export default function WhatsAppFilterCard({ filter, now = Date.now(), onPause, onResume, onDelete }) {
+export default function WhatsAppFilterCard({ filter, now = Date.now(), isDemo = false, onPause, onResume, onDelete }) {
   const remaining = filter.remaining_seconds != null
     ? Math.max(0, filter.remaining_seconds - Math.floor((now - new Date(filter.updated_at || now).getTime()) / 1000))
     : filter.next_scan_at
@@ -71,14 +71,14 @@ export default function WhatsAppFilterCard({ filter, now = Date.now(), onPause, 
                 <FilterStatus status={filter.status} />
               </div>
               <p className="mt-1 text-sm text-zinc-400">
-                Every {filter.interval_hours}h · latest {filter.latest_messages_limit || 20}/group · {filter.monitored_group_names?.length || 0} group{filter.monitored_group_names?.length === 1 ? '' : 's'}
+                {!isDemo && `Every ${filter.interval_hours}h · `}latest {filter.latest_messages_limit || 20}/group · {filter.monitored_group_names?.length || 0} group{filter.monitored_group_names?.length === 1 ? '' : 's'}
               </p>
             </div>
           </div>
         </Link>
 
         <div className="flex shrink-0 items-center gap-2">
-          {filter.status === 'active' ? (
+          {!isDemo && (filter.status === 'active' ? (
             <button
               onClick={() => onPause?.(filter.id)}
               className="inline-flex items-center gap-1.5 rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-3 py-1.5 text-sm font-medium text-yellow-300 transition hover:bg-yellow-500/15"
@@ -100,7 +100,7 @@ export default function WhatsAppFilterCard({ filter, now = Date.now(), onPause, 
               </svg>
               {filter.status === 'paused' ? 'Resume' : 'Start'}
             </button>
-          )}
+          ))}
           <button
             onClick={() => onDelete?.(filter)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-300 transition hover:bg-red-500/15"
