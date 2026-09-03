@@ -20,7 +20,12 @@ These tests pin the diagnosing behaviour, mirroring
 * Pages without any token get an explicit message instead of "not found";
 * an empty list is explained through ``debug_token`` — missing
   ``pages_show_list`` → the permission message, otherwise (or when
-  ``debug_token`` fails) → "does not administer any Facebook Page".
+  ``debug_token`` fails) → "does not administer any Facebook Page",
+  naming the account that actually signed in (from ``/me``) when the name
+  can be determined — the usual cause of an empty list in a fresh browser
+  is a sign-in to the *wrong* Facebook account;
+* a failing ``/me`` name lookup keeps the generic message (never masks the
+  diagnosis, never prints "(None)").
 
 ``aiohttp.ClientSession`` is replaced by a fake async-context-manager session
 that routes responses by URL and records every request.
@@ -223,6 +228,7 @@ class FacebookExchangeCodeTests(unittest.TestCase):
             "debug_token": {
                 "data": {"app_id": APP_ID, "is_valid": True, "scopes": ["pages_manage_posts", "public_profile"]}
             },
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
         }
 
         tokens, exc, session = self._run(routes)
@@ -249,17 +255,56 @@ class FacebookExchangeCodeTests(unittest.TestCase):
                     "scopes": ["pages_show_list", "pages_read_engagement", "pages_manage_posts", "publish_video"],
                 }
             },
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
         }
 
         tokens, exc, session = self._run(routes)
 
         self.assertIsNone(tokens)
         message = str(exc)
-        self.assertEqual(message, facebook_module.NO_FACEBOOK_PAGE)
+        # The account that actually completed the sign-in is named, so a
+        # sign-in to the wrong account in a fresh browser is visible.
+        self.assertEqual(message, facebook_module.no_page_message("Jane Doe"))
+        self.assertIn("(Jane Doe)", message)
         self.assertIn("does not administer any Facebook Page", message)
         self.assertIn("only follow or like does not count", message)
         self.assertNotIn("pages_show_list", message)
         self.assertEqual(len(session.requests_to("debug_token")), 1)
+
+    def test_empty_list_names_the_signed_in_account_when_me_has_no_name(self):
+        # A Graph ``/me`` that returns no usable name falls back to the
+        # generic wording rather than "(None)".
+        routes = {
+            "me/accounts": {"data": []},
+            "debug_token": {
+                "data": {
+                    "app_id": APP_ID,
+                    "is_valid": True,
+                    "scopes": ["pages_show_list"],
+                }
+            },
+            "me": {"id": "fb-user-1"},
+        }
+
+        tokens, exc, _session = self._run(routes)
+
+        self.assertIsNone(tokens)
+        self.assertEqual(str(exc), facebook_module.NO_FACEBOOK_PAGE)
+        self.assertNotIn("(None)", str(exc))
+
+    def test_empty_list_names_the_account_even_when_debug_token_fails(self):
+        routes = {
+            "me/accounts": {"data": []},
+            "debug_token": {
+                "error": {"message": "(#100) You must provide an app access token", "type": "OAuthException", "code": 100}
+            },
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
+        }
+
+        tokens, exc, _session = self._run(routes)
+
+        self.assertIsNone(tokens)
+        self.assertEqual(str(exc), facebook_module.no_page_message("Jane Doe"))
 
     def test_empty_list_falls_back_to_no_page_message_when_debug_token_fails(self):
         routes = {
@@ -267,13 +312,14 @@ class FacebookExchangeCodeTests(unittest.TestCase):
             "debug_token": {
                 "error": {"message": "(#100) You must provide an app access token", "type": "OAuthException", "code": 100}
             },
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
         }
 
         tokens, exc, session = self._run(routes)
 
         self.assertIsNone(tokens)
         message = str(exc)
-        self.assertEqual(message, facebook_module.NO_FACEBOOK_PAGE)
+        self.assertEqual(message, facebook_module.no_page_message("Jane Doe"))
         self.assertNotIn("app access token", message)
         self.assertNotIn("debug_token", message)
         self.assertEqual(len(session.requests_to("debug_token")), 1)
@@ -282,12 +328,30 @@ class FacebookExchangeCodeTests(unittest.TestCase):
         routes = {
             "me/accounts": {"data": []},
             "debug_token": {"data": {"app_id": APP_ID, "is_valid": False}},
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
+        }
+
+        tokens, exc, _session = self._run(routes)
+
+        self.assertIsNone(tokens)
+        self.assertEqual(str(exc), facebook_module.no_page_message("Jane Doe"))
+
+    def test_empty_list_stays_generic_when_the_name_lookup_fails(self):
+        # A failing ``/me`` must not mask the diagnosis: generic message.
+        routes = {
+            "me/accounts": {"data": []},
+            "debug_token": {
+                "data": {"app_id": APP_ID, "is_valid": True, "scopes": ["pages_show_list"]}
+            },
+            "me": {"error": {"message": "Error validating access token", "type": "OAuthException", "code": 190}},
         }
 
         tokens, exc, _session = self._run(routes)
 
         self.assertIsNone(tokens)
         self.assertEqual(str(exc), facebook_module.NO_FACEBOOK_PAGE)
+        self.assertNotIn("(None)", str(exc))
+        self.assertNotIn("Error validating", str(exc))
 
     # ── Graph API errors still surface as before ─────────────────────────────
 
@@ -317,9 +381,15 @@ class FacebookExchangeCodeTests(unittest.TestCase):
             facebook_module.MISSING_PAGES_PERMISSION,
             facebook_module.NO_FACEBOOK_PAGE,
             facebook_module.NO_PAGE_TOKEN,
+            facebook_module.no_page_message("A Rather Long Person Name Here"),  # long name
         ):
             with self.subTest(message=message[:40]):
                 self.assertLessEqual(len(message), 300)
+
+    def test_no_page_message_truncates_very_long_names(self):
+        message = facebook_module.no_page_message("A" * 200)
+        self.assertLessEqual(len(message), 300)
+        self.assertNotIn("A" * 29, message)
 
 
 if __name__ == "__main__":
