@@ -182,11 +182,11 @@ def scheduled_jobs_enabled() -> bool:
 def require_scheduled_jobs_enabled() -> None:
     """FastAPI dependency: 503 unless recurring/timed jobs are allowed.
 
-    Guards the endpoints that arm a *repeating* schedule. Without this an
-    instance with Beat switched off would happily write a ``next_scan_at``
-    that Beat is never going to dispatch, leaving a job that claims to be
-    active and silently never runs — worse than saying plainly that
-    scheduling is off.
+    Guards generic scheduled work. WhatsApp's recurring filter endpoint uses
+    ``require_whatsapp_scheduled_jobs_enabled`` below because the hosted demo
+    intentionally keeps the social-upload Beat entry while pausing WhatsApp.
+    Without a gate, an instance with that dispatcher disabled would persist a
+    ``next_scan_at`` that never fires and show an active job that does nothing.
 
     Deliberately does NOT guard one-shot, user-initiated actions (a manual
     scan, connect, live chat, campaign start): those are consumed by the
@@ -199,4 +199,21 @@ def require_scheduled_jobs_enabled() -> None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=SCHEDULED_JOBS_DISABLED_DETAIL,
+        )
+
+
+def require_whatsapp_scheduled_jobs_enabled() -> None:
+    """Reject recurring WhatsApp scans on the hosted demo only.
+
+    Manual scans and live chat do not use this dependency and remain
+    available while recurring scans are paused.
+    """
+    if not settings.whatsapp_scheduled_jobs_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Recurring WhatsApp scans are temporarily paused on this "
+                "hosted instance. You can still run a scan on demand and use "
+                "live chat."
+            ),
         )

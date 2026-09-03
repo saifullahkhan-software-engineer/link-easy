@@ -339,10 +339,14 @@ async def feature_flags():
             "enabled": settings.LINKEDIN_ENABLED,
             "message": None if settings.LINKEDIN_ENABLED else settings.LINKEDIN_DISABLED_MESSAGE,
         },
-        "whatsapp": {"enabled": True, "message": None},
-        # Timer-driven work (scheduled campaign steps, recurring feed/WhatsApp
-        # scans). On by default on every environment; an operator can switch
-        # it off with SCHEDULED_JOBS_ENABLED=false.
+        "whatsapp": {
+            "enabled": True,
+            "message": None,
+            "scheduled_scans_enabled": settings.whatsapp_scheduled_jobs_enabled,
+        },
+        # Overall Beat availability. On deployment Beat remains enabled for
+        # social uploads, while LinkedIn and recurring WhatsApp/feed dispatch
+        # entries are omitted to protect Celery capacity.
         "scheduled_jobs": {
             "enabled": settings.scheduled_jobs_enabled,
             "message": None if settings.scheduled_jobs_enabled

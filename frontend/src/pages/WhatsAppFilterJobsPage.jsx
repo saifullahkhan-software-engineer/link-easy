@@ -7,8 +7,10 @@ import WhatsAppFilterCard from '../components/whatsapp/WhatsAppFilterCard';
 import Modal from '../components/Modal';
 import { Spinner } from '../components/Spinner';
 import SchedulingDisabledNotice from '../components/SchedulingDisabledNotice';
+import { useFeatures } from '../hooks/useFeatures';
 
 export default function WhatsAppFilterJobsPage() {
+  const { isDemo } = useFeatures();
   const [filters, setFilters] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterToDelete, setFilterToDelete] = useState(null);
@@ -129,6 +131,7 @@ export default function WhatsAppFilterJobsPage() {
               key={filter.id}
               filter={filter}
               now={now}
+              isDemo={isDemo}
               onPause={handlePause}
               onResume={handleResume}
               onDelete={setFilterToDelete}

@@ -49,6 +49,7 @@ class SocialPlatform(str, enum.Enum):
     YOUTUBE = "youtube"
     INSTAGRAM = "instagram"
     TIKTOK = "tiktok"
+    FACEBOOK = "facebook"
 
 
 class SocialPostStatus(str, enum.Enum):

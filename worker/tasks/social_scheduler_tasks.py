@@ -340,6 +340,14 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
             )
             return _success(result["media_id"], result["post_url"])
 
+        if platform == "facebook":
+            result = await service.upload_video(
+                video_path=video_path,
+                description=caption,
+                access_token=tokens.access_token,
+            )
+            return _success(result["video_id"], result["video_url"])
+
         if platform == "tiktok":
             result = await service.upload_video(
                 video_path=video_path,

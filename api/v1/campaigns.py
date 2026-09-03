@@ -23,6 +23,7 @@ from sqlalchemy.future import select
  
 from api.dependencies import get_current_user, get_db
 from api.v1.linkedin import require_linkedin_enabled
+from core.config import settings
 from models.campaign import Campaign, CampaignStatus
 from models.lead import Lead, LeadSource, LeadStatus
 from models.user import User
@@ -54,12 +55,21 @@ async def create_campaign(
         )
     )
     account = account_result.scalars().first()
-    if not account:
+    if not account and not settings.is_deployment:
         raise HTTPException(status_code=400, detail="LinkedIn account not found or does not belong to you")
 
+    # The hosted demo cannot create real LinkedIn accounts. Keep campaigns and
+    # leads usable as a demo artifact, then give a clear error when the user
+    # tries to start one. The owner is encoded in the sentinel so the normal
+    # campaign/lead ownership checks still work without creating a fake account.
+    campaign_account_email = (
+        f"demo:{owner_email}"
+        if settings.is_deployment and not account
+        else payload.account_email
+    )
     campaign = Campaign(
         id=str(uuid.uuid4()),
-        account_email=payload.account_email,
+        account_email=campaign_account_email,
         name=payload.name,
         description=payload.description,
         search_filters=payload.search_filters,
@@ -103,11 +113,12 @@ async def list_campaigns(
     # current_user: User = Depends(get_current_user),  # Commented for testing
 ) -> list[CampaignResponse]:
     from models.linkedin_account import LinkedInAccount
-    result = await db.execute(
-        select(Campaign).join(
+    if settings.is_deployment:
+        result = await db.execute(select(Campaign).where(Campaign.account_email == f"demo:{owner_email}"))
+    else:
+        result = await db.execute(select(Campaign).join(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
-        ).where(LinkedInAccount.owner_email == owner_email)
-    )
+        ).where(LinkedInAccount.owner_email == owner_email))
     campaigns = result.scalars().all()
     return [CampaignResponse.model_validate(c) for c in campaigns]
  
@@ -120,11 +131,13 @@ async def get_campaign(
     # current_user: User = Depends(get_current_user),  # Commented for testing
 ) -> CampaignResponse:
     from models.linkedin_account import LinkedInAccount
-    result = await db.execute(
-        select(Campaign).join(
+    if settings.is_deployment:
+        result = await db.execute(select(Campaign).where(
+            Campaign.id == campaign_id, Campaign.account_email == f"demo:{owner_email}"))
+    else:
+        result = await db.execute(select(Campaign).join(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
-        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
-    )
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email))
     campaign = result.scalars().first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -142,27 +155,28 @@ async def start_campaign(
     db: AsyncSession = Depends(get_db),
     # current_user: User = Depends(get_current_user),  # Commented for testing
 ):
-    """
-    Set the campaign to ACTIVE and persist the first due time for its leads.
-
-    The database timestamp is the scheduler's source of truth.  Publish one
-    immediate account-level task after the commit; do not create long Celery
-    countdown/ETA messages that can survive a campaign pause or delete.
-    """
+    """Start a campaign, or explain that the hosted demo has no LinkedIn account."""
     from datetime import datetime, timezone
     import redis
     from worker.celery_app import celery_app
     from core.config import settings
     from models.linkedin_account import LinkedInAccount
 
-    result = await db.execute(
-        select(Campaign).join(
+    if settings.is_deployment:
+        result = await db.execute(select(Campaign).where(
+            Campaign.id == campaign_id,
+            Campaign.account_email == f"demo:{owner_email}",
+        ))
+    else:
+        result = await db.execute(select(Campaign).join(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
-        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
-    )
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email))
     campaign = result.scalars().first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.account_email.startswith("demo:"):
+        raise HTTPException(status_code=400, detail=
+            "No LinkedIn account is connected. Connect a LinkedIn account before starting this campaign.")
     if campaign.status == CampaignStatus.ACTIVE:
         raise HTTPException(status_code=409, detail="Campaign is already running")
 
@@ -704,11 +718,15 @@ async def _get_owned_campaign(campaign_id: str, owner_email: str, db: AsyncSessi
     """Fetch a campaign and verify it belongs to the owner's LinkedIn account."""
     from models.linkedin_account import LinkedInAccount
 
-    result = await db.execute(
-        select(Campaign).join(
+    if settings.is_deployment:
+        result = await db.execute(select(Campaign).where(
+            Campaign.id == campaign_id,
+            Campaign.account_email == f"demo:{owner_email}",
+        ))
+    else:
+        result = await db.execute(select(Campaign).join(
             LinkedInAccount, Campaign.account_email == LinkedInAccount.linkedin_email
-        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email)
-    )
+        ).where(Campaign.id == campaign_id, LinkedInAccount.owner_email == owner_email))
     campaign = result.scalars().first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found or does not belong to you")
