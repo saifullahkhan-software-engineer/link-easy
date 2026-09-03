@@ -19,6 +19,18 @@ logger = logging.getLogger(__name__)
 # empty list rather than an error.
 PAGES_SHOW_LIST = "pages_show_list"
 
+# The Graph API version used by every Meta call in this project (Facebook
+# Page and Instagram share it — they are one platform). Versions expire on
+# a ~2-year clock (v18.0 died Jan 2026, v20.0 dies Sep 24, 2026), so all
+# endpoints below derive from these constants: bumping the version here is
+# the whole migration. Check the live support window at
+# developers.facebook.com/docs/graph-api/changelog before bumping — pick a
+# version that is *not* the brand-newest (v25.0 is supported through
+# July 2028; v26.0 shipped July 29, 2026).
+GRAPH_API_VERSION = "v25.0"
+GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+OAUTH_DIALOG = f"https://www.facebook.com/{GRAPH_API_VERSION}/dialog/oauth"
+
 
 async def signed_in_account_name(
     session: aiohttp.ClientSession,

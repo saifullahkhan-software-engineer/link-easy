@@ -23,7 +23,7 @@ import aiohttp
 
 from core.config import settings
 
-from .meta_graph import PAGES_SHOW_LIST, signed_in_account_name, token_scopes
+from .meta_graph import GRAPH_API_BASE, OAUTH_DIALOG, PAGES_SHOW_LIST, signed_in_account_name, token_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ NO_FACEBOOK_PAGE = no_page_message()
 class InstagramService:
     """Service for Instagram Reels publishing."""
 
-    GRAPH_API = "https://graph.facebook.com/v18.0"
+    GRAPH_API = GRAPH_API_BASE
     SCOPES = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement"
 
     def __init__(self):
@@ -99,7 +99,7 @@ class InstagramService:
             "response_type": "code",
             "state": state,
         }
-        return f"https://www.facebook.com/v18.0/dialog/oauth?{urlencode(params)}"
+        return f"{OAUTH_DIALOG}?{urlencode(params)}"
 
     async def exchange_code(self, code: str, *, code_verifier=None) -> Dict[str, Any]:
         """Exchange an authorization code for a (long-lived) access token.

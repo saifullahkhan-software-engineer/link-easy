@@ -100,6 +100,42 @@ class FakeSession:
         return [call for call in self.calls if call[1] == url]
 
 
+class GraphApiVersionTests(unittest.TestCase):
+    """The Graph API version is centralized in ``meta_graph`` and shared by
+    both Meta services — Meta sunsets versions on a ~2-year clock (v18.0
+    died 2026-01-26, breaking the Instagram flow; v20.0 dies 2026-09-24),
+    and per-file hardcoded versions are exactly how the dead v18.0 slipped
+    in. These tests fail if a service drifts back to its own hardcoded
+    version or the central version goes stale.
+
+    When the supported-version test fails, bump ``GRAPH_API_VERSION`` in
+    ``services/social/meta_graph.py`` (check the live window at
+    developers.facebook.com/docs/graph-api/changelog) — one line fixes both
+    platforms.
+    """
+
+    def test_both_services_share_the_central_graph_version(self):
+        from services.social import instagram, meta_graph
+
+        self.assertEqual(FacebookService.GRAPH_API, meta_graph.GRAPH_API_BASE)
+        self.assertEqual(instagram.InstagramService.GRAPH_API, meta_graph.GRAPH_API_BASE)
+        # The base URL and the OAuth dialog must carry the declared version.
+        self.assertTrue(meta_graph.GRAPH_API_BASE.endswith(f"/{meta_graph.GRAPH_API_VERSION}"))
+        self.assertIn(meta_graph.GRAPH_API_VERSION, meta_graph.OAUTH_DIALOG)
+
+    def test_graph_version_is_still_supported(self):
+        from services.social import meta_graph
+
+        # Versions supported as of September 2026 per Meta's changelog.
+        supported = {"v21.0", "v22.0", "v23.0", "v24.0", "v25.0", "v26.0"}
+        self.assertIn(
+            meta_graph.GRAPH_API_VERSION,
+            supported,
+            f"{meta_graph.GRAPH_API_VERSION} is no longer supported — "
+            "bump GRAPH_API_VERSION in services/social/meta_graph.py",
+        )
+
+
 class FacebookExchangeCodeTests(unittest.TestCase):
     def setUp(self):
         self._settings = patch.multiple(

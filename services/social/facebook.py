@@ -14,7 +14,7 @@ import aiohttp
 
 from core.config import settings
 
-from .meta_graph import PAGES_SHOW_LIST, signed_in_account_name, token_scopes
+from .meta_graph import GRAPH_API_BASE, OAUTH_DIALOG, PAGES_SHOW_LIST, signed_in_account_name, token_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ NO_PAGE_TOKEN = (
 
 
 class FacebookService:
-    GRAPH_API = "https://graph.facebook.com/v20.0"
+    GRAPH_API = GRAPH_API_BASE
     SCOPES = "pages_show_list,pages_read_engagement,pages_manage_posts,publish_video"
 
     def __init__(self):
@@ -76,7 +76,7 @@ class FacebookService:
     def get_auth_url(self, state: str, *, code_verifier=None) -> str:
         # ``code_verifier`` is accepted for the uniform service interface used
         # by the API routes; Meta's OAuth does not use PKCE, so it is ignored.
-        return "https://www.facebook.com/v20.0/dialog/oauth?" + urlencode({
+        return OAUTH_DIALOG + "?" + urlencode({
             "client_id": self.app_id, "redirect_uri": self.redirect_uri,
             "scope": self.SCOPES, "response_type": "code", "state": state,
         })
