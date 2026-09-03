@@ -9,14 +9,45 @@ apart from:
   refresh tokens; a long-lived token is exchanged for a fresh one while it is
   still valid). The worker calls it when ``expires_at`` has passed.
 * Errors from the Graph API include Meta's error code where available.
+* ``get_instagram_account_info`` checks every Page ``/me/accounts`` returns
+  (the original only looked at the first) and, when the list is empty, asks
+  ``debug_token`` which permissions the token really carries so the user is
+  told *why* no Page was found instead of a generic "No Facebook Page found".
 """
 import asyncio
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 import aiohttp
 
 from core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# The Graph API reaches an Instagram Business/Creator account *through* a
+# Facebook Page, so connecting Instagram is really a Facebook Login whose
+# ``/me/accounts`` must list a Page carrying ``instagram_business_account``.
+# These are the three ways that lookup fails without the Graph API returning
+# an ``error`` object; each message names the fix. They are surfaced verbatim
+# to the user by the OAuth callback (``_frontend_redirect`` keeps the first
+# 300 characters), so keep them under that.
+NO_LINKED_INSTAGRAM_ACCOUNT = (
+    "The connected Facebook account administers Facebook Pages, but none of them has an "
+    "Instagram Business/Creator account linked. Link one (Instagram → Profile → Menu → "
+    "Settings → Accounts Center → Linked accounts → Instagram), then reconnect."
+)
+MISSING_PAGES_PERMISSION = (
+    "The Facebook sign-in was granted without the 'See a list of your Pages' permission "
+    "(pages_show_list), so no Facebook Page can be listed. Disconnect Instagram and "
+    "reconnect, approving every permission on Facebook's screen."
+)
+NO_FACEBOOK_PAGE = (
+    "The signed-in Facebook account does not administer any Facebook Page (or shared none "
+    "with this app). This Instagram sign-in is separate from the Facebook Page connected "
+    "elsewhere in the app: sign in with the Facebook account that manages the Page linked "
+    "to your Instagram account, then reconnect."
+)
 
 
 class InstagramService:
@@ -105,33 +136,37 @@ class InstagramService:
 
     # ── Account ──────────────────────────────────────────────────────────────
 
-    async def get_instagram_account_info(self, access_token: str) -> Dict[str, str]:
-        """Get the Instagram Business account linked to the user's first Page."""
+    async def get_instagram_account_info(self, access_token: str) -> Dict[str, Any]:
+        """Find the Instagram Business/Creator account behind the user's Pages.
+
+        Lists every Facebook Page the user administers together with its
+        ``instagram_business_account`` in one call and picks the first Page
+        that has one — the Page linked to Instagram is frequently not the
+        first Page in the list. When ``/me/accounts`` comes back empty the
+        token is inspected via ``debug_token`` so the error distinguishes a
+        sign-in that lacked the ``pages_show_list`` permission from an
+        account that simply administers no Page.
+        """
         async with aiohttp.ClientSession() as session:
-            # Get Facebook pages
             async with session.get(
-                f"{self.GRAPH_API}/me/accounts", params={"access_token": access_token}
+                f"{self.GRAPH_API}/me/accounts",
+                params={"fields": "id,name,instagram_business_account", "access_token": access_token},
             ) as response:
                 pages_data = await response.json()
             _raise_on_error(pages_data, "Failed to get Facebook pages")
-            pages = pages_data.get("data", [])
+            pages = pages_data.get("data") or []
             if not pages:
-                raise Exception(
-                    "No Facebook Page found. You need a Facebook Page linked to your Instagram Business account."
-                )
-            page = pages[0]
+                raise Exception(await self._diagnose_no_pages(session, access_token))
 
-            # Get Instagram account linked to the page
-            async with session.get(
-                f"{self.GRAPH_API}/{page['id']}",
-                params={"fields": "instagram_business_account", "access_token": access_token},
-            ) as response:
-                ig_data = await response.json()
-            _raise_on_error(ig_data, "Failed to get Instagram account")
-            ig_account = ig_data.get("instagram_business_account")
-            if not ig_account:
-                raise Exception("No Instagram Business/Creator account linked to your Facebook Page.")
-            ig_account_id = ig_account["id"]
+            page, ig_account = _first_page_with_instagram(pages)
+            if page is None:
+                logger.info(
+                    "Instagram connect: none of %d Facebook Page(s) has an Instagram account linked: %s",
+                    len(pages),
+                    ", ".join(f"{p.get('name') or '?'} ({p.get('id')})" for p in pages),
+                )
+                raise Exception(NO_LINKED_INSTAGRAM_ACCOUNT)
+            ig_account_id = str(ig_account["id"])
 
             # Get account name
             async with session.get(
@@ -145,10 +180,40 @@ class InstagramService:
         return {
             "account_id": ig_account_id,
             "account_name": username,
-            "extra_data": {"page_id": page["id"]},
+            "extra_data": {"page_id": str(page["id"])},
         }
 
     get_account_info = get_instagram_account_info
+
+    async def _diagnose_no_pages(self, session: aiohttp.ClientSession, access_token: str) -> str:
+        """Explain an empty ``/me/accounts`` list.
+
+        Facebook lets the user untick individual permissions on the consent
+        screen; without ``pages_show_list`` the call legitimately returns an
+        empty list with no error. ``debug_token`` (authenticated with the app
+        token ``app_id|app_secret``) reports which scopes the token actually
+        carries. If that call fails for any reason, fall back to the
+        "no Page" explanation rather than masking the original problem.
+        """
+        try:
+            async with session.get(
+                f"{self.GRAPH_API}/debug_token",
+                params={"input_token": access_token, "access_token": f"{self.app_id}|{self.app_secret}"},
+            ) as response:
+                debug = await response.json()
+            _raise_on_error(debug, "debug_token failed")
+            raw_scopes = (debug.get("data") or {}).get("scopes")
+            if not isinstance(raw_scopes, (list, tuple, set)):
+                raise ValueError("debug_token response carries no data.scopes list")
+            scopes = {str(scope) for scope in raw_scopes}
+        except Exception as exc:
+            logger.warning("Instagram connect: /me/accounts was empty and debug_token failed: %s", exc)
+            return NO_FACEBOOK_PAGE
+
+        logger.info("Instagram connect: /me/accounts was empty; token scopes=%s", sorted(scopes))
+        if "pages_show_list" not in scopes:
+            return MISSING_PAGES_PERMISSION
+        return NO_FACEBOOK_PAGE
 
     # ── Publish ──────────────────────────────────────────────────────────────
 
@@ -225,6 +290,18 @@ class InstagramService:
                 raise Exception(f"Instagram video processing failed: {data.get('status', 'Unknown error')}")
             await asyncio.sleep(poll_seconds)
         raise Exception("Instagram video processing timed out")
+
+
+def _first_page_with_instagram(pages: List[Dict[str, Any]]):
+    """Return ``(page, instagram_business_account)`` for the first Page that
+    has a linked Instagram account, else ``(None, None)``."""
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        ig_account = page.get("instagram_business_account")
+        if isinstance(ig_account, dict) and ig_account.get("id"):
+            return page, ig_account
+    return None, None
 
 
 def _raise_on_error(data: Any, prefix: str) -> None:
