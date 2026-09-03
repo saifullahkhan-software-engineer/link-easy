@@ -22,6 +22,13 @@ import HostedDemoBanner from './HostedDemoBanner';
  *   WhatsApp
  *     ├─ WhatsApp Group Scan
  *     └─ WhatsApp Live Chat
+ *   Social Scheduler
+ *     ├─ Overview
+ *     ├─ Schedule Post
+ *     ├─ Queue
+ *     ├─ Calendar
+ *     ├─ History
+ *     └─ Settings
  *
  * The operations dashboard (/dashboard) and the admin dashboard (/admin) are
  * separate modules with their own sidebars. Admins still reach the admin area
@@ -154,6 +161,32 @@ const whatsappGroup = {
   ],
 };
 
+const socialGroup = {
+  label: 'Social Scheduler',
+  icon: (
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z"
+      />
+    </svg>
+  ),
+  items: [
+    {
+      to: '/app/social-scheduler',
+      label: 'Overview',
+      end: true,
+      icon: null,
+    },
+    { to: '/app/social-scheduler/schedule', label: 'Schedule Post', icon: null },
+    { to: '/app/social-scheduler/queue', label: 'Queue', icon: null },
+    { to: '/app/social-scheduler/calendar', label: 'Calendar', icon: null },
+    { to: '/app/social-scheduler/history', label: 'History', icon: null },
+    { to: '/app/social-scheduler/settings', label: 'Settings', icon: null },
+  ],
+};
+
 export default function AppLayout() {
   const { email, name, logout } = useAuth();
   const { canSeeAdmin } = useAdminAccess();
@@ -168,7 +201,7 @@ export default function AppLayout() {
 
   return (
     <div className="flex min-h-screen bg-surface-950">
-      {/* Sidebar — app module only (Account, LinkedIn, WhatsApp). */}
+      {/* Sidebar — app module only (Account, LinkedIn, WhatsApp, Social Scheduler). */}
       <aside className="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-surface-700 bg-surface-900">
         <Link to="/" className="flex h-16 items-center gap-2.5 border-b border-surface-700 px-5 transition hover:bg-surface-800/50">
           <img src="/favicon.svg" alt="" className="h-7 w-7" />
@@ -202,8 +235,8 @@ export default function AppLayout() {
             </NavLink>
           </div>
 
-          {/* Per-product groups (LinkedIn, WhatsApp). */}
-          {[linkedinGroup, whatsappGroup].map((group) => (
+          {/* Per-product groups (LinkedIn, WhatsApp, Social Scheduler). */}
+          {[linkedinGroup, whatsappGroup, socialGroup].map((group) => (
             <div key={group.label}>
               <p className="flex items-center gap-2 px-3 pb-2 pt-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
                 <span className="text-zinc-600">{group.icon}</span>

@@ -33,6 +33,7 @@ from api.v1.linkedin_profile import router as linkedin_profile_router
 from api.v1.live import router as live_router
 from api.v1.system_queues import router as system_queues_router
 from api.v1.admin import router as admin_router
+from api.v1.social_scheduler import router as social_scheduler_router, UPLOADS_URL_PREFIX
 from core.config import settings
 from core.logging_config import get_logger
 try:
@@ -263,6 +264,21 @@ app.include_router(linkedin_profile_router)
 app.include_router(live_router)
 app.include_router(system_queues_router)
 app.include_router(admin_router)
+app.include_router(social_scheduler_router)
+
+# Uploaded videos for the social scheduler. Instagram's Graph API downloads
+# the video from a public URL rather than accepting an upload, so the files
+# must be reachable at <PUBLIC_API_URL>/uploads/social/<generated-name>.
+# Names are server-generated UUIDs (see api/v1/social_scheduler.py), so
+# nothing here is guessable; the directory is created up-front because
+# StaticFiles refuses to mount a missing path.
+try:
+    from fastapi.staticfiles import StaticFiles
+
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    app.mount(UPLOADS_URL_PREFIX, StaticFiles(directory=settings.UPLOAD_DIR), name="social-uploads")
+except Exception as _exc:  # a read-only filesystem must not stop the API
+    logger.warning("Social uploads directory %s is not mountable: %s", settings.UPLOAD_DIR, _exc)
 
 
 _BOOT_MONOTONIC = time.monotonic()

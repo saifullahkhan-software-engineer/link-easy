@@ -224,6 +224,53 @@ const json = (res, code, body) => {
 
 let linkedinMessageRequestCount = 0;
 
+// Social scheduler fixtures: one pending post (in this month, in the future so it
+// is "upcoming"), one published, one failed; YouTube connected, TikTok
+// configured-but-not-connected, Instagram not configured on the instance.
+const socialFuture = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString();
+const socialPast = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+const SOCIAL_POSTS = [
+  {
+    id: 'sp-1', title: 'Launch teaser', caption: 'We are live', hashtags: '#launch',
+    video_url: 'http://x/uploads/social/a.mp4', thumbnail: '', platforms: ['youtube', 'tiktok'],
+    scheduled_at: socialFuture, status: 'pending', youtube_title: '', instagram_caption: '', tiktok_caption: '',
+    created_at: socialPast, updated_at: socialPast, results: [],
+  },
+  {
+    id: 'sp-2', title: 'Old success', caption: '', hashtags: '',
+    video_url: 'http://x/uploads/social/b.mp4', thumbnail: '', platforms: ['youtube'],
+    scheduled_at: socialPast, status: 'posted', youtube_title: '', instagram_caption: '', tiktok_caption: '',
+    created_at: socialPast, updated_at: socialPast,
+    results: [{ id: 'r-1', platform: 'youtube', status: 'posted', platform_id: 'abc123', platform_url: 'https://www.youtube.com/shorts/abc123', error: '', posted_at: socialPast, updated_at: socialPast }],
+  },
+  {
+    id: 'sp-3', title: 'Broken clip', caption: '', hashtags: '',
+    video_url: 'http://x/uploads/social/c.mp4', thumbnail: '', platforms: ['tiktok'],
+    scheduled_at: socialPast, status: 'failed', youtube_title: '', instagram_caption: '', tiktok_caption: '',
+    created_at: socialPast, updated_at: socialPast,
+    results: [{ id: 'r-2', platform: 'tiktok', status: 'failed', platform_id: '', platform_url: '', error: 'TikTok is not connected. Open Settings and connect the account.', posted_at: null, updated_at: socialPast }],
+  },
+];
+const SOCIAL_API_STUBS = {
+  'GET /api/v1/social-scheduler/posts': (res, req) => {
+    const url = new URL(req.url, 'http://x');
+    const wanted = (url.searchParams.get('status') || '').split(',').filter(Boolean);
+    json(res, 200, wanted.length ? SOCIAL_POSTS.filter((p) => wanted.includes(p.status)) : SOCIAL_POSTS);
+  },
+  'GET /api/v1/social-scheduler/stats': (res) =>
+    json(res, 200, {
+      scheduled_this_week: 1, total_scheduled: 1, total_published: 1, total_failed: 1,
+      next_post_at: socialFuture, next_post_in: 'in 1 day 23 hours', connected_platforms: ['youtube'],
+      per_platform: { youtube: { posted: 1, failed: 0 }, instagram: { posted: 0, failed: 0 }, tiktok: { posted: 0, failed: 1 } },
+    }),
+  'GET /api/v1/social-scheduler/platforms': (res) =>
+    json(res, 200, [
+      { platform: 'youtube', label: 'YouTube Shorts', connected: true, configured: true, account_name: 'My Channel', account_id: 'UC1', expires_at: socialFuture, reconnect_required: false, connected_at: socialPast, updated_at: socialPast },
+      { platform: 'instagram', label: 'Instagram Reels', connected: false, configured: false, account_name: '', account_id: '', expires_at: null, reconnect_required: false, connected_at: null, updated_at: null },
+      { platform: 'tiktok', label: 'TikTok', connected: false, configured: true, account_name: '', account_id: '', expires_at: null, reconnect_required: false, connected_at: null, updated_at: null },
+    ]),
+};
+
 const CASES = [
   {
     path: '/',
@@ -911,6 +958,59 @@ const CASES = [
       'Added ✓',
       'waiting in this scan',
       'add them to a campaign',
+    ],
+  },
+
+  /* ───────────── social scheduler (YouTube / Instagram / TikTok) ───────────── */
+  {
+    name: 'social scheduler — overview renders stats, next post and the connect nudge',
+    path: '/app/social-scheduler',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    mustContain: [
+      'Social Scheduler', 'Overview', 'Schedule Post', 'Launch teaser', 'Published', 'Some platforms are not connected',
+      'Connect platforms', 'View queue',
+    ],
+  },
+  {
+    name: 'social scheduler — schedule form shows upload, platforms and per-platform copy toggle',
+    path: '/app/social-scheduler/schedule',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    mustContain: [
+      'Schedule a post', 'Drop a video here', 'YouTube Shorts', 'Instagram Reels', 'TikTok', 'My Channel',
+      'Not connected', 'Customise', 'Publish at', 'video-input',
+    ],
+  },
+  {
+    name: 'social scheduler — queue groups scheduled posts and failures with re-queue',
+    path: '/app/social-scheduler/queue',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    mustContain: ['Queue', 'Scheduled (1)', 'Needs attention (1)', 'Launch teaser', 'Broken clip', 'Re-queue', 'not connected'],
+  },
+  {
+    name: 'social scheduler — history lists outcomes with platform links',
+    path: '/app/social-scheduler/history',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    mustContain: ['History', 'Old success', 'https://www.youtube.com/shorts/abc123', '1 published', 'Broken clip', 'Failed —'],
+  },
+  {
+    name: 'social scheduler — calendar renders a month grid with the post',
+    path: '/app/social-scheduler/calendar',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    mustContain: ['Calendar', 'Mon', 'Sun', 'calendar-day', 'Launch teaser', 'this month'],
+  },
+  {
+    name: 'social scheduler — settings shows connect / disconnect state per platform',
+    path: '/app/social-scheduler/settings?platform=tiktok&connected=1',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    mustContain: [
+      'Settings', 'Connected platforms: 1 of 3', 'My Channel', 'Disconnect', 'Reconnect', 'Connect TikTok',
+      'Not available on this instance', 'platform-card-instagram',
     ],
   },
 ];

@@ -37,6 +37,12 @@ import AdminAccountsPage from './pages/admin/AdminAccountsPage';
 import AdminUsersPage from './pages/admin/AdminUsersPage';
 import AdminLinkedInPage from './pages/admin/AdminLinkedInPage';
 import AdminWhatsAppPage from './pages/admin/AdminWhatsAppPage';
+import SocialSchedulerDashboard from './pages/social-scheduler/Dashboard';
+import SocialSchedulePage from './pages/social-scheduler/SchedulePage';
+import SocialQueuePage from './pages/social-scheduler/QueuePage';
+import SocialHistoryPage from './pages/social-scheduler/HistoryPage';
+import SocialCalendarPage from './pages/social-scheduler/CalendarPage';
+import SocialSettingsPage from './pages/social-scheduler/SettingsPage';
 
 export default function App() {
   return (
@@ -122,6 +128,13 @@ export default function App() {
             <Route path="whatsapp-scanner/jobs/:filterId" element={<WhatsAppScannerPage />} />
             <Route path="whatsapp-scanner/jobs/:filterId/edit" element={<WhatsAppFilterEditPage />} />
             <Route path="whatsapp-live" element={<WhatsAppLiveChatPage />} />
+            {/* Social scheduler — YouTube Shorts / Instagram Reels / TikTok */}
+            <Route path="social-scheduler" element={<SocialSchedulerDashboard />} />
+            <Route path="social-scheduler/schedule" element={<SocialSchedulePage />} />
+            <Route path="social-scheduler/queue" element={<SocialQueuePage />} />
+            <Route path="social-scheduler/history" element={<SocialHistoryPage />} />
+            <Route path="social-scheduler/calendar" element={<SocialCalendarPage />} />
+            <Route path="social-scheduler/settings" element={<SocialSettingsPage />} />
             <Route
               path="linkedin-live"
               element={

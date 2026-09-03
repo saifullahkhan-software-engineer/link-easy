@@ -17,6 +17,14 @@ from .whatsapp import (
     WhatsAppRawMessage,
     WhatsAppScanFilter,
 )
+from .social_scheduler import (
+    SocialPlatform,
+    SocialPlatformConnection,
+    SocialPost,
+    SocialPostResult,
+    SocialPostResultStatus,
+    SocialPostStatus,
+)
 
 __all__ = [
     "User", "PasswordResetToken", "UserRole", "LinkedInAccount",
@@ -26,4 +34,6 @@ __all__ = [
     "FeedScrollAppliedPost", "FeedLead", "FeedLeadStatus", "FEED_LEAD_SOURCE",
     "WhatsAppSession", "WhatsAppMonitoredGroup", "WhatsAppForwardGroup",
     "WhatsAppRawMessage", "WhatsAppScanFilter",
+    "SocialPost", "SocialPostResult", "SocialPlatformConnection",
+    "SocialPlatform", "SocialPostStatus", "SocialPostResultStatus",
 ]

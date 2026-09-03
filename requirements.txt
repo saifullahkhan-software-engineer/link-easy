@@ -68,3 +68,18 @@ uvicorn==0.49.0
 vine==5.1.0
 wcwidth==0.8.2
 reportlab==4.2.5
+
+# ── Social post scheduler (YouTube Shorts / Instagram Reels / TikTok) ─────────
+# Merged from the retired social_scheduler/requirements.txt. Shared packages
+# (fastapi, sqlalchemy, asyncpg, pydantic, celery, redis, python-multipart)
+# keep the root pins above. Only the platform SDKs are new, and they are
+# pinned to releases that ship cp314/pure-python wheels — the original
+# aiohttp==3.9.1 pin has no cp314 wheel and would fail the python:3.14-slim
+# image build the same way the missing psycopg2 wheel once did.
+#   aiohttp                  — Instagram Graph API + TikTok Content Posting API (services/social/)
+#   google-api-python-client — YouTube Data API v3 uploads (services/social/youtube.py)
+#   google-auth(-oauthlib)   — YouTube OAuth code exchange + token refresh
+aiohttp==3.14.3
+google-api-python-client==2.200.0
+google-auth==2.57.0
+google-auth-oauthlib==1.4.1

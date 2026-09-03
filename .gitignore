@@ -15,3 +15,6 @@ __pycache__/
 
 # Durable per-account Chromium profile directories (volume-mounted in prod)
 /profiles/
+
+# Social scheduler video uploads (served from /uploads/social; use a volume in prod)
+uploads/

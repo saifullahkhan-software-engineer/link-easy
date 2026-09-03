@@ -150,6 +150,7 @@ class BeatScheduleTests(unittest.TestCase):
         "dispatch-due-account-sessions",
         "dispatch-due-feed-scans",
         "dispatch-due-whatsapp-scans",
+        "dispatch-due-social-posts",
     }
 
     def _beat_schedule_for(self, environment, scheduled_override=None):
