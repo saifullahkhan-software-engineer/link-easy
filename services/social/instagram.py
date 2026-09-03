@@ -32,8 +32,12 @@ class InstagramService:
 
     # ── OAuth ────────────────────────────────────────────────────────────────
 
-    def get_auth_url(self, state: str) -> str:
-        """Generate the OAuth authorization URL."""
+    def get_auth_url(self, state: str, *, code_verifier=None) -> str:
+        """Generate the OAuth authorization URL.
+
+        ``code_verifier`` is accepted for the uniform service interface used
+        by the API routes; Meta's OAuth does not use PKCE, so it is ignored.
+        """
         params = {
             "client_id": self.app_id,
             "redirect_uri": self.redirect_uri,
@@ -43,8 +47,12 @@ class InstagramService:
         }
         return f"https://www.facebook.com/v18.0/dialog/oauth?{urlencode(params)}"
 
-    async def exchange_code(self, code: str) -> Dict[str, Any]:
-        """Exchange an authorization code for a (long-lived) access token."""
+    async def exchange_code(self, code: str, *, code_verifier=None) -> Dict[str, Any]:
+        """Exchange an authorization code for a (long-lived) access token.
+
+        ``code_verifier`` is accepted for the uniform service interface used
+        by the API routes; Meta's OAuth does not use PKCE, so it is ignored.
+        """
         params = {
             "client_id": self.app_id,
             "client_secret": self.app_secret,

@@ -52,6 +52,25 @@ services:
       - PASSWORD_RESET_URL=http://localhost:5173/reset-password
       - BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
       - FROM_EMAIL=noreply@example.com
+      # Social post scheduler OAuth. Set these in the .env file next to this
+      # compose file (compose substitutes ${VAR:-0} with .env values). A
+      # platform with empty credentials is reported as "not configured" and
+      # its connect button is disabled — nothing else breaks.
+      - YOUTUBE_CLIENT_ID=${YOUTUBE_CLIENT_ID:-}
+      - YOUTUBE_CLIENT_SECRET=${YOUTUBE_CLIENT_SECRET:-}
+      - YOUTUBE_REDIRECT_URI=${YOUTUBE_REDIRECT_URI:-}
+      - INSTAGRAM_APP_ID=${INSTAGRAM_APP_ID:-}
+      - INSTAGRAM_APP_SECRET=${INSTAGRAM_APP_SECRET:-}
+      - INSTAGRAM_REDIRECT_URI=${INSTAGRAM_REDIRECT_URI:-}
+      - FACEBOOK_APP_ID=${FACEBOOK_APP_ID:-}
+      - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET:-}
+      - FACEBOOK_REDIRECT_URI=${FACEBOOK_REDIRECT_URI:-}
+      - TIKTOK_CLIENT_KEY=${TIKTOK_CLIENT_KEY:-}
+      - TIKTOK_CLIENT_SECRET=${TIKTOK_CLIENT_SECRET:-}
+      - TIKTOK_REDIRECT_URI=${TIKTOK_REDIRECT_URI:-}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-}
+      - UPLOAD_DIR=${UPLOAD_DIR:-./uploads/social}
+      - SOCIAL_OAUTH_RETURN_URL=${SOCIAL_OAUTH_RETURN_URL:-}
       # Every feature (Beat, scheduled campaigns, recurring scans) is on by
       # default in ALL environments, including the public hosted instance
       # (ENVIRONMENT=deployment). Timers can be switched off per deployment
@@ -83,6 +102,23 @@ services:
       - PASSWORD_RESET_URL=http://localhost:5173/reset-password
       - BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
       - FROM_EMAIL=noreply@example.com
+      # Worker refreshes stored tokens (YouTube/TikTok) and needs the same
+      # OAuth app credentials as the API. Values come from .env.
+      - YOUTUBE_CLIENT_ID=${YOUTUBE_CLIENT_ID:-}
+      - YOUTUBE_CLIENT_SECRET=${YOUTUBE_CLIENT_SECRET:-}
+      - YOUTUBE_REDIRECT_URI=${YOUTUBE_REDIRECT_URI:-}
+      - INSTAGRAM_APP_ID=${INSTAGRAM_APP_ID:-}
+      - INSTAGRAM_APP_SECRET=${INSTAGRAM_APP_SECRET:-}
+      - INSTAGRAM_REDIRECT_URI=${INSTAGRAM_REDIRECT_URI:-}
+      - FACEBOOK_APP_ID=${FACEBOOK_APP_ID:-}
+      - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET:-}
+      - FACEBOOK_REDIRECT_URI=${FACEBOOK_REDIRECT_URI:-}
+      - TIKTOK_CLIENT_KEY=${TIKTOK_CLIENT_KEY:-}
+      - TIKTOK_CLIENT_SECRET=${TIKTOK_CLIENT_SECRET:-}
+      - TIKTOK_REDIRECT_URI=${TIKTOK_REDIRECT_URI:-}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-}
+      - UPLOAD_DIR=${UPLOAD_DIR:-./uploads/social}
+      - SOCIAL_OAUTH_RETURN_URL=${SOCIAL_OAUTH_RETURN_URL:-}
       - ENVIRONMENT=production
     depends_on: &celery_dependencies
       postgres:

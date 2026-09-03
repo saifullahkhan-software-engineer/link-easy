@@ -83,3 +83,11 @@ aiohttp==3.14.3
 google-api-python-client==2.200.0
 google-auth==2.57.0
 google-auth-oauthlib==1.4.1
+
+# ── Local dev / test ──────────────────────────────────────────────────────────
+# run_dev_server.py and the test suite use an in-memory SQLite database
+# (sqlite+aiosqlite:///:memory:) and tests are collected with pytest — neither
+# package was declared before, so `pip install -r requirements.txt` produced
+# an environment where the dev launcher and tests could not start.
+aiosqlite==0.22.1
+pytest==9.1.1

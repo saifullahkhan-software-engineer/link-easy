@@ -15,13 +15,17 @@ class FacebookService:
         self.app_secret = settings.FACEBOOK_APP_SECRET
         self.redirect_uri = settings.FACEBOOK_REDIRECT_URI
 
-    def get_auth_url(self, state: str) -> str:
+    def get_auth_url(self, state: str, *, code_verifier=None) -> str:
+        # ``code_verifier`` is accepted for the uniform service interface used
+        # by the API routes; Meta's OAuth does not use PKCE, so it is ignored.
         return "https://www.facebook.com/v20.0/dialog/oauth?" + urlencode({
             "client_id": self.app_id, "redirect_uri": self.redirect_uri,
             "scope": self.SCOPES, "response_type": "code", "state": state,
         })
 
-    async def exchange_code(self, code: str) -> Dict[str, Any]:
+    async def exchange_code(self, code: str, *, code_verifier=None) -> Dict[str, Any]:
+        # ``code_verifier`` is accepted for the uniform service interface used
+        # by the API routes; Meta's OAuth does not use PKCE, so it is ignored.
         params = {"client_id": self.app_id, "client_secret": self.app_secret,
                   "redirect_uri": self.redirect_uri, "code": code}
         async with aiohttp.ClientSession() as session:

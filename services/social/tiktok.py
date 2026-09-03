@@ -35,8 +35,12 @@ class TikTokService:
 
     # ── OAuth ────────────────────────────────────────────────────────────────
 
-    def get_auth_url(self, state: str) -> str:
-        """Generate the OAuth authorization URL."""
+    def get_auth_url(self, state: str, *, code_verifier=None) -> str:
+        """Generate the OAuth authorization URL.
+
+        ``code_verifier`` is accepted for the uniform service interface used
+        by the API routes; TikTok's OAuth does not use PKCE, so it is ignored.
+        """
         params = {
             "client_key": self.client_key,
             "response_type": "code",
@@ -46,8 +50,12 @@ class TikTokService:
         }
         return f"https://www.tiktok.com/v2/auth/authorize/?{urlencode(params)}"
 
-    async def exchange_code(self, code: str) -> Dict[str, Any]:
-        """Exchange an authorization code for access + refresh tokens."""
+    async def exchange_code(self, code: str, *, code_verifier=None) -> Dict[str, Any]:
+        """Exchange an authorization code for access + refresh tokens.
+
+        ``code_verifier`` is accepted for the uniform service interface used
+        by the API routes; TikTok's OAuth does not use PKCE, so it is ignored.
+        """
         params = {
             "client_key": self.client_key,
             "client_secret": self.client_secret,
