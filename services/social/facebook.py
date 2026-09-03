@@ -14,7 +14,7 @@ import aiohttp
 
 from core.config import settings
 
-from .meta_graph import PAGES_SHOW_LIST, token_scopes
+from .meta_graph import GRAPH_API_BASE, OAUTH_DIALOG, PAGES_SHOW_LIST, signed_in_account_name, token_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +30,33 @@ MISSING_PAGES_PERMISSION = (
     "(pages_show_list), so no Facebook Page can be listed. Disconnect Facebook and "
     "reconnect, approving every permission on Facebook's screen."
 )
-NO_FACEBOOK_PAGE = (
-    "The signed-in Facebook account does not administer any Facebook Page (or shared none "
-    "with this app). Sign in with the Facebook account that manages the Page you want to "
-    "post to — a Page you only follow or like does not count — then reconnect."
+_NO_PAGE_REASON = (
+    "does not administer any Facebook Page (or shared none with this app). Sign in with "
+    "the Facebook account that manages the Page you want to post to — a Page you only "
+    "follow or like does not count — then reconnect."
 )
+
+
+def no_page_message(signed_in_name: Optional[str] = None) -> str:
+    """``NO_FACEBOOK_PAGE`` naming the Facebook account that actually signed in.
+
+    An empty ``/me/accounts`` in a fresh browser is almost always a sign-in to
+    a *different* Facebook account than the one that administers the Page.
+    Naming the account that completed the OAuth (from ``/me``) turns the
+    message from "which account?" into "that's not the account you meant".
+    When the name cannot be determined the generic wording is used.
+    """
+    if signed_in_name:
+        name = signed_in_name.strip()
+        if len(name) > 28:  # keep the message inside the 300-char redirect limit
+            name = name[:28].rstrip() + "…"
+        who = f" ({name})"
+    else:
+        who = ""
+    return f"The signed-in Facebook account{who} {_NO_PAGE_REASON}"
+
+
+NO_FACEBOOK_PAGE = no_page_message()
 NO_PAGE_TOKEN = (
     "Facebook listed your Page(s) but issued no Page access token for any of them, so the "
     "app cannot post on their behalf. Disconnect Facebook and reconnect, approving every "
@@ -43,7 +65,7 @@ NO_PAGE_TOKEN = (
 
 
 class FacebookService:
-    GRAPH_API = "https://graph.facebook.com/v20.0"
+    GRAPH_API = GRAPH_API_BASE
     SCOPES = "pages_show_list,pages_read_engagement,pages_manage_posts,publish_video"
 
     def __init__(self):
@@ -54,7 +76,7 @@ class FacebookService:
     def get_auth_url(self, state: str, *, code_verifier=None) -> str:
         # ``code_verifier`` is accepted for the uniform service interface used
         # by the API routes; Meta's OAuth does not use PKCE, so it is ignored.
-        return "https://www.facebook.com/v20.0/dialog/oauth?" + urlencode({
+        return OAUTH_DIALOG + "?" + urlencode({
             "client_id": self.app_id, "redirect_uri": self.redirect_uri,
             "scope": self.SCOPES, "response_type": "code", "state": state,
         })
@@ -102,15 +124,25 @@ class FacebookService:
                 "expires_in": data.get("expires_in")}
 
     async def _diagnose_no_pages(self, session: aiohttp.ClientSession, user_token: Optional[str]) -> str:
-        """Explain an empty ``/me/accounts`` (see ``services.social.meta_graph``)."""
+        """Explain an empty ``/me/accounts`` (see ``services.social.meta_graph``).
+
+        Both diagnostics name the account that actually signed in
+        (``signed_in_account_name``): an empty list is most often a sign-in
+        to the *wrong* Facebook account, and the name is what makes that
+        visible.
+        """
         scopes = await token_scopes(session, self.GRAPH_API, user_token or "", self.app_id, self.app_secret)
+        signed_in_as = await signed_in_account_name(session, self.GRAPH_API, user_token or "")
         if scopes is None:
             logger.warning("Facebook connect: /me/accounts was empty and the token could not be inspected")
-            return NO_FACEBOOK_PAGE
-        logger.info("Facebook connect: /me/accounts was empty; token scopes=%s", sorted(scopes))
+            return no_page_message(signed_in_as)
+        logger.info(
+            "Facebook connect: /me/accounts was empty; token scopes=%s, signed in as %r",
+            sorted(scopes), signed_in_as,
+        )
         if PAGES_SHOW_LIST not in scopes:
             return MISSING_PAGES_PERMISSION
-        return NO_FACEBOOK_PAGE
+        return no_page_message(signed_in_as)
 
     async def refresh_access_token(self, refresh_token: Optional[str], current_access_token: Optional[str] = None):
         raise ValueError("Facebook Page access expired. Reconnect Facebook.")

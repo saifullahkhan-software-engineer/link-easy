@@ -23,7 +23,7 @@ import aiohttp
 
 from core.config import settings
 
-from .meta_graph import PAGES_SHOW_LIST, token_scopes
+from .meta_graph import GRAPH_API_BASE, OAUTH_DIALOG, PAGES_SHOW_LIST, signed_in_account_name, token_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -44,18 +44,39 @@ MISSING_PAGES_PERMISSION = (
     "(pages_show_list), so no Facebook Page can be listed. Disconnect Instagram and "
     "reconnect, approving every permission on Facebook's screen."
 )
-NO_FACEBOOK_PAGE = (
-    "The signed-in Facebook account does not administer any Facebook Page (or shared none "
-    "with this app). This Instagram sign-in is separate from the Facebook Page connected "
-    "elsewhere in the app: sign in with the Facebook account that manages the Page linked "
-    "to your Instagram account, then reconnect."
+_NO_PAGE_REASON = (
+    "does not administer any Facebook Page (or shared none with this app). This sign-in "
+    "is separate from the Facebook Page connected elsewhere: sign in with the account "
+    "that manages the Page linked to your Instagram, then reconnect."
 )
+
+
+def no_page_message(signed_in_name: Optional[str] = None) -> str:
+    """``NO_FACEBOOK_PAGE`` naming the Facebook account that actually signed in.
+
+    An empty ``/me/accounts`` in a fresh browser is almost always a sign-in to
+    a *different* Facebook account than the one that administers the Page.
+    Naming the account that completed the OAuth (from ``/me``) turns the
+    message from "which account?" into "that's not the account you meant".
+    When the name cannot be determined the generic wording is used.
+    """
+    if signed_in_name:
+        name = signed_in_name.strip()
+        if len(name) > 28:  # keep the message inside the 300-char redirect limit
+            name = name[:28].rstrip() + "…"
+        who = f" ({name})"
+    else:
+        who = ""
+    return f"The signed-in Facebook account{who} {_NO_PAGE_REASON}"
+
+
+NO_FACEBOOK_PAGE = no_page_message()
 
 
 class InstagramService:
     """Service for Instagram Reels publishing."""
 
-    GRAPH_API = "https://graph.facebook.com/v18.0"
+    GRAPH_API = GRAPH_API_BASE
     SCOPES = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement"
 
     def __init__(self):
@@ -78,7 +99,7 @@ class InstagramService:
             "response_type": "code",
             "state": state,
         }
-        return f"https://www.facebook.com/v18.0/dialog/oauth?{urlencode(params)}"
+        return f"{OAUTH_DIALOG}?{urlencode(params)}"
 
     async def exchange_code(self, code: str, *, code_verifier=None) -> Dict[str, Any]:
         """Exchange an authorization code for a (long-lived) access token.
@@ -198,13 +219,17 @@ class InstagramService:
         "no Page" explanation rather than masking the original problem.
         """
         scopes = await token_scopes(session, self.GRAPH_API, access_token, self.app_id, self.app_secret)
+        signed_in_as = await signed_in_account_name(session, self.GRAPH_API, access_token)
         if scopes is None:
             logger.warning("Instagram connect: /me/accounts was empty and the token could not be inspected")
-            return NO_FACEBOOK_PAGE
-        logger.info("Instagram connect: /me/accounts was empty; token scopes=%s", sorted(scopes))
+            return no_page_message(signed_in_as)
+        logger.info(
+            "Instagram connect: /me/accounts was empty; token scopes=%s, signed in as %r",
+            sorted(scopes), signed_in_as,
+        )
         if PAGES_SHOW_LIST not in scopes:
             return MISSING_PAGES_PERMISSION
-        return NO_FACEBOOK_PAGE
+        return no_page_message(signed_in_as)
 
     # ── Publish ──────────────────────────────────────────────────────────────
 
