@@ -12,7 +12,8 @@ const REQUIREMENTS = {
   instagram:
     'An Instagram Business or Creator account linked to a Facebook Page. Reels are published through the Meta Graph API.',
   tiktok: 'A TikTok account. Grants video upload and publish access.',
-  facebook: 'A Facebook Page managed through Meta Business. The first Page returned by Meta is connected and used for video uploads.',
+  facebook:
+    'A Facebook Page you manage. Sign in with the Facebook account that administers the Page and approve every permission; the first Page you can post to is connected and used for video uploads.',
 };
 
 function ConnectionBadge({ conn }) {
