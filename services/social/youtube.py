@@ -21,6 +21,13 @@ from the fixes needed for the OAuth routes and the worker to actually work:
   validates against the stored challenge. Without this the callback built a
   fresh Flow whose auto-generated verifier never matched, and Google rejected
   the exchange with ``invalid_grant: Missing code verifier``.
+* ``SCOPES`` now also requests ``userinfo.profile``: the OAuth client's scope
+  set changed from ``youtube.readonly`` + ``youtube.upload`` to those two plus
+  ``userinfo.profile``. ``get_channel_info`` uses the extra scope to enrich
+  the stored connection metadata with the Google account profile
+  (name/email/picture via the People API) — best-effort only, so an existing
+  connection whose token predates the scope change (or a project without the
+  People API enabled) still connects fine with just the channel info.
 """
 import asyncio
 import os
@@ -37,6 +44,9 @@ class YouTubeService:
     SCOPES = [
         "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/youtube.readonly",
+        # Added to the OAuth client's scope set; used to store which Google
+        # account (name/email/picture) is connected, alongside the channel.
+        "https://www.googleapis.com/auth/userinfo.profile",
     ]
     TOKEN_URI = "https://oauth2.googleapis.com/token"
     AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
@@ -150,11 +160,12 @@ class YouTubeService:
     # ── Account ──────────────────────────────────────────────────────────────
 
     async def get_channel_info(self, access_token: str, refresh_token: Optional[str] = None) -> Dict[str, str]:
-        """Get YouTube channel information."""
+        """Get YouTube channel information, enriched (best-effort) with the
+        Google account profile from the ``userinfo.profile`` scope."""
         from googleapiclient.errors import HttpError
 
         def _fetch():
-            youtube = self._client(access_token, refresh_token)
+            youtube = self._client("youtube", "v3", access_token, refresh_token)
             return youtube.channels().list(part="snippet", mine=True).execute()
 
         try:
@@ -171,8 +182,41 @@ class YouTubeService:
         return {
             "account_id": channel.get("id", ""),
             "account_name": channel.get("snippet", {}).get("title", "YouTube Channel"),
-            "extra_data": {},
+            "extra_data": await self._google_profile(access_token, refresh_token),
         }
+
+    async def _google_profile(
+        self, access_token: str, refresh_token: Optional[str]
+    ) -> Dict[str, str]:
+        """Fetch the signed-in Google account's profile via the People API.
+
+        Uses the ``userinfo.profile`` scope. Fails open — returns ``{}`` if
+        the scope is not in the token yet (connections made before the scope
+        change) or the People API is not enabled on the project — the
+        connection itself must never break over account metadata.
+        """
+        try:
+            def _fetch():
+                people = self._client("people", "v1", access_token, refresh_token)
+                return people.people().get(
+                    "me", params={"personFields": "names,emailAddresses,photos"}
+                ).execute()
+
+            profile = await asyncio.to_thread(_fetch)
+        except Exception:
+            return {}
+
+        extra: Dict[str, str] = {}
+        names = profile.get("names") or []
+        if names and names[0].get("displayName"):
+            extra["google_name"] = names[0]["displayName"]
+        emails = profile.get("emailAddresses") or []
+        if emails and emails[0]:
+            extra["google_email"] = emails[0]
+        photos = profile.get("photos") or []
+        if photos and photos[0].get("url"):
+            extra["google_picture"] = photos[0]["url"]
+        return extra
 
     get_account_info = get_channel_info
 
@@ -216,7 +260,7 @@ class YouTubeService:
         }
 
         def _upload():
-            youtube = self._client(access_token, refresh_token)
+            youtube = self._client("youtube", "v3", access_token, refresh_token)
             media = MediaFileUpload(video_path, mimetype="video/mp4", resumable=True)
             return youtube.videos().insert(part="snippet,status", body=body, media_body=media).execute()
 
@@ -254,7 +298,13 @@ class YouTubeService:
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
-    def _client(self, access_token: str, refresh_token: Optional[str]):
+    def _client(
+        self,
+        service_name: str,
+        version: str,
+        access_token: str,
+        refresh_token: Optional[str],
+    ):
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 
@@ -265,7 +315,7 @@ class YouTubeService:
             client_id=self.client_id,
             client_secret=self.client_secret,
         )
-        return build("youtube", "v3", credentials=credentials, cache_discovery=False)
+        return build(service_name, version, credentials=credentials, cache_discovery=False)
 
 
 def _seconds_until(expiry: Optional[datetime]) -> Optional[int]:
