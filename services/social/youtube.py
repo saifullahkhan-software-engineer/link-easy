@@ -21,6 +21,18 @@ from the fixes needed for the OAuth routes and the worker to actually work:
   validates against the stored challenge. Without this the callback built a
   fresh Flow whose auto-generated verifier never matched, and Google rejected
   the exchange with ``invalid_grant: Missing code verifier``.
+* ``include_granted_scopes`` is NOT sent. With it, Google merges any scopes
+  the user granted this client previously (e.g. ``profile`` from an older
+  version of the app) into the grant. oauthlib then aborts the token
+  exchange with ``Warning: Scope has changed from "..." to "..."`` because
+  the granted scope is not *exactly* the requested one. A refresh token is
+  still issued every time thanks to ``access_type=offline`` +
+  ``prompt=consent``.
+* ``exchange_code`` additionally tolerates a granted scope that is a
+  *superset* of the requested one (oauthlib raises a ``Warning`` that carries
+  the granted token on ``.token``): the token is accepted whenever it still
+  covers every required YouTube scope, and only rejected when a required
+  scope is genuinely missing.
 """
 import asyncio
 import os
@@ -89,7 +101,12 @@ class YouTubeService:
         auth_url, _ = self._flow(code_verifier).authorization_url(
             access_type="offline",
             prompt="consent",
-            include_granted_scopes="true",
+            # No include_granted_scopes: Google would merge scopes granted to
+            # this client previously (e.g. "profile") into the response, the
+            # granted scope would no longer exactly match the requested one,
+            # and oauthlib would abort the exchange with
+            # "Warning: Scope has changed from ... to ...". offline+consent
+            # already guarantees a fresh refresh token on every connect.
             state=state,
         )
         return auth_url
@@ -109,7 +126,20 @@ class YouTubeService:
 
         def _exchange():
             flow = self._flow(code_verifier)
-            flow.fetch_token(code=code)
+            try:
+                flow.fetch_token(code=code)
+            except Warning as exc:
+                # oauthlib raises a plain Warning("Scope has changed from X
+                # to Y") when the granted scope is not *exactly* the one
+                # requested — e.g. Google merging previously granted scopes.
+                # The granted token rides on the exception (.token,
+                # .new_scope), so recover it as long as every required
+                # YouTube scope was actually granted.
+                token = getattr(exc, "token", None)
+                granted = set(getattr(exc, "new_scope", None) or ())
+                if not token or not set(self.SCOPES).issubset(granted):
+                    raise
+                flow.oauth2session.token = token
             return flow.credentials
 
         credentials = await asyncio.to_thread(_exchange)
