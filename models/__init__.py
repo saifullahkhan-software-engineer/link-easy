@@ -1,4 +1,4 @@
-from .user import User, PasswordResetToken
+from .user import User, PasswordResetToken, UserDeletionToken
 from .roles import UserRole
 from .rbac import AppSetting, Role, UserRoleLink
 from .rate_limit import RateLimitCounter
@@ -24,10 +24,11 @@ from .social_scheduler import (
     SocialPostResult,
     SocialPostResultStatus,
     SocialPostStatus,
+    PlatformCredential,
 )
 
 __all__ = [
-    "User", "PasswordResetToken", "UserRole", "LinkedInAccount",
+    "User", "PasswordResetToken", "UserDeletionToken", "UserRole", "LinkedInAccount",
     "Role", "UserRoleLink", "AppSetting", "RateLimitCounter",
     "Campaign", "CampaignStep", "Lead", "LeadSource", "CampaignJob",
     "FeedScrollJob", "FeedScrollMode", "FeedScrollJobStatus", "FeedScrollResult",
@@ -36,4 +37,5 @@ __all__ = [
     "WhatsAppRawMessage", "WhatsAppScanFilter",
     "SocialPost", "SocialPostResult", "SocialPlatformConnection",
     "SocialPlatform", "SocialPostStatus", "SocialPostResultStatus",
+    "PlatformCredential",
 ]

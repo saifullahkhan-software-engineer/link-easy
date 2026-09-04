@@ -199,3 +199,24 @@ def create_password_reset_token(email: str, token_id: str) -> str:
         "token_type": "password_reset",
     }
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
+
+def create_account_deletion_token(email: str, token_id: str) -> str:
+    """Sign the one-time account-deletion link token.
+
+    Identical shape to ``create_password_reset_token`` but with
+    ``token_type="account_deletion"`` so a deletion link can never be
+    mistaken for (or replayed as) a password reset and vice versa. The
+    matching ``UserDeletionToken`` row (same ``jti``) makes the link
+    one-time and revocable; expiry follows the password-reset window.
+    """
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+    )
+    to_encode = {
+        "sub": email,
+        "jti": token_id,
+        "exp": expire,
+        "token_type": "account_deletion",
+    }
+    return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)

@@ -227,6 +227,7 @@ class InstagramAccountInfoTests(unittest.TestCase):
                     "scopes": ["instagram_basic", "instagram_content_publish", "public_profile"],
                 }
             },
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
         }
 
         info, exc, session = self._run(routes)
@@ -260,13 +261,17 @@ class InstagramAccountInfoTests(unittest.TestCase):
                     ],
                 }
             },
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
         }
 
         info, exc, session = self._run(routes)
 
         self.assertIsNone(info)
         message = str(exc)
-        self.assertEqual(message, instagram_module.NO_FACEBOOK_PAGE)
+        # The account that actually completed the sign-in is named, so a
+        # sign-in to the wrong account in a fresh browser is visible.
+        self.assertEqual(message, instagram_module.no_page_message("Jane Doe"))
+        self.assertIn("(Jane Doe)", message)
         self.assertIn("does not administer any Facebook Page", message)
         # The user may have a Facebook Page connected on the Facebook card
         # and assume Instagram sees it; it does not — different sign-in.
@@ -274,7 +279,27 @@ class InstagramAccountInfoTests(unittest.TestCase):
         self.assertNotIn("pages_show_list", message)
         self.assertEqual(len(session.requests_to("debug_token")), 1)
 
-    def test_empty_list_falls_back_to_no_page_message_when_debug_token_fails(self):
+    def test_empty_list_names_the_signed_in_account(self):
+        routes = {
+            "me/accounts": {"data": []},
+            "debug_token": {
+                "data": {
+                    "app_id": APP_ID,
+                    "is_valid": True,
+                    "scopes": ["instagram_basic", "instagram_content_publish", "pages_show_list"],
+                }
+            },
+            "me": {"id": "fb-user-9", "name": "Saifullah Khan"},
+        }
+
+        info, exc, _session = self._run(routes)
+
+        self.assertIsNone(info)
+        message = str(exc)
+        self.assertEqual(message, instagram_module.no_page_message("Saifullah Khan"))
+        self.assertIn("(Saifullah Khan)", message)
+
+    def test_empty_list_names_the_account_even_when_debug_token_fails(self):
         routes = {
             "me/accounts": {"data": []},
             "debug_token": {
@@ -284,30 +309,47 @@ class InstagramAccountInfoTests(unittest.TestCase):
                     "code": 100,
                 }
             },
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
         }
 
-        info, exc, session = self._run(routes)
+        info, exc, _session = self._run(routes)
 
         self.assertIsNone(info)
         message = str(exc)
-        self.assertEqual(message, instagram_module.NO_FACEBOOK_PAGE)
-        self.assertIn("does not administer any Facebook Page", message)
+        self.assertEqual(message, instagram_module.no_page_message("Jane Doe"))
         # The debug_token failure must not leak over the actionable message.
         self.assertNotIn("app access token", message)
         self.assertNotIn("debug_token", message)
-        self.assertEqual(len(session.requests_to("debug_token")), 1)
 
     def test_empty_list_falls_back_when_debug_token_has_no_scopes(self):
         # A malformed/partial debug_token payload is treated like a failure.
         routes = {
             "me/accounts": {"data": []},
             "debug_token": {"data": {"app_id": APP_ID, "is_valid": False}},
+            "me": {"id": "fb-user-1", "name": "Jane Doe"},
+        }
+
+        info, exc, _session = self._run(routes)
+
+        self.assertIsNone(info)
+        self.assertEqual(str(exc), instagram_module.no_page_message("Jane Doe"))
+
+    def test_empty_list_stays_generic_when_the_name_lookup_fails(self):
+        # A failing ``/me`` must not mask the diagnosis: generic message.
+        routes = {
+            "me/accounts": {"data": []},
+            "debug_token": {
+                "data": {"app_id": APP_ID, "is_valid": True, "scopes": ["pages_show_list"]}
+            },
+            "me": {"error": {"message": "Error validating access token", "type": "OAuthException", "code": 190}},
         }
 
         info, exc, _session = self._run(routes)
 
         self.assertIsNone(info)
         self.assertEqual(str(exc), instagram_module.NO_FACEBOOK_PAGE)
+        self.assertNotIn("(None)", str(exc))
+        self.assertNotIn("Error validating", str(exc))
 
     # ── Graph API errors still surface as before ─────────────────────────────
 
@@ -335,9 +377,15 @@ class InstagramAccountInfoTests(unittest.TestCase):
             instagram_module.NO_LINKED_INSTAGRAM_ACCOUNT,
             instagram_module.MISSING_PAGES_PERMISSION,
             instagram_module.NO_FACEBOOK_PAGE,
+            instagram_module.no_page_message("A Rather Long Person Name Here"),  # long name
         ):
             with self.subTest(message=message[:40]):
                 self.assertLessEqual(len(message), 300)
+
+    def test_no_page_message_truncates_very_long_names(self):
+        message = instagram_module.no_page_message("A" * 200)
+        self.assertLessEqual(len(message), 300)
+        self.assertNotIn("A" * 29, message)
 
 
 if __name__ == "__main__":

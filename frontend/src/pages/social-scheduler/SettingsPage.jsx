@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { socialSchedulerApi, PLATFORMS } from '../../api/socialScheduler';
 import { getErrorMessage } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
 import Modal from '../../components/Modal';
 import { Spinner } from '../../components/Spinner';
 import { PlatformIcon, SocialPageHeader, formatDateTime } from '../../components/social/SocialBits';
@@ -14,6 +15,16 @@ const REQUIREMENTS = {
   tiktok: 'A TikTok account. Grants video upload and publish access.',
   facebook:
     'A Facebook Page you manage. Sign in with the Facebook account that administers the Page and approve every permission; the first Page you can post to is connected and used for video uploads.',
+};
+
+// Per-platform names for the OAuth app credential pair (what each provider's
+// developer console calls them). The secret is write-only: it is sent to the
+// backend when saving but never returned by any API response.
+const CREDENTIAL_FIELDS = {
+  youtube: { identifier: 'client_id', identifierLabel: 'Client ID', secret: 'client_secret', secretLabel: 'Client Secret' },
+  instagram: { identifier: 'app_id', identifierLabel: 'App ID', secret: 'app_secret', secretLabel: 'App Secret' },
+  tiktok: { identifier: 'client_key', identifierLabel: 'Client Key', secret: 'client_secret', secretLabel: 'Client Secret' },
+  facebook: { identifier: 'app_id', identifierLabel: 'App ID', secret: 'app_secret', secretLabel: 'App Secret' },
 };
 
 function ConnectionBadge({ conn }) {
@@ -46,24 +57,48 @@ function ConnectionBadge({ conn }) {
  * Connecting opens the platform's OAuth consent page; the backend callback
  * stores the tokens (encrypted) and sends the browser back here with
  * ?platform=…&connected=1 or ?error=… which we surface as a toast.
+ *
+ * Operators (admins) can also set the platform's OAuth *app* credentials from
+ * an unconfigured card ("Set up app credentials") or manage a database-saved
+ * pair ("Manage app credentials"). Regular users only ever see whether a
+ * platform is configured and connectable.
  */
 export default function SocialSettingsPage() {
+  const { isAdmin } = useAuth();
   const [connections, setConnections] = useState([]);
+  const [credentials, setCredentials] = useState([]);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(null); // platform id being connected/disconnected
   const [confirmDisconnect, setConfirmDisconnect] = useState(null);
+
+  // "Set up / manage app credentials" modal state.
+  const [credsPlatform, setCredsPlatform] = useState(null);
+  const [credsLoading, setCredsLoading] = useState(false);
+  const [credsBusy, setCredsBusy] = useState(false);
+  const [idValue, setIdValue] = useState('');
+  const [secretValue, setSecretValue] = useState('');
+
   const [searchParams, setSearchParams] = useSearchParams();
 
   const load = useCallback(async () => {
     try {
       const { data } = await socialSchedulerApi.listPlatforms();
       setConnections(Array.isArray(data) ? data : []);
+      if (isAdmin) {
+        try {
+          const creds = await socialSchedulerApi.listPlatformCredentials();
+          setCredentials(Array.isArray(creds.data) ? creds.data : []);
+        } catch (err) {
+          // The cards still work without the operator credential summary.
+          toast.error(getErrorMessage(err, 'Failed to load app credentials'));
+        }
+      }
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to load platform connections'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     load();
@@ -111,6 +146,70 @@ export default function SocialSettingsPage() {
     }
   };
 
+  const openCredentialsModal = async (platform) => {
+    setCredsPlatform(platform);
+    setIdValue('');
+    setSecretValue('');
+    setCredsLoading(true);
+    try {
+      const { data } = await socialSchedulerApi.listPlatformCredentials();
+      const rows = Array.isArray(data) ? data : [];
+      setCredentials(rows);
+      const row = rows.find((c) => c.platform === platform);
+      if (row?.source === 'database' && row.identifier) {
+        setIdValue(row.identifier);
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not load the current app credentials'));
+    } finally {
+      setCredsLoading(false);
+    }
+  };
+
+  const saveCredentials = async () => {
+    const platform = credsPlatform;
+    if (!platform) return;
+    const fields = CREDENTIAL_FIELDS[platform];
+    const identifier = idValue.trim();
+    const secret = secretValue;
+    if (!identifier || !secret) {
+      toast.error(`Both ${fields.identifierLabel} and ${fields.secretLabel} are required.`);
+      return;
+    }
+    const label = PLATFORMS.find((p) => p.id === platform)?.label || platform;
+    setCredsBusy(true);
+    try {
+      await socialSchedulerApi.savePlatformCredentials(platform, {
+        [fields.identifier]: identifier,
+        [fields.secret]: secret,
+      });
+      toast.success(`${label} app credentials saved`);
+      setCredsPlatform(null);
+      await load();
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not save app credentials'));
+    } finally {
+      setCredsBusy(false);
+    }
+  };
+
+  const removeCredentials = async () => {
+    const platform = credsPlatform;
+    if (!platform) return;
+    const label = PLATFORMS.find((p) => p.id === platform)?.label || platform;
+    setCredsBusy(true);
+    try {
+      const { data } = await socialSchedulerApi.deletePlatformCredentials(platform);
+      toast.success(data?.message || `${label} app credentials removed`);
+      setCredsPlatform(null);
+      await load();
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not remove app credentials'));
+    } finally {
+      setCredsBusy(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
@@ -120,6 +219,8 @@ export default function SocialSettingsPage() {
   }
 
   const connectedCount = connections.filter((c) => c.connected).length;
+  const credsPlatformLabel = PLATFORMS.find((p) => p.id === credsPlatform)?.label || credsPlatform || '';
+  const activeCred = credentials.find((c) => c.platform === credsPlatform);
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -132,7 +233,9 @@ export default function SocialSettingsPage() {
       <div className="grid gap-5 md:grid-cols-3">
         {PLATFORMS.map((p) => {
           const conn = connections.find((c) => c.platform === p.id) || { platform: p.id, connected: false, configured: false };
+          const cred = credentials.find((c) => c.platform === p.id);
           const busy = pending === p.id;
+          const operatorManaged = Boolean(cred?.source === 'database');
           return (
             <div key={p.id} className="card flex flex-col p-6" data-testid={`platform-card-${p.id}`}>
               <div className="flex items-start justify-between gap-3">
@@ -169,14 +272,25 @@ export default function SocialSettingsPage() {
 
               <div className="mt-auto pt-5">
                 {!conn.configured ? (
-                  <div>
-                    <button className="btn-secondary w-full" disabled title="Not configured on this instance">
-                      Connect
-                    </button>
-                    <p className="mt-2 text-xs text-zinc-500">
-                      Not available on this instance — the operator has not set up {p.label} API credentials.
-                    </p>
-                  </div>
+                  isAdmin ? (
+                    <div>
+                      <button className="btn-secondary w-full" onClick={() => openCredentialsModal(p.id)}>
+                        Set up app credentials
+                      </button>
+                      <p className="mt-2 text-xs text-zinc-500">
+                        {p.label} is not configured yet. Add this instance's OAuth app credentials to enable Connect.
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <button className="btn-secondary w-full" disabled title="Not configured on this instance">
+                        Connect
+                      </button>
+                      <p className="mt-2 text-xs text-zinc-500">
+                        Not available on this instance — the operator has not set up {p.label} API credentials.
+                      </p>
+                    </div>
+                  )
                 ) : conn.connected ? (
                   <div className="flex gap-2">
                     <button className="btn-secondary flex-1" onClick={() => connect(p.id)} disabled={Boolean(pending)}>
@@ -197,6 +311,14 @@ export default function SocialSettingsPage() {
                     Connect {p.label.split(' ')[0]}
                   </button>
                 )}
+                {isAdmin && operatorManaged && (
+                  <button
+                    className="mt-3 w-full border-t border-surface-700/70 pt-3 text-center text-xs font-medium text-zinc-400 transition hover:text-accent-300"
+                    onClick={() => openCredentialsModal(p.id)}
+                  >
+                    Manage app credentials
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -210,8 +332,105 @@ export default function SocialSettingsPage() {
           <li>Expired access tokens are refreshed automatically where the platform allows it; otherwise the platform shows “Reconnect needed” here and that publish fails with a clear reason.</li>
           <li>Instagram fetches the video from this server, so the API must be publicly reachable for Reels to work.</li>
           <li>Disconnecting removes the stored tokens immediately. Already scheduled posts to that platform will fail until you reconnect.</li>
+          {isAdmin && (
+            <li>
+              App credentials saved here are stored in the database and override the server's environment values for
+              this platform. Secrets are write-only and never shown again after saving.
+            </li>
+          )}
         </ul>
       </div>
+
+      {/* Operator app-credentials modal */}
+      <Modal
+        open={Boolean(credsPlatform)}
+        onClose={() => !credsBusy && setCredsPlatform(null)}
+        title={`${credsPlatformLabel} app credentials`}
+      >
+        {credsLoading ? (
+          <div className="flex h-32 items-center justify-center">
+            <Spinner />
+          </div>
+        ) : (
+          <>
+            <p className="text-sm text-zinc-400">
+              These are the OAuth app credentials for this <strong className="text-zinc-300">whole instance</strong> —
+              the app users sign in to when they connect {credsPlatformLabel}. Saved values are stored in the database
+              and override the server's environment settings.
+            </p>
+            {activeCred?.source === 'database' && (
+              <p className="mt-2 rounded-lg border border-surface-700 bg-surface-800/60 p-3 text-xs text-zinc-400">
+                Currently stored in the database{activeCred.identifier ? ` — ${CREDENTIAL_FIELDS[credsPlatform]?.identifierLabel || 'ID'}: ${activeCred.identifier}` : ''}.
+                The secret is not shown again; enter it once more to replace it.
+              </p>
+            )}
+            <form
+              className="mt-5 space-y-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                saveCredentials();
+              }}
+            >
+              <div>
+                <label htmlFor={`cred-id-${credsPlatform}`} className="input-label">
+                  {CREDENTIAL_FIELDS[credsPlatform]?.identifierLabel || 'Client ID'}
+                </label>
+                <input
+                  id={`cred-id-${credsPlatform}`}
+                  className="input-field"
+                  value={idValue}
+                  onChange={(e) => setIdValue(e.target.value)}
+                  placeholder={CREDENTIAL_FIELDS[credsPlatform]?.identifierLabel || 'ID'}
+                  autoComplete="off"
+                  required
+                />
+              </div>
+              <div>
+                <label htmlFor={`cred-secret-${credsPlatform}`} className="input-label">
+                  {CREDENTIAL_FIELDS[credsPlatform]?.secretLabel || 'Client Secret'}
+                </label>
+                <input
+                  id={`cred-secret-${credsPlatform}`}
+                  type="password"
+                  className="input-field"
+                  value={secretValue}
+                  onChange={(e) => setSecretValue(e.target.value)}
+                  placeholder={
+                    activeCred?.has_secret ? 'Enter again to replace the saved secret' : 'Required'
+                  }
+                  autoComplete="new-password"
+                  required
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                {activeCred?.source === 'database' && (
+                  <button
+                    type="button"
+                    className="btn-danger"
+                    onClick={removeCredentials}
+                    disabled={credsBusy}
+                  >
+                    {credsBusy && <Spinner />}
+                    Remove saved credentials
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setCredsPlatform(null)}
+                  disabled={credsBusy}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary" disabled={credsBusy}>
+                  {credsBusy && <Spinner />}
+                  Save credentials
+                </button>
+              </div>
+            </form>
+          </>
+        )}
+      </Modal>
 
       <Modal
         open={Boolean(confirmDisconnect)}

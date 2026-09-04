@@ -34,6 +34,7 @@ from api.v1.live import router as live_router
 from api.v1.system_queues import router as system_queues_router
 from api.v1.admin import router as admin_router
 from api.v1.social_scheduler import router as social_scheduler_router, UPLOADS_URL_PREFIX
+from api.v1.user_data import router as user_data_router
 from core.config import settings
 from core.logging_config import get_logger
 try:
@@ -265,6 +266,10 @@ app.include_router(live_router)
 app.include_router(system_queues_router)
 app.include_router(admin_router)
 app.include_router(social_scheduler_router)
+# Public account-deletion endpoints (Meta User Data Deletion requirement):
+# email-confirmed, rate-limited, no account enumeration. Registered last so
+# every /api/v1/user-data/* path is served exactly by this router.
+app.include_router(user_data_router)
 
 # Uploaded videos for the social scheduler. Instagram's Graph API downloads
 # the video from a public URL rather than accepting an upload, so the files
