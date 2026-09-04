@@ -59,7 +59,12 @@ from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 
 logger = get_logger(__name__)
 
-PLATFORM_LABELS = {"youtube": "YouTube", "instagram": "Instagram", "tiktok": "TikTok"}
+PLATFORM_LABELS = {
+    "youtube": "YouTube Shorts",
+    "instagram": "Instagram Reels",
+    "tiktok": "TikTok",
+    "facebook": "Facebook Reels",
+}
 # A post stuck in "posting" longer than this (worker died mid-upload) is
 # handed back to the dispatcher on the next tick.
 STALE_POSTING_SECONDS = int(os.getenv("SOCIAL_POSTING_STALE_SECONDS", str(2 * 60 * 60)))
@@ -223,6 +228,7 @@ def publish_post(post_id: str) -> dict:
             "youtube_title": post.youtube_title or "",
             "instagram_caption": post.instagram_caption or "",
             "tiktok_caption": post.tiktok_caption or "",
+            "platform_copy": post.platform_copy or {},
         }
         # One pending result row per platform up front, so the UI can show
         # per-platform progress while uploads run.
@@ -281,6 +287,20 @@ def publish_post(post_id: str) -> dict:
 # ── Per-platform publish ─────────────────────────────────────────────────────
 
 
+def _join_copy(*parts: str) -> str:
+    """Join copy blocks without creating doubled blank lines."""
+    return "\n\n".join(str(part).strip() for part in parts if part and str(part).strip())
+
+
+def _platform_copy(post: dict, platform: str) -> dict[str, str]:
+    """Return structured copy for one platform, tolerating legacy snapshots."""
+    raw = (post.get("platform_copy") or {}).get(platform) or {}
+    return {
+        key: str(raw.get(key) or "").strip()
+        for key in ("title", "description", "hashtags")
+    }
+
+
 async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> dict:
     """Publish one post to one platform. Never raises — returns an outcome dict."""
     label = PLATFORM_LABELS.get(platform, platform)
@@ -318,14 +338,26 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
         except Exception as exc:
             return _failure(f"{label} access expired and could not be renewed: {exc}")
 
-    caption = post["caption"] + (f"\n\n{post['hashtags']}" if post["hashtags"] else "")
     video_path = post["video_path"]
+    platform_copy = _platform_copy(post, platform)
+    common_caption = _join_copy(post["caption"], post["hashtags"])
+    structured_caption = _join_copy(
+        platform_copy.get("title", ""),
+        platform_copy.get("description", ""),
+        platform_copy.get("hashtags", ""),
+    )
+    legacy_caption = {
+        "instagram": post.get("instagram_caption", ""),
+        "tiktok": post.get("tiktok_caption", ""),
+    }.get(platform, "")
+    platform_caption = structured_caption or legacy_caption or common_caption
     try:
         if platform == "youtube":
             result = await service.upload_short(
                 video_path=video_path,
-                title=post["youtube_title"] or post["title"],
-                description=caption,
+                title=platform_copy.get("title") or post["youtube_title"] or post["title"],
+                description=_join_copy(platform_copy.get("description", ""), platform_copy.get("hashtags", ""))
+                or common_caption,
                 access_token=tokens.access_token,
                 refresh_token=tokens.refresh_token,
             )
@@ -340,7 +372,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
             result = await service.publish_reel(
                 ig_user_id=account_id,
                 video_url=post["video_url"],
-                caption=post["instagram_caption"] or caption,
+                caption=platform_caption or post["instagram_caption"] or common_caption,
                 access_token=tokens.access_token,
             )
             return _success(result["media_id"], result["post_url"])
@@ -348,7 +380,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
         if platform == "facebook":
             result = await service.upload_video(
                 video_path=video_path,
-                description=caption,
+                description=platform_caption,
                 access_token=tokens.access_token,
             )
             return _success(result["video_id"], result["video_url"])
@@ -356,7 +388,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
         if platform == "tiktok":
             result = await service.upload_video(
                 video_path=video_path,
-                caption=post["tiktok_caption"] or caption,
+                caption=platform_caption or post["tiktok_caption"] or common_caption,
                 access_token=tokens.access_token,
             )
             return _success(result["publish_id"], result["video_url"])

@@ -278,12 +278,21 @@ function EditPostModal({ post, onClose, onSaved }) {
       youtube_title: post.youtube_title || '',
       instagram_caption: post.instagram_caption || '',
       tiktok_caption: post.tiktok_caption || '',
+      platform_copy: post.platform_copy || {},
     });
   }, [post]);
 
   if (!post || !form) return null;
 
   const update = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+  const updateCopy = (platform, field) => (e) =>
+    setForm((f) => ({
+      ...f,
+      platform_copy: {
+        ...f.platform_copy,
+        [platform]: { ...(f.platform_copy[platform] || {}), [field]: e.target.value },
+      },
+    }));
   const toggle = (id) =>
     setForm((f) => ({
       ...f,
@@ -307,6 +316,7 @@ function EditPostModal({ post, onClose, onSaved }) {
         youtube_title: form.youtube_title,
         instagram_caption: form.instagram_caption,
         tiktok_caption: form.tiktok_caption,
+        platform_copy: form.platform_copy,
         ...(requeue ? { status: 'pending' } : {}),
       });
       toast.success(requeue ? 'Post updated and re-queued' : 'Post updated');
@@ -363,18 +373,51 @@ function EditPostModal({ post, onClose, onSaved }) {
           </div>
         </div>
         <details className="rounded-lg border border-surface-700 bg-surface-800/60 p-3">
-          <summary className="cursor-pointer text-sm font-medium text-accent-400">Per-platform text</summary>
-          <div className="mt-3 space-y-3">
+          <summary className="cursor-pointer text-sm font-medium text-accent-400">Customise per-platform text</summary>
+          <div className="mt-3 space-y-4">
+            {PLATFORMS.filter((platform) => form.platforms.includes(platform.id)).map((platform) => {
+              const values = form.platform_copy[platform.id] || {};
+              return (
+                <div key={platform.id} className="rounded-lg border border-surface-700 bg-surface-900/60 p-3">
+                  <p className="mb-3 text-sm font-medium text-zinc-200">{platform.label}</p>
+                  <input
+                    className="input-field mb-2"
+                    value={values.title || ''}
+                    onChange={updateCopy(platform.id, 'title')}
+                    maxLength={platform.id === 'youtube' ? 100 : 2200}
+                    placeholder="Title or caption hook"
+                    aria-label={`${platform.label} title`}
+                  />
+                  <textarea
+                    className="input-field mb-2 min-h-[80px]"
+                    value={values.description || ''}
+                    onChange={updateCopy(platform.id, 'description')}
+                    maxLength={5000}
+                    placeholder="Description"
+                    aria-label={`${platform.label} description`}
+                  />
+                  <input
+                    className="input-field"
+                    value={values.hashtags || ''}
+                    onChange={updateCopy(platform.id, 'hashtags')}
+                    maxLength={1000}
+                    placeholder="#hashtags"
+                    aria-label={`${platform.label} hashtags`}
+                  />
+                </div>
+              );
+            })}
+            <p className="text-xs text-zinc-500">Existing legacy caption overrides are kept below for older posts.</p>
             <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-400">YouTube title</label>
+              <label className="mb-1 block text-xs font-medium text-zinc-400">YouTube title fallback</label>
               <input className="input-field" value={form.youtube_title} onChange={update('youtube_title')} maxLength={100} />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-400">Instagram caption</label>
+              <label className="mb-1 block text-xs font-medium text-zinc-400">Instagram caption fallback</label>
               <textarea className="input-field" value={form.instagram_caption} onChange={update('instagram_caption')} maxLength={2200} />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-400">TikTok caption</label>
+              <label className="mb-1 block text-xs font-medium text-zinc-400">TikTok caption fallback</label>
               <textarea className="input-field" value={form.tiktok_caption} onChange={update('tiktok_caption')} maxLength={2200} />
             </div>
           </div>
