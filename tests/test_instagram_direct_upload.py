@@ -23,7 +23,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
@@ -286,6 +286,64 @@ class DirectUploadTests(unittest.TestCase):
         self.assertNotIn("upload_type", container["body"])
         # No rupload call at all — Meta fetches the file itself.
         self.assertEqual([call for call in session.calls if "rupload" in call["url"]], [])
+
+    # ── Disabled direct upload ───────────────────────────────────────────────
+
+    def test_disabled_direct_upload_with_unreachable_url_says_enable_it(self):
+        """When direct upload is off AND the stored URL is not public, the
+        error must point at the fix (re-enable direct upload) rather than
+        pretending the file is missing."""
+        session = self._routes()
+        with patch.object(settings, "INSTAGRAM_DIRECT_UPLOAD", False):
+            with self.assertRaises(Exception) as caught:
+                self._run(
+                    session,
+                    video_path=self._tmp.name,
+                    video_url="http://localhost:8000/uploads/x.mp4",
+                )
+        message = str(caught.exception)
+        self.assertIn("INSTAGRAM_DIRECT_UPLOAD", message)
+        self.assertIn("stored on this server", message)
+        self.assertIn("PUBLIC_API_URL", message)
+        self.assertEqual(session.calls, [])
+
+    # ── Transient retry ──────────────────────────────────────────────────────
+
+    def test_transient_transport_errors_are_retried(self):
+        calls = {"n": 0}
+
+        async def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise instagram_module.aiohttp.ClientError("connection reset")
+            return "ok"
+
+        with patch.object(instagram_module.asyncio, "sleep", new=AsyncMock()):
+            result = asyncio.run(instagram_module._retry_transient(flaky, attempts=3))
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls["n"], 3)
+
+    def test_transient_retry_gives_up_and_raises(self):
+        async def always_fails():
+            raise instagram_module.aiohttp.ClientError("connection reset")
+
+        with patch.object(instagram_module.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(instagram_module.aiohttp.ClientError):
+                asyncio.run(instagram_module._retry_transient(always_fails, attempts=2))
+
+    def test_transient_retry_does_not_retry_business_errors(self):
+        calls = {"n": 0}
+
+        async def rejected():
+            calls["n"] += 1
+            raise ValueError("Meta rejected the container")
+
+        with patch.object(instagram_module.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(ValueError):
+                asyncio.run(instagram_module._retry_transient(rejected, attempts=3))
+
+        self.assertEqual(calls["n"], 1, "non-transport failures must not be retried")
 
     # ── is_public_video_url ──────────────────────────────────────────────────
 

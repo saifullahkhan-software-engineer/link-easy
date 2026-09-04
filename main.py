@@ -77,6 +77,22 @@ async def lifespan(app: FastAPI):
     for _name, _effect in settings.missing_optional_settings().items():
         logger.warning("Configuration missing: %s is not set — %s", _name, _effect)
 
+    # Instagram Reels are uploaded by the app to its own storage, so the
+    # default direct (resumable) upload never needs a public URL. If an
+    # operator has disabled direct upload AND there is no public address, every
+    # scheduled Instagram post is guaranteed to fail — say so at boot instead
+    # of inside a failed publish hours later.
+    if not settings.INSTAGRAM_DIRECT_UPLOAD:
+        from services.social.instagram import is_public_video_url
+
+        if not is_public_video_url(settings.PUBLIC_API_URL):
+            logger.warning(
+                "Configuration warning: INSTAGRAM_DIRECT_UPLOAD is disabled and PUBLIC_API_URL is "
+                "not a publicly reachable address, so Instagram Reels cannot be published. Re-enable "
+                "INSTAGRAM_DIRECT_UPLOAD (videos are already stored on this server) or set "
+                "PUBLIC_API_URL to a public URL."
+            )
+
     # Ensure tables exist, then apply pending schema migrations.  This project
     # does not have Alembic revisions for the original/base tables, so a brand
     # new database still needs create_all() first.  create_all() never adds new
