@@ -189,16 +189,150 @@ class PublishSocialPostTests(unittest.TestCase):
         self.assertIn("missing on the server", self._state(post_id)[1]["youtube"].error)
         self.assertIsNotNone(YouTubeService)
 
-    def test_instagram_requires_a_public_video_url(self):
+    # ── Instagram: the local file, not a public URL ──────────────────────────
+
+    def test_instagram_publishes_the_local_file_without_a_public_url(self):
+        """The instance runs on a laptop: its video_url is localhost, and the
+        worker must still hand Instagram the stored file."""
         post_id = self._post(["instagram"])
         with self.Session() as s:
             s.get(SocialPost, post_id).video_url = "http://localhost:8000/uploads/social/clip.mp4"
             s.commit()
         self._connect("instagram", expires_in=3600, refresh=None)
-        with patch("services.social.instagram.InstagramService.publish_reel", AsyncMock(side_effect=AssertionError)):
+        ig = AsyncMock(return_value={"media_id": "media-1", "post_url": "https://www.instagram.com/reel/media-1/"})
+        with patch("services.social.instagram.InstagramService.publish_reel", ig):
             outcome = tasks.publish_post(post_id)
+
+        self.assertEqual(outcome["status"], "posted", outcome)
+        self.assertEqual(self._state(post_id)[1]["instagram"].status, "posted")
+        # The file is what travels; the unreachable URL is passed along only so
+        # the service can fall back to it if it ever is public.
+        self.assertEqual(ig.call_args.kwargs["video_path"], self.video)
+        self.assertEqual(ig.call_args.kwargs["access_token"], "old-access")
+
+    def test_a_missing_video_file_is_explained_rather_than_raised(self):
+        """Direct upload needs the stored file, so its absence has to say
+        "upload it again" — not surface a FileNotFoundError traceback."""
+        post_id = self._post(["instagram"])
+        with self.Session() as s:
+            post = s.get(SocialPost, post_id)
+            post.video_url = "http://localhost:8000/uploads/social/clip.mp4"
+            post.video_path = os.path.join(_tmp, "gone.mp4")
+            s.commit()
+        self._connect("instagram", expires_in=3600, refresh=None)
+        # The real service raises FileNotFoundError for a missing path; only
+        # that exception type is translated, so use it rather than a stub.
+        with patch("services.social.instagram.InstagramService.publish_reel", AsyncMock(side_effect=FileNotFoundError("gone"))):
+            outcome = tasks.publish_post(post_id)
+
         self.assertEqual(outcome["status"], "failed")
-        self.assertIn("PUBLIC_API_URL", self._state(post_id)[1]["instagram"].error)
+        error = self._state(post_id)[1]["instagram"].error
+        self.assertIn("video file is missing", error)
+        self.assertIn("Upload it again", error)
+
+    def test_instagram_url_flow_is_still_used_when_direct_upload_is_off(self):
+        """An instance with a real CDN can turn the resumable upload off."""
+        post_id = self._post(["instagram"], video_url="https://cdn.example.com/clip.mp4")
+        self._connect("instagram", expires_in=3600, refresh=None)
+        ig = AsyncMock(return_value={"media_id": "media-1", "post_url": "https://www.instagram.com/reel/media-1/"})
+        with patch.object(settings, "INSTAGRAM_DIRECT_UPLOAD", False), \
+             patch("services.social.instagram.InstagramService.publish_reel", ig):
+            outcome = tasks.publish_post(post_id)
+
+        self.assertEqual(outcome["status"], "posted")
+        # The worker always hands over both; publish_reel picks the flow from
+        # the flag (pinned in tests/test_instagram_direct_upload.py).
+        self.assertEqual(ig.call_args.kwargs["video_url"], "https://cdn.example.com/clip.mp4")
+        self.assertEqual(ig.call_args.kwargs["video_path"], self.video)
+
+    def test_instagram_url_flow_refuses_an_unreachable_url_when_direct_upload_is_off(self):
+        post_id = self._post(["instagram"], video_url="http://192.168.1.20:8000/uploads/clip.mp4")
+        self._connect("instagram", expires_in=3600, refresh=None)
+        with patch.object(settings, "INSTAGRAM_DIRECT_UPLOAD", False), \
+             patch("services.social.instagram.InstagramService.publish_reel", AsyncMock(side_effect=AssertionError)):
+            outcome = tasks.publish_post(post_id)
+
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("INSTAGRAM_DIRECT_UPLOAD", self._state(post_id)[1]["instagram"].error)
+
+    # ── YouTube: filing the Short into playlists ─────────────────────────────
+
+    def test_playlists_are_filled_after_a_successful_upload(self):
+        post_id = self._post(["youtube"], youtube_playlist_ids=["PLabc", "PLxyz"])
+        self._connect("youtube", expires_in=3600)
+        yt = AsyncMock(return_value={"video_id": "vid1", "video_url": "https://www.youtube.com/shorts/vid1"})
+        add = AsyncMock(return_value={"added": ["PLabc", "PLxyz"], "failed": []})
+        with patch("services.social.youtube.YouTubeService.upload_short", yt), \
+             patch("services.social.youtube.YouTubeService.add_to_playlists", add):
+            outcome = tasks.publish_post(post_id)
+
+        self.assertEqual(outcome["status"], "posted")
+        status, results = self._state(post_id)
+        self.assertEqual(status, "posted")
+        self.assertEqual(results["youtube"].status, "posted")
+        self.assertEqual(results["youtube"].error, "")
+        self.assertIn("2 playlists", results["youtube"].note)
+        # the uploaded video — not a title or the post id — is what gets filed
+        self.assertEqual(add.call_args.args[0], "vid1")
+        self.assertEqual(add.call_args.args[1], ["PLabc", "PLxyz"])
+        self.assertEqual(add.call_args.args[2], "old-access")
+
+    def test_a_playlist_problem_is_a_note_not_a_failed_post(self):
+        """The Short is already public; demoting the post to failed would hide
+        a working publish and invite a duplicate upload."""
+        post_id = self._post(["youtube"], youtube_playlist_ids=["PLabc", "PLgone"])
+        self._connect("youtube", expires_in=3600)
+        yt = AsyncMock(return_value={"video_id": "vid1", "video_url": "https://www.youtube.com/shorts/vid1"})
+        add = AsyncMock(return_value={"added": ["PLabc"], "failed": [{"playlist_id": "PLgone", "error": "Playlist not found."}]})
+        with patch("services.social.youtube.YouTubeService.upload_short", yt), \
+             patch("services.social.youtube.YouTubeService.add_to_playlists", add):
+            outcome = tasks.publish_post(post_id)
+
+        self.assertEqual(outcome["status"], "posted")
+        result = self._state(post_id)[1]["youtube"]
+        self.assertEqual(result.status, "posted")
+        self.assertEqual(result.error, "")
+        self.assertIn("1 of 2 playlists", result.note)
+        self.assertIn("PLgone", result.note)
+        self.assertIn("Playlist not found.", result.note)
+
+    def test_an_unexpected_playlist_crash_cannot_fail_the_publish(self):
+        post_id = self._post(["youtube"], youtube_playlist_ids=["PLabc"])
+        self._connect("youtube", expires_in=3600)
+        yt = AsyncMock(return_value={"video_id": "vid1", "video_url": "https://www.youtube.com/shorts/vid1"})
+        add = AsyncMock(side_effect=RuntimeError("google exploded"))
+        with patch("services.social.youtube.YouTubeService.upload_short", yt), \
+             patch("services.social.youtube.YouTubeService.add_to_playlists", add):
+            outcome = tasks.publish_post(post_id)
+
+        self.assertEqual(outcome["status"], "posted")
+        result = self._state(post_id)[1]["youtube"]
+        self.assertEqual(result.status, "posted")
+        self.assertIn("could not be updated", result.note)
+
+    def test_no_playlist_selection_never_calls_the_playlist_api(self):
+        post_id = self._post(["youtube"])
+        self._connect("youtube", expires_in=3600)
+        yt = AsyncMock(return_value={"video_id": "vid1", "video_url": "https://www.youtube.com/shorts/vid1"})
+        add = AsyncMock(side_effect=AssertionError("playlist step ran with nothing selected"))
+        with patch("services.social.youtube.YouTubeService.upload_short", yt), \
+             patch("services.social.youtube.YouTubeService.add_to_playlists", add):
+            outcome = tasks.publish_post(post_id)
+
+        self.assertEqual(outcome["status"], "posted")
+        self.assertEqual(self._state(post_id)[1]["youtube"].note, "")
+
+    def test_playlist_ids_reach_the_worker_from_an_older_post_shape(self):
+        """A post row written before the column existed has no playlist list;
+        the snapshot must not KeyError the whole publish."""
+        post_id = self._post(["youtube"])
+        self._connect("youtube", expires_in=3600)
+        yt = AsyncMock(return_value={"video_id": "vid1", "video_url": "https://www.youtube.com/shorts/vid1"})
+        with patch("services.social.youtube.YouTubeService.upload_short", yt), \
+             patch("services.social.youtube.YouTubeService.add_to_playlists", AsyncMock()) as add:
+            outcome = tasks.publish_post(post_id)
+        self.assertEqual(outcome["status"], "posted")
+        add.assert_not_called()
 
     def test_dispatcher_queues_each_due_post_once_under_a_lease(self):
         due = self._post(["youtube"])

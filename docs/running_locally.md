@@ -167,9 +167,17 @@ TIKTOK_CLIENT_SECRET=
 TIKTOK_REDIRECT_URI=http://localhost:8000/api/v1/social-scheduler/platforms/tiktok/callback
 
 # Public base URL of this API (no trailing slash). Used to build absolute
-# video URLs handed to Instagram and, when a *_REDIRECT_URI is left empty, the
-# default callback URL. For local dev: http://localhost:8000
+# video URLs and, when a *_REDIRECT_URI is left empty, the default callback
+# URL. For local dev: http://localhost:8000 — that value is *not* publicly
+# reachable, which is fine: Instagram no longer needs a public video URL (see
+# "Instagram publishing" below). Only set this to a real hostname if you host
+# the API somewhere reachable from the internet.
 PUBLIC_API_URL=http://localhost:8000
+
+# Instagram: push the stored video file to Meta (resumable upload) instead of
+# handing Meta a video_url for its crawler to download. Leave this on unless
+# the instance has a real CDN for uploads and you want the old URL flow.
+INSTAGRAM_DIRECT_UPLOAD=true
 
 # Where uploaded videos are stored locally.
 UPLOAD_DIR=./uploads/social
@@ -195,10 +203,91 @@ Notes:
   reuses the exact same verifier when exchanging the code. Re-using a Google
   authorization code is never valid — each code is single-use, so always start
   a fresh connection from the UI.
-* `PUBLIC_API_URL` must be reachable from the server itself for Instagram
-  publishing; for local dev `http://localhost:8000` is fine.
 * Credentials are never written to logs or returned by the API; tokens are
   AES-256-GCM encrypted before they touch the database.
+
+### Instagram publishing (no tunnel, no CDN)
+
+Instagram's Graph API can take a Reel two ways: it downloads the video from a
+`video_url` (which must be reachable from Meta's servers), or you upload the
+bytes yourself. LinkEasy uses the second one by default
+(`INSTAGRAM_DIRECT_UPLOAD=true`), so a laptop running the app can publish
+Reels with no ngrok, no `PUBLIC_API_URL` and no public web server:
+
+1. a *resumable* container is created on `graph.facebook.com`;
+2. the file stored under `UPLOAD_DIR` is streamed to the
+   `rupload.facebook.com` URI that response returns;
+3. the container is polled until processing finishes, then published.
+
+If the direct upload fails and the post does have a genuinely public
+`video_url`, the worker retries through the URL flow. Set
+`INSTAGRAM_DIRECT_UPLOAD=false` to force the URL flow — an instance that does
+so must have a `PUBLIC_API_URL` that the internet can reach, otherwise
+Instagram publishing fails with a message saying exactly that.
+
+Two things to know about the resumable flow: it is available to apps using
+**Facebook Login for Business** (which is what the Instagram connection
+already is), and long uploads are given a generous timeout — a multi-gigabyte
+Reel is fine, but the app must stay running until the post is published.
+
+### Facebook Groups (manual sharing)
+
+Meta removed the Groups API on 22 Apr 2024 — `publish_to_groups` and the group
+feed endpoints went with it, in every Graph API version, with no replacement
+announced. Zapier, Make, Zoho Social, Buffer and Hootsuite all lost group
+posting that same day. There is therefore **no way for LinkEasy to publish a
+Reel into a group**, and no setting will change that.
+
+What the scheduler offers instead is a checklist:
+
+* save your groups once (`GET/POST /api/v1/social-scheduler/share-targets` — a
+  name plus the group's URL; the list is per user and is a bookmark list, not a
+  credential);
+* tick the ones a Reel should go to on the upload page — they are snapshotted
+  onto the post, so deleting a saved group never blanks an older post;
+* after publishing, the post shows the checklist: a **Copy caption** button and
+  one link per group, so each share is two clicks.
+
+The worker publishes to the Facebook *Page* only, and says so: the result row
+carries a note ("Published to your Facebook Page. Share it manually to N
+groups…") rather than pretending the groups were reached.
+
+### YouTube playlists
+
+The upload page lists the connected channel's playlists so a Short can be
+filed into one or more of them after it uploads. That needs the
+`https://www.googleapis.com/auth/youtube` scope in the Google OAuth client's
+scope list; a connection made before the scope existed still works for
+uploading, but playlist inserts come back `403` until YouTube is reconnected
+(the post shows that as a note instead of failing).
+
+## AI copy extraction (optional)
+
+The scheduler's upload page can split one large pasted message into the
+per-platform `title` / `description` / `hashtags` fields. That is
+`POST /api/v1/social-scheduler/parse-copy`, backed by Groq
+(`services/ai/copy_parser.py`).
+
+```env
+# Groq (console.groq.com → API keys). Backend only — this key is read by the
+# API process and never reaches the frontend bundle.
+GROQ_API_KEY=
+GROQ_MODEL=llama-3.3-70b-versatile
+```
+
+Without a key the endpoint answers `503` and the upload page keeps working
+through its own local parser (the "Use text to fill fields" button), so this
+is a genuine opt-in and nothing else needs one.
+
+Two more knobs exist if you need them: `GROQ_MAX_SOURCE_CHARS` (default
+`50000` — a longer paste answers `413`) and `GROQ_TIMEOUT_SECONDS` (default
+`45`). Requests are metered per user like the other expensive operations
+(`social:parse-copy`, 60/hour).
+
+A Google Cloud provider (Gemini on the AI Studio API, or Vertex AI) is the
+planned second option. The prompt, the JSON repair and the field validation
+already live behind a provider seam, so adding one means a new parser class
+plus its own key/model settings — no API or frontend changes.
 
 ## Troubleshooting
 

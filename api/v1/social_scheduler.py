@@ -27,7 +27,12 @@ Route map (prefix /api/v1/social-scheduler):
   PATCH  /posts/{id}                  edit / reschedule / cancel
   DELETE /posts/{id}
   POST   /upload                      multipart video upload → upload_id
+  POST   /parse-copy                  pasted message → per-platform copy (Groq)
   GET    /platforms                   connection status for all 4 platforms
+  GET    /platforms/youtube/playlists channel playlists for the upload editor
+  GET    /share-targets               saved manual-share destinations (FB Groups)
+  POST   /share-targets               save one
+  DELETE /share-targets/{id}          remove one
   GET    /platforms/{p}/auth-url      start OAuth (returns provider URL)
   GET    /platforms/{p}/callback      provider redirect target (unauthenticated;
                                       identity comes from the signed state)
@@ -43,6 +48,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 import uuid
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
@@ -57,9 +63,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_current_user, get_db, require_admin
+from api.rate_limit_deps import rate_limit
 from core.config import settings
 from models.social_scheduler import (
     PlatformCredential,
+    ShareTarget,
     SocialPlatform,
     SocialPlatformConnection,
     SocialPost,
@@ -71,6 +79,8 @@ from schemas.social_scheduler import (
     PLATFORM_LABELS,
     PLATFORM_VALUES,
     CalendarDay,
+    ParseCopyRequest,
+    ParseCopyResponse,
     PlatformAuthUrlResponse,
     PlatformConnectionResponse,
     PlatformCredentialsIn,
@@ -81,11 +91,21 @@ from schemas.social_scheduler import (
     PostDeleteResponse,
     PostResponse,
     PostUpdate,
+    ShareTargetDeleteResponse,
+    ShareTargetIn,
+    ShareTargetResponse,
     StatsResponse,
     UploadResponse,
+    YouTubePlaylist,
+    YouTubePlaylistListResponse,
+)
+from services.ai.copy_parser import (
+    CopyParseError,
+    CopyProviderUnavailable,
+    get_copy_parser,
 )
 from services.social import get_service
-from services.social.connections import apply_tokens, reconnect_required
+from services.social.connections import apply_tokens, read_tokens, reconnect_required
 from services.social.credentials import (
     apply_credentials,
     configured_from_credentials,
@@ -366,6 +386,10 @@ async def create_post(
         instagram_caption=payload.instagram_caption,
         tiktok_caption=payload.tiktok_caption,
         platform_copy=payload.platform_copy,
+        youtube_playlist_ids=payload.youtube_playlist_ids,
+        # Stored as plain dicts: the column is JSON, so pydantic models would
+        # not serialise.
+        facebook_groups=[group.model_dump() for group in payload.facebook_groups],
     )
     db.add(post)
     await db.commit()
@@ -406,12 +430,20 @@ async def update_post(
 
     update_data = payload.model_dump(exclude_unset=True)
     new_status = update_data.pop("status", None)
+    # ``model_dump`` has already turned the groups into plain dicts, so the
+    # *presence* of the key is what matters here ("not sent" vs "clear the
+    # list") and the values are read back off the validated payload below.
+    groups_were_sent = "facebook_groups" in update_data
+    update_data.pop("facebook_groups", None)
 
     if update_data and post.status == SocialPostStatus.POSTED.value:
         raise HTTPException(status_code=409, detail="A published post cannot be edited")
 
     for field, value in update_data.items():
         setattr(post, field, value)
+    if groups_were_sent:
+        # The column is JSON, so it takes plain dicts, not pydantic models.
+        post.facebook_groups = [group.model_dump() for group in payload.facebook_groups or []]
 
     if new_status == SocialPostStatus.CANCELLED.value:
         if post.status != SocialPostStatus.PENDING.value:
@@ -526,6 +558,88 @@ def _safe_remove(path: str) -> None:
         os.remove(path)
     except Exception:
         pass
+
+
+# ── AI copy extraction ───────────────────────────────────────────────────────
+
+
+@router.post(
+    "/parse-copy",
+    response_model=ParseCopyResponse,
+    dependencies=[Depends(rate_limit("social:parse-copy"))],
+)
+async def parse_platform_copy(
+    payload: ParseCopyRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Split one pasted message into per-platform title/description/hashtags.
+
+    The upload page sends the whole multi-platform message a user pasted and
+    gets back the exact ``platform_copy`` structure its editor already keeps,
+    so the response can be dropped into the form (and then into ``POST
+    /posts``) unchanged.
+
+    Groq reads the message; ``services/ai/copy_parser.py`` owns the prompt,
+    the JSON repair and the field validation. The API key is read from this
+    process's environment only — it is never accepted from, returned to or
+    visible to the client.
+
+    * 400 — nothing pasted;
+    * 413 — the message is longer than ``GROQ_MAX_SOURCE_CHARS``;
+    * 502 — the provider answered with something unusable (not JSON, or a
+      shape the schema rejects);
+    * 503 — no provider key is configured on this deployment.
+
+    The pasted text is untrusted data: it is fenced as such in the prompt and
+    only ever parsed as JSON, never interpreted (see the module docstring of
+    the copy parser for the prompt-injection reasoning).
+    """
+    source_text = payload.source_text or ""
+    if not source_text.strip():
+        raise HTTPException(status_code=400, detail="Paste a message to extract the platform copy from")
+
+    limit = settings.GROQ_MAX_SOURCE_CHARS
+    if len(source_text) > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"The pasted message is {len(source_text):,} characters — "
+                f"the maximum is {limit:,}. Paste a shorter message."
+            ),
+        )
+
+    started = time.perf_counter()
+    parser = get_copy_parser()
+    try:
+        platform_copy = await parser.aparse(source_text)
+    except CopyProviderUnavailable:
+        # A deployment without a key. The upload page falls back to its own
+        # parser, so this is a "feature off here" message, not a bug.
+        raise HTTPException(
+            status_code=503,
+            detail="AI copy extraction is not configured on this instance. Use 'Use text to fill fields' instead.",
+        )
+    except CopyParseError:
+        # The parser logged what went wrong (exception class, model name) —
+        # the client gets advice, not the model's raw reply.
+        raise HTTPException(
+            status_code=502,
+            detail="The AI service did not return usable copy. Try again, or fill the fields yourself.",
+        )
+
+    # Safe diagnostics: sizes and shape only. No key, no pasted text, no
+    # model reply — any of those could carry the user's content.
+    logger.info(
+        "Copy parsed in %dms: %d source chars → %s (provider=%s)",
+        int((time.perf_counter() - started) * 1000),
+        len(source_text),
+        ", ".join(
+            f"{platform}:{sum(1 for value in fields if value)}"
+            for platform, fields in platform_copy.model_dump().items()
+        ),
+        parser.provider,
+    )
+    return ParseCopyResponse(platform_copy=platform_copy)
 
 
 # ── platform connections ─────────────────────────────────────────────────────
@@ -668,6 +782,159 @@ async def disconnect_platform(
     await db.delete(conn)
     await db.commit()
     return PlatformDisconnectResponse(message=f"{PLATFORM_LABELS[platform]} disconnected", platform=platform)
+
+
+# ── Manual share targets (Facebook Groups) ───────────────────────────────────
+# Meta removed the Groups API on 22 Apr 2024: there is no endpoint that posts a
+# Reel into a group, and none is planned. These routes only store the
+# destinations a user cares about, so the upload page can offer a picker and a
+# published post can show a checklist. Nothing here is ever posted for them.
+@router.get("/share-targets", response_model=list[ShareTargetResponse])
+async def list_share_targets(
+    platform: str = Query("facebook", pattern="^facebook$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(ShareTarget)
+        .where(ShareTarget.owner_email == current_user.email, ShareTarget.platform == platform)
+        .order_by(ShareTarget.name.asc())
+    )
+    return result.scalars().all()
+
+
+@router.post("/share-targets", response_model=ShareTargetResponse, status_code=status.HTTP_201_CREATED)
+async def create_share_target(
+    payload: ShareTargetIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Saving the same group twice is a no-op rather than a 409: the picker's
+    # "add a group" field is used inline, and re-adding what is already there
+    # should just select it.
+    existing = (
+        await db.execute(
+            select(ShareTarget).where(
+                ShareTarget.owner_email == current_user.email,
+                ShareTarget.platform == "facebook",
+                ShareTarget.url == payload.url,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        if payload.name and existing.name != payload.name:
+            existing.name = payload.name
+            await db.commit()
+            await db.refresh(existing)
+        return existing
+
+    target = ShareTarget(
+        owner_email=current_user.email,
+        platform="facebook",
+        name=payload.name,
+        url=payload.url,
+    )
+    db.add(target)
+    try:
+        await db.commit()
+    except IntegrityError:  # raced with another tab saving the same URL
+        await db.rollback()
+        target = (
+            await db.execute(
+                select(ShareTarget).where(
+                    ShareTarget.owner_email == current_user.email,
+                    ShareTarget.platform == "facebook",
+                    ShareTarget.url == payload.url,
+                )
+            )
+        ).scalar_one()
+    await db.refresh(target)
+    return target
+
+
+@router.delete("/share-targets/{target_id}", response_model=ShareTargetDeleteResponse)
+async def delete_share_target(
+    target_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    target = (
+        await db.execute(
+            select(ShareTarget).where(
+                ShareTarget.id == target_id, ShareTarget.owner_email == current_user.email
+            )
+        )
+    ).scalar_one_or_none()
+    # 404, not 403 — the same no-existence-oracle rule as the post routes.
+    if target is None:
+        raise HTTPException(status_code=404, detail="Share target not found")
+    await db.delete(target)
+    await db.commit()
+    return ShareTargetDeleteResponse(id=target_id, message="Share target removed")
+
+
+# ── YouTube playlist picker ──────────────────────────────────────────────────
+# The upload editor needs the connected channel's playlists so a Short can be
+# filed into one or more of them. Read-only, per user, and it uses the caller's
+# own stored (decrypted) token — no other account's playlists are reachable
+# through it. Registered before the ``{platform}`` routes so the literal path
+# wins over the parameterised ones.
+@router.get("/platforms/youtube/playlists", response_model=YouTubePlaylistListResponse)
+async def list_youtube_playlists(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    conn = await _owned_connection(db, current_user.email, "youtube")
+    if conn is None:
+        raise HTTPException(
+            status_code=409,
+            detail="YouTube is not connected. Connect it in Settings, then pick playlists.",
+        )
+    try:
+        tokens = read_tokens(conn)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    service = get_service("youtube")
+    apply_credentials(
+        service, "youtube", effective_credentials("youtube", await load_credential(db, "youtube"))
+    )
+
+    # A token Google has already expired cannot list anything, so renew it the
+    # same way the worker does before publishing. YouTube hands out refresh
+    # tokens (unlike Facebook), so this is normally silent; if the renewal
+    # fails the user is told to reconnect instead of being shown raw OAuth.
+    if tokens.is_expired:
+        try:
+            renewed = await service.refresh_access_token(
+                tokens.refresh_token, current_access_token=tokens.access_token
+            )
+            apply_tokens(
+                conn,
+                access_token=renewed.get("access_token", ""),
+                refresh_token=renewed.get("refresh_token"),
+                expires_in=renewed.get("expires_in"),
+            )
+            conn.updated_at = _now()
+            await db.commit()
+            tokens = read_tokens(conn)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"YouTube access has expired and could not be renewed: {exc}",
+            )
+
+    try:
+        items = await service.list_playlists(tokens.access_token, tokens.refresh_token)
+    except Exception as exc:
+        # A 502, not a 500: this is an upstream (Google) failure. The picker
+        # degrades gracefully — scheduling and publishing work without it.
+        raise HTTPException(status_code=502, detail=str(exc)[:300] or "Could not load playlists")
+
+    return YouTubePlaylistListResponse(
+        playlists=[YouTubePlaylist(**item) for item in items],
+        channel=conn.account_name or "",
+    )
 
 
 # ── Platform app credentials (operator-set DB overrides of the env pair) ─────

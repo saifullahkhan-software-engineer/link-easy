@@ -54,6 +54,7 @@ from models.social_scheduler import (
 from services.social import get_service
 from services.social.connections import PlatformTokens, apply_tokens, read_tokens
 from services.social.credentials import apply_credentials_sync
+from services.social.instagram import is_public_video_url
 from worker.celery_app import celery_app
 from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 
@@ -229,6 +230,10 @@ def publish_post(post_id: str) -> dict:
             "instagram_caption": post.instagram_caption or "",
             "tiktok_caption": post.tiktok_caption or "",
             "platform_copy": post.platform_copy or {},
+            # Chosen in the upload editor; filed into after the upload lands.
+            "youtube_playlist_ids": list(post.youtube_playlist_ids or []),
+            # Manual destinations — never posted, only reported as a note.
+            "facebook_groups": list(post.facebook_groups or []),
         }
         # One pending result row per platform up front, so the UI can show
         # per-platform progress while uploads run.
@@ -264,8 +269,13 @@ def publish_post(post_id: str) -> dict:
                     SocialPostResultStatus.POSTED.value,
                     platform_id=outcome["platform_id"],
                     platform_url=outcome["platform_url"],
+                    note=outcome.get("note", ""),
                 )
                 logger.info("[%s] ✅ %s: %s", post_id, platform, outcome["platform_url"])
+                if outcome.get("note"):
+                    # The post succeeded; this is a caveat the user should still
+                    # see (a playlist that could not be updated, for example).
+                    logger.warning("[%s] ⚠️  %s: %s", post_id, platform, outcome["note"])
             else:
                 all_success = False
                 _upsert_result(
@@ -361,19 +371,32 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
                 access_token=tokens.access_token,
                 refresh_token=tokens.refresh_token,
             )
-            return _success(result["video_id"], result["video_url"])
+            note = await _add_to_youtube_playlists(
+                service,
+                video_id=result["video_id"],
+                playlist_ids=post.get("youtube_playlist_ids") or [],
+                tokens=tokens,
+                label=label,
+            )
+            return _success(result["video_id"], result["video_url"], note=note)
 
         if platform == "instagram":
-            if not post["video_url"] or post["video_url"].startswith(("http://localhost", "http://127.")):
+            # The file is read straight off this machine's uploads folder and
+            # pushed to Meta (no public video URL, no ngrok). ``video_url`` is
+            # kept only as a fallback for an instance that has one and has
+            # turned direct upload off.
+            if not settings.INSTAGRAM_DIRECT_UPLOAD and not is_public_video_url(post["video_url"]):
                 return _failure(
-                    "Instagram downloads the video from a public URL, but this instance's video URL "
-                    f"is not publicly reachable ({post['video_url'] or 'unset'}). Set PUBLIC_API_URL."
+                    "Instagram direct upload is disabled on this instance and the video URL is not "
+                    f"publicly reachable ({post['video_url'] or 'unset'}). Either keep "
+                    "INSTAGRAM_DIRECT_UPLOAD enabled or set PUBLIC_API_URL."
                 )
             result = await service.publish_reel(
                 ig_user_id=account_id,
                 video_url=post["video_url"],
                 caption=platform_caption or post["instagram_caption"] or common_caption,
                 access_token=tokens.access_token,
+                video_path=video_path,
             )
             return _success(result["media_id"], result["post_url"])
 
@@ -383,7 +406,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
                 description=platform_caption,
                 access_token=tokens.access_token,
             )
-            return _success(result["video_id"], result["video_url"])
+            return _success(result["video_id"], result["video_url"], note=_facebook_share_note(post))
 
         if platform == "tiktok":
             result = await service.upload_video(
@@ -418,8 +441,71 @@ async def _refresh_and_persist(service, conn_id: str, tokens: PlatformTokens) ->
     return fresh
 
 
-def _success(platform_id: str, platform_url: str) -> dict:
-    return {"ok": True, "platform_id": platform_id or "", "platform_url": platform_url or "", "error": ""}
+async def _add_to_youtube_playlists(service, *, video_id: str, playlist_ids: list, tokens, label: str) -> str:
+    """File an uploaded Short into the chosen playlists; return a note (or "").
+
+    The video is already public at this point, so nothing here may turn into a
+    failed post — a playlist the channel no longer owns, or a connection that
+    has not granted the playlist scope yet, is reported as a note the UI shows
+    next to the successful publish.
+    """
+    # None is checked before stringifying: str(None) is "None", which would
+    # otherwise be posted as a playlist id.
+    wanted = []
+    for raw in playlist_ids or []:
+        if raw is None:
+            continue
+        playlist_id = str(raw).strip()
+        if playlist_id and playlist_id not in wanted:
+            wanted.append(playlist_id)
+    if not wanted or not video_id:
+        return ""
+    try:
+        outcome = await service.add_to_playlists(
+            video_id, wanted, tokens.access_token, tokens.refresh_token
+        )
+    except Exception as exc:  # the service already swallows per-playlist errors
+        logger.warning("Playlist step failed for %s: %s", video_id, exc)
+        return f"Published, but the playlists could not be updated: {str(exc)[:200]}"
+
+    added, failed = outcome.get("added") or [], outcome.get("failed") or []
+    if not failed:
+        return f"Added to {len(added)} playlist{'' if len(added) == 1 else 's'}"
+    reasons = "; ".join(
+        f"{item.get('playlist_id', '?')}: {item.get('error', 'unknown error')}" for item in failed
+    )
+    logger.warning("%s: added to %d/%d playlists (%s)", label, len(added), len(wanted), reasons)
+    return (
+        f"Published, and added to {len(added)} of {len(wanted)} playlists. "
+        f"{label} could not update: {reasons[:400]}"
+    )
+
+
+def _facebook_share_note(post: dict) -> str:
+    """Name the groups that still need the Reel, shared by hand.
+
+    Meta removed the Groups API on 22 Apr 2024, so the worker publishes to the
+    Page only. The groups chosen on the upload page cannot be posted for the
+    user, and a published result row is the one place that reminder survives.
+    """
+    groups = post.get("facebook_groups") or []
+    if not groups:
+        return ""
+    count = len(groups)
+    return (
+        f"Published to your Facebook Page. Share it manually to {count} "
+        f"group{'' if count == 1 else 's'} from this post's checklist."
+    )
+
+
+def _success(platform_id: str, platform_url: str, *, note: str = "") -> dict:
+    return {
+        "ok": True,
+        "platform_id": platform_id or "",
+        "platform_url": platform_url or "",
+        "error": "",
+        "note": note[:1000],
+    }
 
 
 def _failure(error: str) -> dict:
@@ -436,6 +522,7 @@ def _upsert_result(
     platform_id: str = "",
     platform_url: str = "",
     error: str = "",
+    note: str = "",
 ) -> None:
     """Create or update the (post, platform) outcome row."""
     row = (
@@ -450,6 +537,8 @@ def _upsert_result(
     row.platform_id = platform_id
     row.platform_url = platform_url
     row.error = error
+    # A note survives on a successful row (error is only rendered for failures).
+    row.note = note
     row.posted_at = _now() if status == SocialPostResultStatus.POSTED.value else None
     row.updated_at = _now()
     db.flush()

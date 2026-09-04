@@ -59,9 +59,11 @@ function formatBytes(n) {
 
 /**
  * Pull the most common labelled fields out of the copy format shown in the
- * upload helper. This is deliberately small and predictable; the optional
- * Groq integration can replace this function later without changing the
- * platform fields or the API contract.
+ * upload helper. This is deliberately small and predictable, and it is the
+ * offline fallback for the AI extraction: POST /social-scheduler/parse-copy
+ * (Groq, backend-only key) handles the awkward cases — captions that double as
+ * hooks, Markdown headings, hashtags buried in the description — and writes
+ * the same platform fields this function does.
  */
 function extractPastedCopy(text) {
   const clean = String(text || '').trim();
@@ -118,6 +120,7 @@ export default function SocialSchedulePage() {
   const [showPerPlatform, setShowPerPlatform] = useState(false);
   const [mode, setMode] = useState('schedule');
   const [sourceText, setSourceText] = useState('');
+  const [aiExtracting, setAiExtracting] = useState(false);
   const [form, setForm] = useState({
     title: '',
     caption: '',
@@ -128,7 +131,29 @@ export default function SocialSchedulePage() {
     instagram_caption: '',
     tiktok_caption: '',
     platform_copy: EMPTY_PLATFORM_COPY,
+    // YouTube playlists the Short is filed into once the upload succeeds.
+    // Ignored (and sent empty) unless YouTube is one of the targets.
+    youtube_playlist_ids: [],
+    // Facebook Groups to share the Reel to by hand. Meta removed the Groups
+    // API, so these are a post-publish checklist, never an upload target.
+    facebook_groups: [],
   });
+  // Saved Facebook Group destinations, same idle→loading→ready|error shape as
+  // the playlist picker above.
+  const [groupState, setGroupState] = useState({ status: 'idle', items: null, error: '' });
+  const groupFetchStarted = useRef(false);
+  const [groupReload, setGroupReload] = useState(0);
+  const [newGroup, setNewGroup] = useState({ name: '', url: '' });
+  const [savingGroup, setSavingGroup] = useState(false);
+  // Playlist picker state: idle → loading → ready|error. `items: []` means the
+  // channel really has no playlists, which is why "not fetched" needs its own
+  // status rather than a null list.
+  const [playlistState, setPlaylistState] = useState({ status: 'idle', items: null, error: '' });
+  // Guards against a second fetch while one is in flight (React runs effects
+  // twice in dev) — the effect's own deps change as soon as loading starts, so
+  // a flag in the dep list would cancel the request it just made.
+  const playlistFetchStarted = useRef(false);
+  const [playlistReload, setPlaylistReload] = useState(0);
 
   useEffect(() => {
     socialSchedulerApi
@@ -142,6 +167,103 @@ export default function SocialSchedulePage() {
       })
       .catch(() => setConnections([]));
   }, []);
+
+  const facebookSelected = form.platforms.includes('facebook');
+  const youtubeSelected = form.platforms.includes('youtube');
+  const youtubeConnected = Boolean(connections?.find((c) => c.platform === 'youtube')?.connected);
+
+  // Playlists are fetched only once YouTube is actually a target, so an
+  // Instagram-only upload never pays for the round trip and never sees the
+  // picker. One fetch per mount unless the retry button asks for another.
+  useEffect(() => {
+    if (!youtubeSelected || !youtubeConnected || playlistFetchStarted.current) return;
+    playlistFetchStarted.current = true;
+    setPlaylistState({ status: 'loading', items: null, error: '' });
+    socialSchedulerApi
+      .listYouTubePlaylists()
+      .then(({ data }) => {
+        setPlaylistState({ status: 'ready', items: data?.playlists || [], error: '' });
+      })
+      .catch((err) => {
+        // Shown inline, never as a toast: publishing without playlists is a
+        // perfectly normal outcome, so this must not look like a failed upload.
+        setPlaylistState({
+          status: 'error',
+          items: null,
+          error: getErrorMessage(err, 'Could not load your YouTube playlists'),
+        });
+      });
+  }, [youtubeSelected, youtubeConnected, playlistReload]);
+
+  const reloadPlaylists = () => {
+    playlistFetchStarted.current = false;
+    setPlaylistState({ status: 'idle', items: null, error: '' });
+    setPlaylistReload((count) => count + 1);
+  };
+
+  const togglePlaylist = (playlistId) =>
+    setForm((f) => ({
+      ...f,
+      youtube_playlist_ids: f.youtube_playlist_ids.includes(playlistId)
+        ? f.youtube_playlist_ids.filter((id) => id !== playlistId)
+        : [...f.youtube_playlist_ids, playlistId],
+    }));
+
+  // Saved groups are loaded when Facebook becomes a target. Unlike the
+  // playlist list this needs no OAuth connection: nothing is posted to a group,
+  // so an unconnected Facebook account is not a blocker.
+  useEffect(() => {
+    if (!facebookSelected || groupFetchStarted.current) return;
+    groupFetchStarted.current = true;
+    setGroupState({ status: 'loading', items: null, error: '' });
+    socialSchedulerApi
+      .listShareTargets('facebook')
+      .then(({ data }) => {
+        setGroupState({ status: 'ready', items: data || [], error: '' });
+      })
+      .catch((err) => {
+        setGroupState({ status: 'error', items: null, error: getErrorMessage(err, 'Could not load your saved groups') });
+      });
+  }, [facebookSelected, groupReload]);
+
+  const toggleGroup = (target) =>
+    setForm((f) => ({
+      ...f,
+      facebook_groups: f.facebook_groups.some((group) => group.url === target.url)
+        ? f.facebook_groups.filter((group) => group.url !== target.url)
+        : [...f.facebook_groups, { name: target.name, url: target.url }],
+    }));
+
+  const addGroup = async (event) => {
+    event.preventDefault();
+    const name = newGroup.name.trim();
+    const url = newGroup.url.trim();
+    if (!name) return toast.error('Give the group a name');
+    // The backend enforces this too; checking here keeps the message friendly.
+    if (!/^https?:\/\//i.test(url)) return toast.error('Paste the group link, starting with https://');
+
+    setSavingGroup(true);
+    try {
+      const { data } = await socialSchedulerApi.createShareTarget({ name, url });
+      setGroupState((state) =>
+        state.status === 'ready' && !state.items.some((target) => target.id === data.id)
+          ? { ...state, items: [...state.items, data] }
+          : state,
+      );
+      setNewGroup({ name: '', url: '' });
+      // A group added mid-upload is a group the user means to use.
+      setForm((f) =>
+        f.facebook_groups.some((group) => group.url === data.url)
+          ? f
+          : { ...f, facebook_groups: [...f.facebook_groups, { name: data.name, url: data.url }] },
+      );
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not save that group'));
+    } finally {
+      setSavingGroup(false);
+    }
+    return undefined;
+  };
 
   const update = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
 
@@ -209,6 +331,57 @@ export default function SocialSchedulePage() {
     toast.success('Copy added to the platform fields');
   };
 
+  /**
+   * Send the pasted message to the backend, which asks Groq to split it into
+   * per-platform copy. The API key lives on the server; this page only sends
+   * text and receives the same `platform_copy` shape it already edits, so the
+   * manual fields below stay the source of truth and remain editable.
+   */
+  const extractWithAi = async () => {
+    if (!sourceText.trim()) {
+      toast.error('Paste your platform copy first');
+      return;
+    }
+    setAiExtracting(true);
+    try {
+      const { data } = await socialSchedulerApi.parsePlatformCopy(sourceText);
+      const copy = data?.platform_copy || {};
+      const filled = PLATFORMS.filter(({ id }) =>
+        ['title', 'description', 'hashtags'].some((field) => String(copy[id]?.[field] || '').trim()),
+      );
+      setForm((f) => ({
+        ...f,
+        title:
+          f.title.trim() ||
+          PLATFORMS.map(({ id }) => copy[id]?.title).find((value) => value?.trim()) ||
+          '',
+        platform_copy: {
+          ...f.platform_copy,
+          ...Object.fromEntries(
+            PLATFORMS.map(({ id }) => [
+              id,
+              {
+                title: copy[id]?.title || '',
+                description: copy[id]?.description || '',
+                hashtags: copy[id]?.hashtags || '',
+              },
+            ]),
+          ),
+        },
+      }));
+      setShowPerPlatform(true);
+      if (filled.length) {
+        toast.success(`Extracted copy for ${filled.map(({ label }) => label).join(', ')}`);
+      } else {
+        toast.error('No platform sections found in that message — check the headings, or fill the fields yourself.');
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'AI extraction failed'));
+    } finally {
+      setAiExtracting(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!upload) return toast.error('Upload a video first');
@@ -242,6 +415,8 @@ export default function SocialSchedulePage() {
         instagram_caption: form.instagram_caption,
         tiktok_caption: form.tiktok_caption,
         platform_copy: form.platform_copy,
+        youtube_playlist_ids: youtubeSelected ? form.youtube_playlist_ids : [],
+        facebook_groups: facebookSelected ? form.facebook_groups : [],
       });
       toast.success(mode === 'direct' ? 'Video sent to the publish queue' : 'Post scheduled');
       navigate('/app/social-scheduler/queue');
@@ -362,6 +537,188 @@ export default function SocialSchedulePage() {
           )}
         </section>
 
+        {/* YouTube playlists — only when a Short is going out */}
+        {youtubeSelected && (
+          <section className="card p-6" data-testid="youtube-playlists">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-zinc-100">Add to YouTube playlists</h2>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Optional. The Short is filed into these playlists after it uploads — the upload itself never
+                  waits on them.
+                </p>
+              </div>
+              <span className="text-xs text-zinc-500">
+                {form.youtube_playlist_ids.length} selected
+              </span>
+            </div>
+
+            {!youtubeConnected && (
+              <p className="mt-4 text-xs text-zinc-500">
+                Connect YouTube in Settings to list the channel&apos;s playlists. The Short still publishes
+                without one.
+              </p>
+            )}
+            {youtubeConnected && playlistState.status === 'loading' && (
+              <p className="mt-4 text-xs text-zinc-500" data-testid="playlists-loading">Loading playlists…</p>
+            )}
+            {youtubeConnected && playlistState.status === 'error' && (
+              <div className="mt-4 flex items-start justify-between gap-3">
+                <p className="text-xs text-amber-300">{playlistState.error}</p>
+                <button
+                  type="button"
+                  onClick={reloadPlaylists}
+                  data-testid="playlists-retry"
+                  className="shrink-0 rounded-md border border-surface-600 px-3 py-1.5 text-xs text-zinc-200 hover:border-surface-500"
+                >
+                  Try again
+                </button>
+              </div>
+            )}
+            {youtubeConnected && playlistState.status === 'ready' && playlistState.items?.length === 0 && (
+              <p className="mt-4 text-xs text-zinc-500">
+                This channel has no playlists yet — create one on YouTube and reload.
+              </p>
+            )}
+            {youtubeConnected && playlistState.status === 'ready' && playlistState.items?.length > 0 && (
+              <div className="mt-4 max-h-64 space-y-2 overflow-y-auto pr-1">
+                {playlistState.items.map((playlist) => {
+                  const checked = form.youtube_playlist_ids.includes(playlist.id);
+                  return (
+                    <label
+                      key={playlist.id}
+                      className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 transition ${
+                        checked
+                          ? 'border-accent-500/60 bg-accent-500/10'
+                          : 'border-surface-600 bg-surface-800 hover:border-surface-500'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => togglePlaylist(playlist.id)}
+                        data-testid={`playlist-${playlist.id}`}
+                        className="h-4 w-4 rounded border-surface-500 bg-surface-700 text-accent-500 focus:ring-accent-500/40"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm text-zinc-100">{playlist.title}</span>
+                        <span className="block truncate text-xs text-zinc-500">
+                          {playlist.item_count} {playlist.item_count === 1 ? 'video' : 'videos'}
+                          {playlist.privacy && playlist.privacy !== 'public' ? ` · ${playlist.privacy}` : ''}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            </section>
+        )}
+
+        {/* Facebook Groups — picked here, shared by hand after publishing */}
+        {facebookSelected && (
+          <section className="card p-6" data-testid="facebook-groups">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-zinc-100">Share to Facebook groups</h2>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Facebook closed its Groups API, so LinkEasy cannot post into a group for you. Pick the groups here and
+                  the published post shows a checklist — each group one click away, with the caption ready to copy.
+                </p>
+              </div>
+              <span className="text-xs text-zinc-500">{form.facebook_groups.length} selected</span>
+            </div>
+
+            {groupState.status === 'loading' && (
+              <p className="mt-4 text-xs text-zinc-500" data-testid="groups-loading">Loading your saved groups…</p>
+            )}
+            {groupState.status === 'error' && (
+              <div className="mt-4 flex items-start justify-between gap-3">
+                <p className="text-xs text-amber-300">{groupState.error}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    groupFetchStarted.current = false;
+                    setGroupState({ status: 'idle', items: null, error: '' });
+                    setGroupReload((count) => count + 1);
+                  }}
+                  data-testid="groups-retry"
+                  className="shrink-0 rounded-md border border-surface-600 px-3 py-1.5 text-xs text-zinc-200 hover:border-surface-500"
+                >
+                  Try again
+                </button>
+              </div>
+            )}
+
+            {groupState.status === 'ready' && groupState.items?.length > 0 && (
+              <div className="mt-4 max-h-52 space-y-2 overflow-y-auto pr-1">
+                {groupState.items.map((target) => {
+                  const checked = form.facebook_groups.some((group) => group.url === target.url);
+                  return (
+                    <label
+                      key={target.id}
+                      className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 transition ${
+                        checked
+                          ? 'border-accent-500/60 bg-accent-500/10'
+                          : 'border-surface-600 bg-surface-800 hover:border-surface-500'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleGroup(target)}
+                        data-testid={`group-${target.id}`}
+                        className="h-4 w-4 rounded border-surface-500 bg-surface-700 text-accent-500 focus:ring-accent-500/40"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm text-zinc-100">{target.name}</span>
+                        <span className="block truncate text-xs text-zinc-500">{target.url}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            {groupState.status === 'ready' && groupState.items?.length === 0 && (
+              <p className="mt-4 text-xs text-zinc-500">
+                No saved groups yet — add the first one below. It is stored for your next post too.
+              </p>
+            )}
+
+            <form onSubmit={addGroup} className="mt-4 border-t border-surface-700 pt-4">
+              <p className="mb-2 text-xs font-medium text-zinc-400">Add a group</p>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  value={newGroup.name}
+                  onChange={(event) => setNewGroup((g) => ({ ...g, name: event.target.value }))}
+                  placeholder="Group name"
+                  aria-label="Group name"
+                  data-testid="new-group-name"
+                  maxLength={120}
+                  className="min-w-[10rem] flex-1 rounded-lg border border-surface-600 bg-surface-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-accent-500 focus:outline-none"
+                />
+                <input
+                  value={newGroup.url}
+                  onChange={(event) => setNewGroup((g) => ({ ...g, url: event.target.value }))}
+                  placeholder="https://www.facebook.com/groups/…"
+                  aria-label="Group link"
+                  data-testid="new-group-url"
+                  maxLength={500}
+                  className="min-w-[14rem] flex-[2] rounded-lg border border-surface-600 bg-surface-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-accent-500 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={savingGroup}
+                  data-testid="add-group"
+                  className="rounded-lg border border-surface-600 px-4 py-2 text-sm text-zinc-200 transition hover:border-surface-500 disabled:opacity-50"
+                >
+                  {savingGroup ? 'Saving…' : 'Add'}
+                </button>
+              </div>
+            </form>
+          </section>
+        )}
+
         {/* Copy */}
         <section className="card space-y-4 p-6">
           <div>
@@ -387,12 +744,40 @@ export default function SocialSchedulePage() {
               <div>
                 <h3 className="text-sm font-semibold text-zinc-100">Paste your platform copy</h3>
                 <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-400">
-                  Paste the complete YouTube, Instagram, TikTok or Facebook text generated by your workflow. The helper recognises the labelled format in your examples. Groq can later populate these same fields through this editor.
+                  Paste the complete YouTube, Instagram, TikTok or Facebook text generated by your workflow.
+                  “Extract with AI” splits it into the per-platform fields below — headings, captions and
+                  hashtags included. Prefer to stay offline? “Use text to fill fields” runs the same job in
+                  your browser.
                 </p>
               </div>
-              <button type="button" className="btn-secondary !px-3 !py-2 text-xs" onClick={fillFromPastedCopy} disabled={!sourceText.trim()}>
-                Use text to fill fields
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="btn-primary !px-3 !py-2 text-xs"
+                  onClick={extractWithAi}
+                  disabled={aiExtracting || !sourceText.trim()}
+                  aria-busy={aiExtracting}
+                  data-testid="ai-extract"
+                >
+                  {aiExtracting ? (
+                    <span className="flex items-center gap-1.5">
+                      <Spinner className="h-3 w-3" />
+                      Extracting…
+                    </span>
+                  ) : (
+                    'Extract with AI'
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary !px-3 !py-2 text-xs"
+                  onClick={fillFromPastedCopy}
+                  disabled={aiExtracting || !sourceText.trim()}
+                  data-testid="paste-fill"
+                >
+                  Use text to fill fields
+                </button>
+              </div>
             </div>
             <textarea
               className="input-field mt-3 min-h-[150px] bg-surface-900/70"
@@ -400,7 +785,11 @@ export default function SocialSchedulePage() {
               onChange={(e) => setSourceText(e.target.value)}
               placeholder={'Example:\n1. YouTube Shorts\nTitle: ...\nDescription: ...\n#Shorts #Python\n\n2. Instagram Reels\nHeadline (Caption Hook): ...'}
               aria-label="Paste full platform copy"
+              data-testid="paste-source"
             />
+            {aiExtracting && (
+              <p className="mt-2 text-xs text-zinc-500">Reading your message with AI — this takes a few seconds.</p>
+            )}
           </div>
 
           <button

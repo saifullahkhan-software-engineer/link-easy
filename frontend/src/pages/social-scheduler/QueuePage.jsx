@@ -8,6 +8,7 @@ import { Spinner } from '../../components/Spinner';
 import SchedulingDisabledNotice from '../../components/SchedulingDisabledNotice';
 import {
   EmptyState,
+  GroupShareChecklist,
   PlatformChip,
   PostStatusBadge,
   SocialPageHeader,
@@ -191,6 +192,10 @@ function Section({ title, children }) {
 
 function PostRow({ post, highlighted, busy, onEdit, onCancel, onRequeue, onDelete }) {
   const failures = (post.results || []).filter((r) => r.status === 'failed');
+  // Successful platforms that still have something to say (a playlist that
+  // could not be updated). Rendered apart from `failures` because the post
+  // itself went out.
+  const notes = (post.results || []).filter((r) => r.status === 'posted' && r.note);
   const platformResult = (id) => (post.results || []).find((r) => r.platform === id);
   return (
     <div
@@ -219,6 +224,22 @@ function PostRow({ post, highlighted, busy, onEdit, onCancel, onRequeue, onDelet
             })}
           </div>
           {post.caption && <p className="mt-2 line-clamp-2 text-sm text-zinc-500">{post.caption}</p>}
+          {post.facebook_groups?.length > 0 && (
+            <GroupShareChecklist
+              groups={post.facebook_groups}
+              caption={[post.caption, post.hashtags].filter(Boolean).join('\n\n')}
+            />
+          )}
+          {notes.length > 0 && (
+            <ul className="mt-3 space-y-1 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+              {notes.map((r) => (
+                <li key={r.id} className="text-xs text-amber-200">
+                  <span className="font-semibold">{PLATFORMS.find((p) => p.id === r.platform)?.label || r.platform}:</span>{' '}
+                  {r.note}
+                </li>
+              ))}
+            </ul>
+          )}
           {failures.length > 0 && (
             <ul className="mt-3 space-y-1 rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2">
               {failures.map((r) => (

@@ -65,7 +65,9 @@ NO_PAGE_TOKEN = (
 
 
 class FacebookService:
-    GRAPH_API = "https://graph.facebook.com/v21.0"
+    # Shared with the Instagram service (see services/social/meta_graph.py):
+    # one Graph API version for the whole Meta platform, bumped in one place.
+    GRAPH_API = GRAPH_API_BASE
     SCOPES = "pages_show_list,pages_manage_posts,business_management"
 
     def __init__(self):
@@ -76,7 +78,7 @@ class FacebookService:
     def get_auth_url(self, state: str, *, code_verifier=None) -> str:
         # ``code_verifier`` is accepted for the uniform service interface used
         # by the API routes; Meta's OAuth does not use PKCE, so it is ignored.
-        return "https://www.facebook.com/v21.0/dialog/oauth?" + urlencode({
+        return f"{OAUTH_DIALOG}?" + urlencode({
             "client_id": self.app_id, "redirect_uri": self.redirect_uri,
             "scope": self.SCOPES, "response_type": "code", "state": state,
         })

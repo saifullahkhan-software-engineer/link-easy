@@ -39,6 +39,9 @@ from services.social.youtube import YouTubeService  # noqa: E402
 USERINFO_SCOPE = "https://www.googleapis.com/auth/userinfo.profile"
 UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+# Filing an uploaded Short into a playlist (playlistItems.insert) needs the
+# read/write scope; readonly can list playlists but not change them.
+WRITE_SCOPE = "https://www.googleapis.com/auth/youtube"
 
 
 class _Request:
@@ -127,7 +130,7 @@ class YouTubeServiceTests(unittest.TestCase):
     def test_scopes_match_the_oauth_client_declaration(self):
         self.assertEqual(
             set(YouTubeService.SCOPES),
-            {UPLOAD_SCOPE, READONLY_SCOPE, USERINFO_SCOPE},
+            {UPLOAD_SCOPE, READONLY_SCOPE, USERINFO_SCOPE, WRITE_SCOPE},
         )
 
     def test_auth_url_requests_all_declared_scopes(self):

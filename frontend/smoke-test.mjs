@@ -229,6 +229,13 @@ let linkedinMessageRequestCount = 0;
 // configured-but-not-connected, Instagram not configured on the instance.
 const socialFuture = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString();
 const socialPast = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+// The user's saved Facebook Groups, and what the per-post checklist shows.
+const SAVED_GROUPS = [
+  { id: 'st-1', platform: 'facebook', name: 'Lahore Freelancers', url: 'https://www.facebook.com/groups/lahore', created_at: socialPast },
+  { id: 'st-2', platform: 'facebook', name: 'Video Editors PK', url: 'https://www.facebook.com/groups/editors', created_at: socialPast },
+];
+const POST_FACEBOOK_GROUPS = [{ name: 'Lahore Freelancers', url: 'https://www.facebook.com/groups/lahore' }];
+
 const SOCIAL_POSTS = [
   {
     id: 'sp-1', title: 'Launch teaser', caption: 'We are live', hashtags: '#launch',
@@ -241,7 +248,7 @@ const SOCIAL_POSTS = [
     video_url: 'http://x/uploads/social/b.mp4', thumbnail: '', platforms: ['youtube'],
     scheduled_at: socialPast, status: 'posted', youtube_title: '', instagram_caption: '', tiktok_caption: '',
     created_at: socialPast, updated_at: socialPast,
-    results: [{ id: 'r-1', platform: 'youtube', status: 'posted', platform_id: 'abc123', platform_url: 'https://www.youtube.com/shorts/abc123', error: '', posted_at: socialPast, updated_at: socialPast }],
+    results: [{ id: 'r-1', platform: 'youtube', status: 'posted', platform_id: 'abc123', platform_url: 'https://www.youtube.com/shorts/abc123', error: '', note: 'Added to 2 playlists', posted_at: socialPast, updated_at: socialPast }],
   },
   {
     id: 'sp-3', title: 'Broken clip', caption: '', hashtags: '',
@@ -250,7 +257,66 @@ const SOCIAL_POSTS = [
     created_at: socialPast, updated_at: socialPast,
     results: [{ id: 'r-2', platform: 'tiktok', status: 'failed', platform_id: '', platform_url: '', error: 'TikTok is not connected. Open Settings and connect the account.', posted_at: null, updated_at: socialPast }],
   },
+  // YouTube published the Short but one playlist was gone: the post is marked
+  // failed by the other platform, and the YouTube row still has to show what
+  // did happen — that is what `note` is for.
+  {
+    id: 'sp-5', title: 'Group shoutout', caption: 'Join the launch', hashtags: '#launch',
+    video_url: 'http://x/uploads/social/e.mp4', thumbnail: '', platforms: ['facebook'],
+    scheduled_at: socialPast, status: 'posted', youtube_title: '', instagram_caption: '', tiktok_caption: '',
+    created_at: socialPast, updated_at: socialPast, facebook_groups: POST_FACEBOOK_GROUPS,
+    results: [{ id: 'r-5', platform: 'facebook', status: 'posted', platform_id: 'vid-5', platform_url: 'https://facebook.com/watch/?v=vid-5', error: '', note: 'Published to your Facebook Page. Share it manually to 1 group from this post\u2019s checklist.', posted_at: socialPast, updated_at: socialPast }],
+  },
+  {
+    id: 'sp-4', title: 'Half posted', caption: '', hashtags: '',
+    video_url: 'http://x/uploads/social/d.mp4', thumbnail: '', platforms: ['youtube', 'tiktok'],
+    scheduled_at: socialPast, status: 'failed', youtube_title: '', instagram_caption: '', tiktok_caption: '',
+    created_at: socialPast, updated_at: socialPast,
+    results: [
+      { id: 'r-3', platform: 'youtube', status: 'posted', platform_id: 'def456', platform_url: 'https://www.youtube.com/shorts/def456', error: '', note: 'Published, and added to 1 of 2 playlists. YouTube Shorts could not update: PLold: Playlist not found.', posted_at: socialPast, updated_at: socialPast },
+      { id: 'r-4', platform: 'tiktok', status: 'failed', platform_id: '', platform_url: '', error: 'TikTok upload was rejected', posted_at: null, updated_at: socialPast },
+    ],
+  },
 ];
+// The message a user pastes into the upload page, and the per-platform copy
+// the backend's Groq extraction (POST /social-scheduler/parse-copy) returns
+// for it. TikTok and Facebook are absent from the paste, so they come back
+// empty — the AI must not invent copy for them.
+const PASTED_PLATFORM_COPY = [
+  '1. YouTube Shorts',
+  'Title: Day 17 — Dictionaries in Python \u{1F40D}',
+  'Description: Learn how dicts work in 60 seconds.',
+  '#Shorts #Python #Coding',
+  '',
+  '2. Instagram Reels',
+  'Headline (Caption Hook): Stop writing loops like it was 2010',
+  'Caption: Dictionaries are faster. Here is why.',
+  '#Python #Coding',
+].join('\n');
+
+const PARSED_PLATFORM_COPY = {
+  youtube: {
+    title: 'Day 17 — Dictionaries in Python \u{1F40D}',
+    description: 'Learn how dicts work in 60 seconds.',
+    hashtags: '#Shorts #Python #Coding',
+  },
+  instagram: {
+    title: 'Stop writing loops like it was 2010',
+    description: 'Dictionaries are faster. Here is why.',
+    hashtags: '#Python #Coding',
+  },
+  tiktok: { title: '', description: '', hashtags: '' },
+  facebook: { title: '', description: '', hashtags: '' },
+};
+
+let parseCopyRequestCount = 0;
+
+// What GET /platforms/youtube/playlists returns for the connected channel.
+const YOUTUBE_PLAYLISTS = [
+  { id: 'PLabc', title: 'Morning Routine', privacy: 'public', item_count: 12 },
+  { id: 'PLxyz', title: 'Behind the scenes', privacy: 'unlisted', item_count: 1 },
+];
+
 const SOCIAL_API_STUBS = {
   'GET /api/v1/social-scheduler/posts': (res, req) => {
     const url = new URL(req.url, 'http://x');
@@ -263,6 +329,38 @@ const SOCIAL_API_STUBS = {
       next_post_at: socialFuture, next_post_in: 'in 1 day 23 hours', connected_platforms: ['youtube'],
       per_platform: { youtube: { posted: 1, failed: 0 }, instagram: { posted: 0, failed: 0 }, tiktok: { posted: 0, failed: 1 } },
     }),
+  // The upload editor's "Add to YouTube playlists" picker.
+  'GET /api/v1/social-scheduler/platforms/youtube/playlists': (res) =>
+    json(res, 200, { channel: 'My Channel', playlists: YOUTUBE_PLAYLISTS }),
+  // Saved Facebook Group destinations. Meta closed the Groups API, so these
+  // are a manual checklist — the stub never "posts" anywhere.
+  'GET /api/v1/social-scheduler/share-targets': (res) => json(res, 200, SAVED_GROUPS),
+  // Exact keys: the harness's prefix fallback compares a method-prefixed
+  // request key against a bare path, so parameterised routes need one entry
+  // per id a case actually touches.
+  'DELETE /api/v1/social-scheduler/share-targets/st-1': (res) => {
+    const index = SAVED_GROUPS.findIndex((g) => g.id === 'st-1');
+    if (index === -1) return json(res, 404, { detail: 'Share target not found' });
+    const [removed] = SAVED_GROUPS.splice(index, 1);
+    return json(res, 200, { id: 'st-1', message: 'Share target removed', removed: removed.name });
+  },
+  'POST /api/v1/social-scheduler/share-targets': (res, req) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      // The backend rejects anything that is not an http(s) link, because the
+      // checklist renders these URLs as anchors.
+      if (!/^https?:\/\//i.test(body.url || '')) {
+        return json(res, 422, { detail: [{ msg: 'A group link must start with http:// or https://' }] });
+      }
+      const existing = SAVED_GROUPS.find((g) => g.url === body.url);
+      if (existing) return json(res, 201, existing);
+      const created = { id: `st-${SAVED_GROUPS.length + 1}`, platform: 'facebook', name: body.name, url: body.url, created_at: socialPast };
+      SAVED_GROUPS.push(created);
+      return json(res, 201, created);
+    });
+  },
   'GET /api/v1/social-scheduler/platforms': (res) =>
     json(res, 200, [
       { platform: 'youtube', label: 'YouTube Shorts', connected: true, configured: true, account_name: 'My Channel', account_id: 'UC1', expires_at: socialFuture, reconnect_required: false, connected_at: socialPast, updated_at: socialPast },
@@ -983,18 +1081,286 @@ const CASES = [
     ],
   },
   {
+    name: 'social scheduler — the YouTube playlist picker lists the channel playlists and tracks the selection',
+    path: '/app/social-scheduler/schedule',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    interact: async (window) => {
+      const { document } = window;
+      const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const until = async (predicate, message) => {
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const value = predicate();
+          if (value) return value;
+          await tick(20);
+        }
+        throw new Error(`Timed out waiting for ${message}`);
+      };
+      const section = () => document.querySelector('[data-testid="youtube-playlists"]');
+
+      // YouTube is connected, so it is pre-selected and the picker fetches.
+      await until(() => document.querySelector('[data-testid="playlist-PLabc"]'), 'the channel playlists to load');
+      if (!section().textContent.includes('Morning Routine')) throw new Error('playlist title missing');
+      if (!section().textContent.includes('12 videos')) throw new Error('playlist size missing');
+      // A non-public collection is labelled so a Short is not filed somewhere
+      // the user did not mean.
+      if (!section().textContent.includes('unlisted')) throw new Error('privacy label missing');
+
+      const box = document.querySelector('[data-testid="playlist-PLabc"]');
+      box.click();
+      await until(() => box.checked, 'the checkbox to register the selection');
+      await until(() => section().textContent.includes('1 selected'), 'the selection counter to update');
+
+      // Un-ticking clears it again — the payload sends an empty list then.
+      box.click();
+      await until(() => !box.checked, 'the checkbox to clear');
+      await until(() => section().textContent.includes('0 selected'), 'the counter to fall back to zero');
+    },
+    mustContain: ['Add to YouTube playlists', 'Morning Routine', 'Behind the scenes'],
+  },
+  {
+    name: 'social scheduler — the Facebook group picker lists saved groups and saves a new one',
+    path: '/app/social-scheduler/schedule',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    interact: async (window) => {
+      const { document } = window;
+      const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const until = async (predicate, message) => {
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const value = predicate();
+          if (value) return value;
+          await tick(20);
+        }
+        throw new Error(`Timed out waiting for ${message}`);
+      };
+      const section = () => document.querySelector('[data-testid="facebook-groups"]');
+
+      // Facebook is not connected in this stub, and the picker must still work:
+      // nothing is posted to a group, so no OAuth connection is required.
+      const facebookButton = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('Facebook Reels'));
+      if (!facebookButton) throw new Error('the Facebook platform button is missing');
+      facebookButton.click();
+
+      await until(() => section() && document.querySelector('[data-testid="group-st-1"]'), 'the saved groups to load');
+      if (!section().textContent.includes('Lahore Freelancers')) throw new Error('saved group name missing');
+      if (!section().textContent.includes('closed its Groups API')) throw new Error('the manual-sharing explanation is missing');
+
+      document.querySelector('[data-testid="group-st-1"]').click();
+      await until(() => section().textContent.includes('1 selected'), 'the selection counter to update');
+
+      // Adding a group inline saves it and selects it.
+      const nameInput = document.querySelector('[data-testid="new-group-name"]');
+      const urlInput = document.querySelector('[data-testid="new-group-url"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(nameInput, 'Karachi Creators');
+      nameInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+      setter.call(urlInput, 'https://www.facebook.com/groups/karachi');
+      urlInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+      document.querySelector('[data-testid="add-group"]').click();
+
+      await until(() => section().textContent.includes('Karachi Creators'), 'the new group to appear');
+      await until(() => section().textContent.includes('2 selected'), 'the new group to be selected automatically');
+
+      // A non-http link is refused before it reaches the backend.
+      setter.call(urlInput, 'javascript:alert(1)');
+      urlInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+      document.querySelector('[data-testid="add-group"]').click();
+      await tick(60);
+      if (!section().textContent.includes('2 selected')) throw new Error('a javascript: URL changed the selection');
+    },
+    mustContain: ['Share to Facebook groups', 'Add a group'],
+  },
+  {
+    name: 'social scheduler — a playlist fetch failure explains itself and offers a retry',
+    path: '/app/social-scheduler/schedule',
+    storage: AUTH_TOKENS,
+    // Its own stub, because the page fetches as soon as YouTube is selected —
+    // the first call has to fail before any interaction can arrange it.
+    api: (() => {
+      let attempts = 0;
+      return {
+        ...SOCIAL_API_STUBS,
+        'GET /api/v1/social-scheduler/platforms/youtube/playlists': (res) => {
+          attempts += 1;
+          if (attempts === 1) return json(res, 502, { detail: 'YouTube playlist list failed: quotaExceeded' });
+          return json(res, 200, { channel: 'My Channel', playlists: YOUTUBE_PLAYLISTS });
+        },
+      };
+    })(),
+    interact: async (window) => {
+      const { document } = window;
+      const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const until = async (predicate, message) => {
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const value = predicate();
+          if (value) return value;
+          await tick(20);
+        }
+        throw new Error(`Timed out waiting for ${message}`);
+      };
+
+      await until(
+        () => document.querySelector('[data-testid="playlists-retry"]'),
+        'the inline failure with a retry button',
+      );
+      if (!document.body.innerHTML.includes('quotaExceeded')) throw new Error('backend reason not shown');
+      // The rest of the form must still work: publishing without playlists is
+      // a normal outcome, not a blocked one.
+      if (document.querySelector('[data-testid="video-input"]') === null) throw new Error('upload control lost');
+
+      document.querySelector('[data-testid="playlists-retry"]').click();
+      await until(() => document.querySelector('[data-testid="playlist-PLabc"]'), 'the retry to load the playlists');
+    },
+    mustContain: ['Add to YouTube playlists'],
+  },
+  {
+    name: 'social scheduler — Extract with AI shows a loading state, then fills the platform fields',
+    path: '/app/social-scheduler/schedule',
+    storage: AUTH_TOKENS,
+    api: {
+      ...SOCIAL_API_STUBS,
+      'POST /api/v1/social-scheduler/parse-copy': (res, req) => {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          const { source_text: sourceText } = JSON.parse(body);
+          // The backend refuses an empty paste; the page must never send one.
+          if (!sourceText || !sourceText.trim()) {
+            return json(res, 400, { detail: 'Paste a message to extract the platform copy from' });
+          }
+          parseCopyRequestCount += 1;
+          // Hold the reply so the button's loading state is observable.
+          setTimeout(() => json(res, 200, { platform_copy: PARSED_PLATFORM_COPY }), 300);
+        });
+      },
+    },
+    interact: async (window) => {
+      parseCopyRequestCount = 0;
+      const { document } = window;
+      const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const until = async (predicate, message) => {
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const value = predicate();
+          if (value) return value;
+          await tick(20);
+        }
+        throw new Error(`Timed out waiting for ${message}`);
+      };
+      const extractButton = () => document.querySelector('[data-testid="ai-extract"]');
+      const pasteText = (value) => {
+        const area = document.querySelector('[data-testid="paste-source"]');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(area, value);
+        area.dispatchEvent(new window.Event('input', { bubbles: true }));
+      };
+
+      if (!extractButton().disabled) throw new Error('Extract with AI must be disabled with nothing pasted');
+
+      pasteText(PASTED_PLATFORM_COPY);
+      await until(() => !extractButton().disabled, 'the button to enable once text is pasted');
+      extractButton().click();
+
+      // Loading: the button is disabled, relabelled, and the request reaches
+      // the backend — exactly once (no double submit).
+      await until(
+        () => (extractButton().disabled && extractButton().textContent.includes('Extracting') ? extractButton() : null),
+        'the loading state while the request runs',
+      );
+      await until(() => (parseCopyRequestCount === 1 ? true : null), 'the parse-copy request to reach the server');
+
+      // Settled: re-enabled, editor opened, fields filled, success toast shown.
+      await until(() => !extractButton().disabled, 'the button to re-enable after the reply');
+      if (parseCopyRequestCount !== 1) throw new Error(`expected 1 parse-copy request, saw ${parseCopyRequestCount}`);
+      const title = await until(() => document.querySelector('#copy-youtube-title'), 'the per-platform editor to open');
+      if (title.value !== PARSED_PLATFORM_COPY.youtube.title) {
+        throw new Error(`YouTube title not filled: ${JSON.stringify(title.value)}`);
+      }
+      const hashtags = document.querySelector('#copy-youtube-hashtags');
+      if (!hashtags || hashtags.value !== '#Shorts #Python #Coding') {
+        throw new Error(`YouTube hashtags not filled: ${JSON.stringify(hashtags?.value)}`);
+      }
+      // A platform that was not in the paste stays empty — nothing invented.
+      const igTitle = document.querySelector('#copy-instagram-title');
+      if (igTitle && igTitle.value !== PARSED_PLATFORM_COPY.instagram.title) {
+        throw new Error(`Instagram title wrong: ${JSON.stringify(igTitle.value)}`);
+      }
+      await until(() => document.body.innerHTML.includes('Extracted copy for YouTube Shorts'), 'the success toast');
+    },
+    // #root-level assertions: the editor is open and the manual fields and the
+    // local fallback parser are both still there.
+    mustContain: ['Extract with AI', 'Use text to fill fields', 'YouTube title', 'Internal post title'],
+  },
+  {
+    name: 'social scheduler — a failed AI extraction toasts the error and leaves the manual editor alone',
+    path: '/app/social-scheduler/schedule',
+    storage: AUTH_TOKENS,
+    api: {
+      ...SOCIAL_API_STUBS,
+      'POST /api/v1/social-scheduler/parse-copy': (res) =>
+        json(res, 502, {
+          detail: 'The AI service did not return usable copy. Try again, or fill the fields yourself.',
+        }),
+    },
+    interact: async (window) => {
+      const { document } = window;
+      const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const until = async (predicate, message) => {
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const value = predicate();
+          if (value) return value;
+          await tick(20);
+        }
+        throw new Error(`Timed out waiting for ${message}`);
+      };
+      const extractButton = () => document.querySelector('[data-testid="ai-extract"]');
+
+      const area = document.querySelector('[data-testid="paste-source"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(area, PASTED_PLATFORM_COPY);
+      area.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await until(() => !extractButton().disabled, 'the button to enable once text is pasted');
+      extractButton().click();
+
+      // The button must not stay stuck in its loading state after a failure.
+      await until(() => !extractButton().disabled, 'the button to re-enable after the failure');
+      await until(
+        () => (document.body.innerHTML.includes('did not return usable copy') ? true : null),
+        'the error toast with the backend message',
+      );
+      if (document.querySelector('#copy-youtube-title')) {
+        throw new Error('a failed extraction must not open or fill the per-platform editor');
+      }
+      // The offline fallback stays usable so the user is never stuck.
+      if (document.querySelector('[data-testid="paste-fill"]').disabled) {
+        throw new Error('the local parser fallback must stay available after a failure');
+      }
+    },
+    mustContain: ['Extract with AI', 'Use text to fill fields', 'Paste your platform copy'],
+    mustNotContain: ['Extracted copy for'],
+  },
+  {
     name: 'social scheduler — queue groups scheduled posts and failures with re-queue',
     path: '/app/social-scheduler/queue',
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
-    mustContain: ['Queue', 'Scheduled (1)', 'Needs attention (1)', 'Launch teaser', 'Broken clip', 'Re-queue', 'not connected'],
+    mustContain: [
+      'Queue', 'Scheduled (1)', 'Needs attention (2)', 'Launch teaser', 'Broken clip', 'Re-queue', 'not connected',
+      // a partially published post: the failure AND the note about the Short
+      'Half posted', 'TikTok upload was rejected', 'added to 1 of 2 playlists',
+    ],
   },
   {
     name: 'social scheduler — history lists outcomes with platform links',
     path: '/app/social-scheduler/history',
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
-    mustContain: ['History', 'Old success', 'https://www.youtube.com/shorts/abc123', '1 published', 'Broken clip', 'Failed —'],
+    mustContain: [
+      'History', 'Old success', 'https://www.youtube.com/shorts/abc123', '1 published', 'Broken clip', 'Failed —',
+      'Added to 2 playlists',
+      // the manual group checklist, with the reason it is manual
+      'Share to 1 Facebook group yourself', 'Lahore Freelancers', 'Copy caption', 'closed its Groups API',
+    ],
   },
   {
     name: 'social scheduler — calendar renders a month grid with the post',
@@ -1002,6 +1368,37 @@ const CASES = [
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
     mustContain: ['Calendar', 'Mon', 'Sun', 'calendar-day', 'Launch teaser', 'this month'],
+  },
+  {
+    name: 'social scheduler — settings manages the saved Facebook groups',
+    path: '/app/social-scheduler/settings',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    interact: async (window) => {
+      const { document } = window;
+      const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const until = async (predicate, message) => {
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const value = predicate();
+          if (value) return value;
+          await tick(20);
+        }
+        throw new Error(`Timed out waiting for ${message}`);
+      };
+      const card = () => document.querySelector('[data-testid="saved-groups"]');
+      const before = SAVED_GROUPS.length;
+
+      await until(() => card() && card().textContent.includes('Lahore Freelancers'), 'the saved groups to load');
+      // The card has to say why this is manual, or the feature reads as broken.
+      if (!card().textContent.includes('removed its Groups API')) throw new Error('the API explanation is missing');
+
+      document.querySelector('[data-testid="remove-group-st-1"]').click();
+      await until(() => SAVED_GROUPS.length === before - 1, 'the group to be removed');
+      await until(() => !card().textContent.includes('Lahore Freelancers'), 'the row to disappear');
+      // restore the fixture for the other cases
+      SAVED_GROUPS.unshift({ id: 'st-1', platform: 'facebook', name: 'Lahore Freelancers', url: 'https://www.facebook.com/groups/lahore', created_at: socialPast });
+    },
+    mustContain: ['Facebook groups for manual sharing', 'Video Editors PK', 'Save group'],
   },
   {
     name: 'social scheduler — settings shows connect / disconnect state per platform',
@@ -1015,7 +1412,16 @@ const CASES = [
   },
 ];
 
+// Optional subset: `node smoke-test.mjs --filter "social scheduler"` runs only
+// the cases whose name matches. Useful while working on one page, and it keeps
+// a single unrelated broken case from hiding the ones you just changed.
+const FILTER = (() => {
+  const at = process.argv.indexOf('--filter');
+  return at === -1 ? null : String(process.argv[at + 1] || '').toLowerCase();
+})();
+
 let failures = 0;
+let ran = 0;
 const nativeTimers = {
   setTimeout: globalThis.setTimeout,
   clearTimeout: globalThis.clearTimeout,
@@ -1026,6 +1432,8 @@ const nativeTimers = {
 for (const testCase of CASES) {
   const { mustContain, mustNotContain = [], storage = {}, api = {}, interact } = testCase;
   const label = testCase.name || testCase.path;
+  if (FILTER && !label.toLowerCase().includes(FILTER)) continue;
+  ran += 1;
 
   // Per-case same-origin stub API so axios('/api/v1/...') resolves to it.
   const server = createServer((req, res) => {
@@ -1157,5 +1565,8 @@ for (const testCase of CASES) {
   }
 }
 
+if (FILTER) {
+  console.log(`\n(filter "${FILTER}" — ran ${ran} of ${CASES.length} cases)`);
+}
 console.log(failures ? `\n${failures} case(s) failed` : '\nAll smoke tests passed');
 process.exit(failures ? 1 : 0);

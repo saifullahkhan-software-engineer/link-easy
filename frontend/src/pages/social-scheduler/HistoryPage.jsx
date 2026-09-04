@@ -6,6 +6,7 @@ import Modal from '../../components/Modal';
 import { Spinner } from '../../components/Spinner';
 import {
   EmptyState,
+  GroupShareChecklist,
   PlatformChip,
   PlatformIcon,
   PostStatusBadge,
@@ -183,10 +184,24 @@ export default function SocialHistoryPage() {
                       ) : (
                         <span className="text-zinc-500">{r?.status || 'no result recorded'}</span>
                       )}
+                      {/* Non-fatal detail on a successful publish — e.g. which
+                          playlists YouTube could not update. Deliberately not
+                          in `error`, which only renders for failures. */}
+                      {r?.note && (
+                        <span className="w-full text-xs text-amber-300" title={r.note} data-testid="result-note">
+                          {r.note}
+                        </span>
+                      )}
                     </li>
                   );
                 })}
               </ul>
+              {post.facebook_groups?.length > 0 && (
+                <GroupShareChecklist
+                  groups={post.facebook_groups}
+                  caption={[post.caption, post.hashtags].filter(Boolean).join('\n\n')}
+                />
+              )}
             </div>
           ))}
         </div>

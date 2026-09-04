@@ -44,6 +44,16 @@ class YouTubeService:
     SCOPES = [
         "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/youtube.readonly",
+        # Playlist management. ``youtube.readonly`` can *list* playlists but
+        # ``playlistItems.insert`` — filing the uploaded Short into one —
+        # requires the full read/write scope (Google accepts youtube,
+        # youtube.force-ssl or youtubepartner; this is the least privileged of
+        # the three that is not a partner-only scope). Adding a scope changes
+        # the consent screen, so a connection made before this change has to
+        # reconnect YouTube once to pick it up; until then a playlist insert
+        # comes back 403 and is recorded as a note on the post instead of
+        # failing an upload that already succeeded.
+        "https://www.googleapis.com/auth/youtube",
         # Added to the OAuth client's scope set; used to store which Google
         # account (name/email/picture) is connected, alongside the channel.
         "https://www.googleapis.com/auth/userinfo.profile",
@@ -296,6 +306,119 @@ class YouTubeService:
             "video_url": f"https://www.youtube.com/shorts/{video_id}",
         }
 
+    # ── Playlists ────────────────────────────────────────────────────────────
+
+    async def list_playlists(
+        self,
+        access_token: str,
+        refresh_token: Optional[str] = None,
+        *,
+        max_results: int = 50,
+        max_pages: int = 5,
+    ) -> list[Dict[str, Any]]:
+        """The connected channel's playlists, as shown in the upload editor.
+
+        Paginates up to ``max_pages`` pages of 50 so a channel with more than
+        one screenful of playlists still shows them all, then truncates at
+        ``max_results`` — the picker is a convenience, not a playlist browser.
+        """
+        from googleapiclient.errors import HttpError
+
+        def _fetch():
+            youtube = self._client("youtube", "v3", access_token, refresh_token)
+            collected: list[Dict[str, Any]] = []
+            page_token: Optional[str] = None
+            for _page in range(max_pages):
+                params: Dict[str, Any] = {
+                    "part": "snippet,contentDetails,status",
+                    "mine": True,
+                    "maxResults": min(max_results, 50),
+                }
+                if page_token:
+                    params["pageToken"] = page_token
+                response = youtube.playlists().list(**params).execute()
+                collected.extend(response.get("items") or [])
+                page_token = response.get("nextPageToken")
+                if not page_token or len(collected) >= max_results:
+                    break
+            return collected[:max_results]
+
+        try:
+            items = await asyncio.to_thread(_fetch)
+        except HttpError as exc:
+            raise Exception(_http_error_message(exc, "YouTube playlist list failed"))
+        except Exception as exc:
+            raise Exception(f"YouTube playlist list error: {exc}")
+
+        playlists = []
+        for item in items:
+            playlist_id = item.get("id") or ""
+            if not playlist_id:
+                continue
+            playlists.append(
+                {
+                    "id": playlist_id,
+                    "title": (item.get("snippet") or {}).get("title") or "(untitled playlist)",
+                    "privacy": ((item.get("status") or {}).get("privacyStatus") or "").lower(),
+                    "item_count": int((item.get("contentDetails") or {}).get("itemCount") or 0),
+                }
+            )
+        return playlists
+
+    async def add_to_playlists(
+        self,
+        video_id: str,
+        playlist_ids: list[str],
+        access_token: str,
+        refresh_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """File one uploaded video into each playlist. Never raises.
+
+        By the time this runs the Short is already public, so a playlist
+        problem (a deleted playlist, a token without the manage scope, a full
+        playlist) must not turn a successful publish into a failed post. The
+        caller records the per-playlist outcome as a note instead.
+        """
+        from googleapiclient.errors import HttpError
+
+        # Tolerate the shapes a JSON payload can arrive in: nulls, numbers and
+        # stray whitespace, plus the same id twice (str(None) is "None", which
+        # is why None is checked before it is stringified).
+        wanted: list[str] = []
+        for raw in playlist_ids or []:
+            if raw is None:
+                continue
+            playlist_id = str(raw).strip()
+            if playlist_id and playlist_id not in wanted:
+                wanted.append(playlist_id)
+        if not video_id or not wanted:
+            return {"added": [], "failed": []}
+
+        def _add():
+            youtube = self._client("youtube", "v3", access_token, refresh_token)
+            added: list[str] = []
+            failed: list[Dict[str, str]] = []
+            for playlist_id in wanted:
+                body = {
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                    }
+                }
+                try:
+                    youtube.playlistItems().insert(part="snippet", body=body).execute()
+                    added.append(playlist_id)
+                except HttpError as exc:
+                    failed.append({"playlist_id": playlist_id, "error": _http_error_message(exc, "playlist insert failed")})
+                except Exception as exc:
+                    failed.append(
+                        {"playlist_id": playlist_id, "error": str(exc) or exc.__class__.__name__}
+                    )
+            return added, failed
+
+        added, failed = await asyncio.to_thread(_add)
+        return {"added": added, "failed": failed}
+
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     def _client(
@@ -324,3 +447,32 @@ def _seconds_until(expiry: Optional[datetime]) -> Optional[int]:
     if expiry.tzinfo is None:  # google-auth returns naive UTC
         expiry = expiry.replace(tzinfo=timezone.utc)
     return max(0, int((expiry - datetime.now(timezone.utc)).total_seconds()))
+
+
+def _http_error_message(exc: Exception, prefix: str) -> str:
+    """Human-readable text for a googleapiclient ``HttpError``.
+
+    ``str(HttpError)`` is ``<HttpError 403 "…json…">``, which is unreadable in
+    a post's result row; the JSON body carries the reason and the message the
+    user can act on ("The caller does not have permission", "playlistNotFound").
+    """
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    details = getattr(exc, "error_details", None) or []
+    message = reason = ""
+    if details and isinstance(details[0], dict):
+        message = str(details[0].get("message") or "")
+        reason = str(details[0].get("reason") or "")
+
+    # A 403 on a playlist call is almost always a connection that predates the
+    # playlist scope: Google's own wording ("The caller does not have
+    # permission") does not tell the user that reconnecting fixes it, so the
+    # fix is stated first and the upstream text kept for support.
+    if status == 403:
+        return (
+            f"{prefix}: the connected Google account has not granted playlist access. "
+            "Reconnect YouTube and approve the new permission."
+            + (f" (Google said: {message})" if message else "")
+        )
+    if message:
+        return f"{prefix}: {message}" + (f" ({reason})" if reason else "")
+    return f"{prefix}: {exc}"

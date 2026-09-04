@@ -50,8 +50,32 @@ export const socialSchedulerApi = {
     });
   },
 
+  // AI copy extraction — split one large pasted message into the per-platform
+  // title/description/hashtags the editor keeps. The backend calls Groq with
+  // its own key (never the browser's), so this is a plain POST with the text;
+  // the response's `platform_copy` drops straight into the form state.
+  //
+  // An LLM round trip beats the shared 30s default, so it gets its own
+  // timeout; 400/413/502/503 all come back as normal axios errors for the
+  // page to toast.
+  parsePlatformCopy: (sourceText) =>
+    api.post(`${BASE}/parse-copy`, { source_text: sourceText }, { timeout: 60_000 }),
+
+  // Saved manual-share destinations (Facebook Groups). Meta removed the
+  // Groups API in April 2024, so these are never posted by the backend — they
+  // feed the upload page's picker and the post-publish checklist.
+  listShareTargets: (platform = 'facebook') => api.get(`${BASE}/share-targets`, { params: { platform } }),
+  createShareTarget: (payload) => api.post(`${BASE}/share-targets`, payload),
+  deleteShareTarget: (targetId) => api.delete(`${BASE}/share-targets/${targetId}`),
+
   // Platform connections (OAuth)
   listPlatforms: () => api.get(`${BASE}/platforms`),
+  // Playlists owned by the connected YouTube channel, for the upload editor's
+  // "add this Short to…" picker. 409 = YouTube not connected, 502 = Google
+  // refused the call (an expired token that could not be renewed, or a
+  // connection made before the playlist permission was requested) — both are
+  // shown inline; scheduling still works without them.
+  listYouTubePlaylists: () => api.get(`${BASE}/platforms/youtube/playlists`),
   getAuthUrl: (platform) => api.get(`${BASE}/platforms/${platform}/auth-url`),
   disconnectPlatform: (platform) => api.delete(`${BASE}/platforms/${platform}`),
 
