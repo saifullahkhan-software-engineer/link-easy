@@ -21,7 +21,12 @@ from models.whatsapp import WhatsAppSession, WhatsAppMonitoredGroup, WhatsAppFor
 # reason the models above are imported).
 from models.rbac import AppSetting, Role, UserRoleLink  # noqa: F401
 from models.rate_limit import RateLimitCounter  # noqa: F401
-from models.social_scheduler import SocialPlatformConnection, SocialPost, SocialPostResult  # noqa: F401
+from models.social_scheduler import (
+    PlatformCredential,  # noqa: F401
+    SocialPlatformConnection,
+    SocialPost,
+    SocialPostResult,
+)
 
 # Connection-pool sizing.
 #

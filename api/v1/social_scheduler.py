@@ -27,11 +27,14 @@ Route map (prefix /api/v1/social-scheduler):
   PATCH  /posts/{id}                  edit / reschedule / cancel
   DELETE /posts/{id}
   POST   /upload                      multipart video upload → upload_id
-  GET    /platforms                   connection status for all 3 platforms
+  GET    /platforms                   connection status for all 4 platforms
   GET    /platforms/{p}/auth-url      start OAuth (returns provider URL)
   GET    /platforms/{p}/callback      provider redirect target (unauthenticated;
                                       identity comes from the signed state)
   DELETE /platforms/{p}               disconnect
+  GET    /platforms/credentials                     operator app-credential status (admin)
+  PUT    /platforms/credentials/{p}                 save app credentials (admin)
+  DELETE /platforms/credentials/{p}                 remove saved app credentials (admin)
   GET    /stats
   GET    /calendar?month=YYYY-MM
 """
@@ -53,9 +56,10 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import get_current_user, get_db
+from api.dependencies import get_current_user, get_db, require_admin
 from core.config import settings
 from models.social_scheduler import (
+    PlatformCredential,
     SocialPlatform,
     SocialPlatformConnection,
     SocialPost,
@@ -69,6 +73,9 @@ from schemas.social_scheduler import (
     CalendarDay,
     PlatformAuthUrlResponse,
     PlatformConnectionResponse,
+    PlatformCredentialsIn,
+    PlatformCredentialsMessageResponse,
+    PlatformCredentialsResponse,
     PlatformDisconnectResponse,
     PostCreate,
     PostDeleteResponse,
@@ -79,6 +86,16 @@ from schemas.social_scheduler import (
 )
 from services.social import get_service
 from services.social.connections import apply_tokens, reconnect_required
+from services.social.credentials import (
+    apply_credentials,
+    configured_from_credentials,
+    credential_field_names,
+    delete_credentials,
+    effective_credentials,
+    load_credential,
+    platform_configured,
+    upsert_credentials,
+)
 from services.social.pkce import generate_code_verifier, is_valid_code_verifier
 
 logger = logging.getLogger(__name__)
@@ -154,8 +171,11 @@ async def _owned_connection(
     return result.scalar_one_or_none()
 
 
-def _connection_response(platform: str, conn: Optional[SocialPlatformConnection]) -> PlatformConnectionResponse:
-    configured = settings.social_platform_configured(platform)
+def _connection_response(
+    platform: str,
+    conn: Optional[SocialPlatformConnection],
+    configured: bool,
+) -> PlatformConnectionResponse:
     if conn is None:
         return PlatformConnectionResponse(
             platform=platform, label=PLATFORM_LABELS[platform], connected=False, configured=configured
@@ -172,6 +192,23 @@ def _connection_response(platform: str, conn: Optional[SocialPlatformConnection]
         connected_at=conn.created_at,
         updated_at=conn.updated_at,
     )
+
+
+async def _platform_configured_map(db: AsyncSession) -> dict[str, bool]:
+    """Effective per-platform ``configured`` flag for the caller's DB session.
+
+    A ``platform_credentials`` DB row overrides the environment pair
+    (services/social/credentials.py), so configuration is no longer purely an
+    environment question — it must be resolved per request.
+    """
+    result = await db.execute(select(PlatformCredential))
+    rows = {row.platform: row for row in result.scalars().all()}
+    configured_map: dict[str, bool] = {}
+    for platform in PLATFORM_VALUES:
+        row = rows.get(platform)
+        creds = effective_credentials(platform, row)
+        configured_map[platform] = configured_from_credentials(platform, creds)
+    return configured_map
 
 
 def _redirect_uri(request: Request, platform: str) -> str:
@@ -486,17 +523,22 @@ async def list_platforms(
         select(SocialPlatformConnection).where(SocialPlatformConnection.owner_email == current_user.email)
     )
     by_platform = {c.platform: c for c in result.scalars().all()}
-    return [_connection_response(p, by_platform.get(p)) for p in PLATFORM_VALUES]
+    configured_map = await _platform_configured_map(db)
+    return [
+        _connection_response(p, by_platform.get(p), configured_map[p])
+        for p in PLATFORM_VALUES
+    ]
 
 
 @router.get("/platforms/{platform}/auth-url", response_model=PlatformAuthUrlResponse)
 async def platform_auth_url(
     platform: str,
     request: Request,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     platform = _platform_or_404(platform)
-    if not settings.social_platform_configured(platform):
+    if not await platform_configured(db, platform):
         raise HTTPException(
             status_code=503,
             detail=f"{PLATFORM_LABELS[platform]} is not configured on this instance "
@@ -505,7 +547,10 @@ async def platform_auth_url(
     code_verifier = generate_code_verifier() if platform == "youtube" else None
     state = _mint_oauth_state(current_user.email, platform, code_verifier=code_verifier)
     try:
-        auth_url = _service_for(request, platform).get_auth_url(state, code_verifier=code_verifier)
+        service = _service_for(request, platform)
+        row = await load_credential(db, platform)
+        apply_credentials(service, platform, effective_credentials(platform, row))
+        auth_url = service.get_auth_url(state, code_verifier=code_verifier)
     except Exception as exc:
         logger.exception("Could not build %s auth URL", platform)
         raise HTTPException(status_code=502, detail=f"Could not start {PLATFORM_LABELS[platform]} sign-in: {exc}")
@@ -550,6 +595,11 @@ async def platform_oauth_callback(
 
     service = _service_for(request, platform)
     try:
+        # The callback's token exchange authenticates with the OAuth app's
+        # id/secret, which may come from a DB override rather than the env —
+        # apply the effective pair so an operator-configured app works here.
+        row = await load_credential(db, platform)
+        apply_credentials(service, platform, effective_credentials(platform, row))
         # Only YouTube carries a verifier; the other providers receive None
         # and ignore it (uniform service interface).
         tokens = await service.exchange_code(
@@ -601,6 +651,95 @@ async def disconnect_platform(
     await db.delete(conn)
     await db.commit()
     return PlatformDisconnectResponse(message=f"{PLATFORM_LABELS[platform]} disconnected", platform=platform)
+
+
+# ── Platform app credentials (operator-set DB overrides of the env pair) ─────
+# GET/PUT/DELETE /platforms/credentials[/{platform}]. These are deployment
+# settings (the OAuth app the whole instance signs in with), so they are
+# admin-gated like every other operator surface; the *status* (configured or
+# not) is public to authenticated users via GET /platforms above. Secrets are
+# write-only — no response ever contains one.
+
+
+@router.get("/platforms/credentials", response_model=list[PlatformCredentialsResponse])
+async def list_platform_credentials(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(require_admin),
+):
+    result = await db.execute(select(PlatformCredential))
+    rows = {row.platform: row for row in result.scalars().all()}
+    response: list[PlatformCredentialsResponse] = []
+    for platform in PLATFORM_VALUES:
+        row = rows.get(platform)
+        creds = effective_credentials(platform, row)
+        # The identifier is not secret and may be echoed back to the operator
+        # who saved it; the secret never leaves the server.
+        identifier = row.client_id if row is not None and row.client_id else ""
+        response.append(
+            PlatformCredentialsResponse(
+                platform=platform,
+                label=PLATFORM_LABELS[platform],
+                configured=configured_from_credentials(platform, creds),
+                source=creds.get("source", "none"),
+                identifier=identifier,
+                has_secret=bool(row and row.client_secret),
+                updated_at=row.updated_at if row is not None else None,
+            )
+        )
+    return response
+
+
+@router.put(
+    "/platforms/credentials/{platform}",
+    response_model=PlatformCredentialsMessageResponse,
+)
+async def put_platform_credentials(
+    platform: str,
+    payload: PlatformCredentialsIn,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(require_admin),
+):
+    platform = _platform_or_404(platform)
+    identifier_field, secret_field = credential_field_names(platform)
+    identifier = (getattr(payload, identifier_field) or "").strip()
+    secret = (getattr(payload, secret_field) or "").strip()
+    if not identifier or not secret:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Both {identifier_field} and {secret_field} are required to "
+                f"set up {PLATFORM_LABELS[platform]} app credentials."
+            ),
+        )
+    await upsert_credentials(db, platform, identifier, secret)
+    logger.info("%s app credentials saved via the settings page", platform)
+    return PlatformCredentialsMessageResponse(
+        message=f"{PLATFORM_LABELS[platform]} app credentials saved",
+        platform=platform,
+    )
+
+
+@router.delete(
+    "/platforms/credentials/{platform}",
+    response_model=PlatformCredentialsMessageResponse,
+)
+async def delete_platform_credentials(
+    platform: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(require_admin),
+):
+    platform = _platform_or_404(platform)
+    removed = await delete_credentials(db, platform)
+    if not removed:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{PLATFORM_LABELS[platform]} has no app credentials saved in the database",
+        )
+    logger.info("%s app credentials removed via the settings page", platform)
+    return PlatformCredentialsMessageResponse(
+        message=f"{PLATFORM_LABELS[platform]} app credentials removed — environment values (if any) apply again",
+        platform=platform,
+    )
 
 
 # ── stats / calendar ─────────────────────────────────────────────────────────

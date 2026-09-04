@@ -43,6 +43,9 @@ import SocialQueuePage from './pages/social-scheduler/QueuePage';
 import SocialHistoryPage from './pages/social-scheduler/HistoryPage';
 import SocialCalendarPage from './pages/social-scheduler/CalendarPage';
 import SocialSettingsPage from './pages/social-scheduler/SettingsPage';
+import PrivacyPolicy from './pages/PrivacyPolicy';
+import DataDeletion from './pages/DataDeletion';
+import DeleteConfirm from './pages/DeleteConfirm';
 
 export default function App() {
   return (
@@ -70,6 +73,11 @@ export default function App() {
           <Route path="/verify-email" element={<VerifyEmail />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          {/* Public compliance pages — reachable without logging in (Meta app
+              Basic settings: Privacy Policy URL and User Data Deletion URL). */}
+          <Route path="/privacy" element={<PrivacyPolicy />} />
+          <Route path="/delete" element={<DataDeletion />} />
+          <Route path="/delete-confirm" element={<DeleteConfirm />} />
 
           {/* operations dashboard — separate module with its own sidebar */}
           <Route

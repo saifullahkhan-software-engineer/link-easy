@@ -82,7 +82,41 @@ an "Invalid OAuth client"/redirect error.)
 | `INSTAGRAM_APP_SECRET` | same app secret |
 | `INSTAGRAM_REDIRECT_URI` | the instagram callback URL from step 3 |
 
-## 6. Graph API version (code side)
+The app id/secret can alternatively be entered **from the settings page**
+instead of the environment: on each platform card that shows "Set up app
+credentials", an admin can save the pair to the database (it overrides the
+environment values). This is how the hosted instance's operator configures
+Meta without touching the deployment's env vars.
+
+## 6. Meta app settings (Privacy Policy URL + User Data Deletion URL)
+
+Meta app review (and Basic settings validation) requires two public URLs.
+Both pages are served by the **frontend** (no login needed) — fill them with
+the domain users open the app on:
+
+1. **Privacy Policy URL** → `https://<your-domain>/privacy`
+   A static policy page. Nothing else to configure.
+2. **User Data Deletion URL** → `https://<your-domain>/delete`
+   A public request form. Entering an email there **never deletes anything**:
+   it emails the account owner a one-time signed confirmation link
+   (`/delete-confirm?token=…`) which performs the deletion when clicked.
+3. Set the deployment env var so the confirmation email links to the right
+   frontend domain:
+
+   | Variable | Value |
+   | --- | --- |
+   | `DATA_DELETION_URL` | `https://<your-domain>/delete-confirm` |
+
+   (`DATA_DELETION_URL` is reported by `/health` when unset, like the other
+   optional settings.)
+
+The deletion flow is deliberately anonymous and generic: both API endpoints
+(`POST /api/v1/user-data/deletion-request` and
+`POST /api/v1/user-data/deletion-confirm`) return the same message whether or
+not the account exists, and deletion only ever happens through the
+email-confirmed one-time link.
+
+## 7. Graph API version (code side)
 
 All Meta calls derive from `GRAPH_API_VERSION` in
 `services/social/meta_graph.py` (currently **v25.0**, supported through
@@ -92,7 +126,7 @@ July 2028). Meta sunsets versions on a ~2-year clock — v18.0 died
 fails the test suite; bump the constant (one line fixes both platforms) and
 check the live window at developers.facebook.com/docs/graph-api/changelog.
 
-## 7. Connecting (and reading failures)
+## 8. Connecting (and reading failures)
 
 1. In a browser **logged into the Page-admin Facebook account**, open the
    app's settings and click Connect on each card.

@@ -79,6 +79,12 @@ DEFAULT_RULES: dict[str, RateLimitRule] = {
         RateLimitRule("auth:reset-password", 10, 3600, "Password reset submissions per hour"),
         RateLimitRule("auth:verify-email", 20, 3600, "Email verification attempts per hour"),
         RateLimitRule("auth:resend-verification", 5, 3600, "Verification resends per hour"),
+        # Account-deletion flow (public endpoints, no auth): the request
+        # endpoint is scoped per submitted email so an attacker cannot spam a
+        # victim's inbox, and the confirm endpoint is scoped per caller so a
+        # guessed token cannot be brute-forced.
+        RateLimitRule("user-data:request", 5, 3600, "Account-deletion emails per hour"),
+        RateLimitRule("user-data:confirm", 10, 3600, "Account-deletion confirmations per hour"),
         RateLimitRule("profile:scan", 20, 3600, "LinkedIn profile scans per hour"),
         RateLimitRule("live:start", 30, 3600, "Live-chat browser starts per hour"),
     )
