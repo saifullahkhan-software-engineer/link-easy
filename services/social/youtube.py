@@ -30,7 +30,11 @@ from the fixes needed for the OAuth routes and the worker to actually work:
   People API enabled) still connects fine with just the channel info.
 """
 import asyncio
+import json
 import os
+import socket
+import ssl
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -60,6 +64,7 @@ class YouTubeService:
     ]
     TOKEN_URI = "https://oauth2.googleapis.com/token"
     AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+    UPLOAD_RETRY_ATTEMPTS = 4
 
     def __init__(self):
         self.client_id = settings.YOUTUBE_CLIENT_ID
@@ -242,7 +247,7 @@ class YouTubeService:
         on_tokens_callback=None,
     ) -> Dict[str, str]:
         """Upload a video as a YouTube Short."""
-        from googleapiclient.errors import HttpError
+        from googleapiclient.errors import HttpError, ResumableUploadError
         from googleapiclient.http import MediaFileUpload
 
         # Validate video file
@@ -272,7 +277,32 @@ class YouTubeService:
         def _upload():
             youtube = self._client("youtube", "v3", access_token, refresh_token)
             media = MediaFileUpload(video_path, mimetype="video/mp4", resumable=True)
-            return youtube.videos().insert(part="snippet,status", body=body, media_body=media).execute()
+            request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+            last_error = None
+            for attempt in range(1, self.UPLOAD_RETRY_ATTEMPTS + 1):
+                try:
+                    response = None
+                    while response is None:
+                        _, response = request.next_chunk()
+                    return response
+                except HttpError as exc:
+                    # Retry only server-side failures. A 4xx response is a
+                    # definitive provider rejection and must retain its body.
+                    if getattr(exc.resp, "status", 0) < 500:
+                        raise
+                    last_error = exc
+                except (
+                    ResumableUploadError,
+                    ssl.SSLError,
+                    socket.timeout,
+                    TimeoutError,
+                    ConnectionError,
+                    OSError,
+                ) as exc:
+                    last_error = exc
+                if attempt < self.UPLOAD_RETRY_ATTEMPTS:
+                    time.sleep(2 ** (attempt - 1))
+            raise last_error
 
         try:
             response = await asyncio.to_thread(_upload)
@@ -280,23 +310,43 @@ class YouTubeService:
             error_detail = e.error_details[0] if e.error_details else {}
             reason = error_detail.get("reason", "unknown") if isinstance(error_detail, dict) else "unknown"
             message = error_detail.get("message", str(e)) if isinstance(error_detail, dict) else str(e)
+            response_body = _google_response_body(e)
 
             # Provide actionable error messages
             if reason == "youtubeSignupRequired":
-                raise Exception("Create a YouTube channel for the connected Google account, then reconnect it.")
+                raise Exception(
+                    "Create a YouTube channel for the connected Google account, then reconnect it; "
+                    f"response_body={response_body}"
+                )
             elif reason == "uploadLimitExceeded":
-                raise Exception("The channel has reached its daily upload limit. Try again later.")
+                raise Exception(
+                    "The channel has reached its daily upload limit. Try again later; "
+                    f"response_body={response_body}"
+                )
             elif reason in ("quotaExceeded", "dailyLimitExceeded"):
-                raise Exception("The Google Cloud project has exhausted its YouTube API quota.")
+                raise Exception(
+                    "The Google Cloud project has exhausted its YouTube API quota; "
+                    f"response_body={response_body}"
+                )
             elif e.resp.status == 401:
-                raise Exception("Reconnect YouTube to grant a fresh upload token.")
+                raise Exception(
+                    "Reconnect YouTube to grant a fresh upload token; "
+                    f"response_body={response_body}"
+                )
             elif e.resp.status == 403:
-                raise Exception("Confirm YouTube Data API v3 is enabled and the account owns a YouTube channel.")
-            raise Exception(f"YouTube upload failed: {message}")
+                raise Exception(
+                    "Confirm YouTube Data API v3 is enabled and the account owns a YouTube channel; "
+                    f"response_body={response_body}"
+                )
+            raise Exception(f"YouTube upload failed: {message}; response_body={response_body}")
         except (FileNotFoundError, ValueError):
             raise
         except Exception as e:
-            raise Exception(f"YouTube upload error: {e}")
+            # SSL resets happen before Google can send an HTTP response.
+            raise Exception(
+                f"YouTube upload transport error ({e.__class__.__name__}): {e}; "
+                "response_body=<none: no HTTP response was received>"
+            )
 
         video_id = response.get("id", "")
         if not video_id:
@@ -472,7 +522,34 @@ def _http_error_message(exc: Exception, prefix: str) -> str:
             f"{prefix}: the connected Google account has not granted playlist access. "
             "Reconnect YouTube and approve the new permission."
             + (f" (Google said: {message})" if message else "")
+            + f"; response_body={_google_response_body(exc)}"
         )
     if message:
-        return f"{prefix}: {message}" + (f" ({reason})" if reason else "")
-    return f"{prefix}: {exc}"
+        return (
+            f"{prefix}: {message}"
+            + (f" ({reason})" if reason else "")
+            + f"; response_body={_google_response_body(exc)}"
+        )
+    return f"{prefix}: {exc}; response_body={_google_response_body(exc)}"
+
+
+def _google_response_body(exc: Exception, max_chars: int = 12000) -> str:
+    """Extract the complete bounded body carried by a Google HttpError."""
+    content = getattr(exc, "content", None)
+    if content is None:
+        return "<none: Google error contained no response body>"
+    if isinstance(content, (bytes, bytearray)):
+        text = content.decode("utf-8", "replace")
+    else:
+        text = str(content)
+    text = text.strip()
+    if not text:
+        return "<empty response body>"
+    try:
+        parsed = json.loads(text)
+        text = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        pass
+    if len(text) > max_chars:
+        return text[:max_chars] + f"… [truncated; {len(text)} chars total]"
+    return text

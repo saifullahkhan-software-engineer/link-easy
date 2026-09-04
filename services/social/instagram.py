@@ -19,6 +19,9 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
@@ -71,7 +74,10 @@ async def _retry_transient(action, attempts: int = _DIRECT_UPLOAD_ATTEMPTS):
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             last = exc
             if attempt >= attempts:
-                raise
+                raise Exception(
+                    f"Instagram upload transport error ({exc.__class__.__name__}): {exc}; "
+                    "response_body=<none: no HTTP response was received>"
+                ) from exc
             delay = _DIRECT_UPLOAD_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
             logger.warning(
                 "Instagram upload step hit a transient error (%s); retrying %d/%d in %.1fs",
@@ -371,8 +377,12 @@ class InstagramService:
         # a public URL; the URL flow stays as the fallback for an instance that
         # has a public address (or that explicitly disabled direct upload).
         if settings.INSTAGRAM_DIRECT_UPLOAD and video_path:
+            normalized_path = video_path
+            temporary_path: Optional[str] = None
             try:
-                return await self._publish_reel_direct(ig_user_id, video_path, caption, access_token)
+                if settings.INSTAGRAM_NORMALIZE_VIDEO:
+                    normalized_path = temporary_path = await self._normalize_video(video_path)
+                return await self._publish_reel_direct(ig_user_id, normalized_path, caption, access_token)
             except Exception as exc:
                 # A missing local file surfaces as FileNotFoundError; if the
                 # URL flow can take over (a public video_url) it does, otherwise
@@ -383,6 +393,12 @@ class InstagramService:
                     "Instagram direct upload failed (%s); retrying with the public video URL",
                     exc.__class__.__name__,
                 )
+            finally:
+                if temporary_path:
+                    try:
+                        os.remove(temporary_path)
+                    except OSError:
+                        pass
 
         if not url_is_public:
             if settings.INSTAGRAM_DIRECT_UPLOAD:
@@ -400,6 +416,53 @@ class InstagramService:
                 "the video is already stored on this server — or set PUBLIC_API_URL."
             )
         return await self._publish_reel_by_url(ig_user_id, video_url, caption, access_token)
+
+    async def _normalize_video(self, video_path: str) -> str:
+        """Create a temporary, broadly compatible MP4 for Meta's processor."""
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError(
+                "Instagram video normalization requires ffmpeg, but ffmpeg is not installed"
+            )
+        fd, output_path = tempfile.mkstemp(prefix="instagram-", suffix=".mp4")
+        os.close(fd)
+        command = [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", video_path,
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-r", "30",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+            "-movflags", "+faststart", output_path,
+        ]
+
+        def _run() -> None:
+            try:
+                completed = subprocess.run(
+                    command, capture_output=True, text=True, timeout=900, check=False
+                )
+            except Exception:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+                raise
+            if completed.returncode != 0:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+                detail = (completed.stderr or "ffmpeg returned a non-zero exit code").strip()
+                raise RuntimeError(f"Instagram video normalization failed: {detail[-2000:]}")
+
+        await asyncio.to_thread(_run)
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise RuntimeError("Instagram video normalization produced an empty file")
+        logger.info("Normalized Instagram video %s → %s", video_path, output_path)
+        return output_path
 
     # ── Direct (resumable) upload ────────────────────────────────────────────
 
@@ -489,7 +552,7 @@ class InstagramService:
                 detail = detail or str(data.get("message") or "rejected")
             raise Exception(
                 f"Instagram video upload failed (HTTP {status}): "
-                f"{detail or (raw[:200] if isinstance(raw, str) else 'rejected')}"
+                f"{detail or 'rejected'}; response_body={_format_response_body(data, raw)}"
             )
         if not isinstance(data, dict):
             # An empty 200, or a proxy's HTML error page. Not treated as a
@@ -585,9 +648,15 @@ class InstagramService:
                         for phase in ("uploading_phase", "processing_phase")
                     }
                     detail = f"{detail} ({phases})"
-                raise Exception(f"Instagram video processing failed: {detail}")
+                raise Exception(
+                    f"Instagram video processing failed: {detail}; "
+                    f"response_body={_format_response_body(data, data)}"
+                )
             await asyncio.sleep(poll_seconds)
-        raise Exception("Instagram video processing timed out")
+        raise Exception(
+            "Instagram video processing timed out; response_body="
+            "The API never returned FINISHED or ERROR within the polling window"
+        )
 
 
 def _maybe_json(raw: Any) -> Any:
@@ -605,6 +674,20 @@ def _maybe_json(raw: Any) -> Any:
         return json.loads(raw)
     except ValueError:
         return raw
+
+
+def _format_response_body(data: Any, raw: Any, max_chars: int = 12000) -> str:
+    """Return a bounded, readable upstream body for post/debug diagnostics."""
+    if isinstance(data, (dict, list)):
+        body = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    elif isinstance(raw, (bytes, bytearray)):
+        body = raw.decode("utf-8", "replace")
+    else:
+        body = str(raw or "")
+    body = body.strip() or "<empty response body>"
+    if len(body) > max_chars:
+        return body[:max_chars] + f"… [truncated; {len(body)} chars total]"
+    return body
 
 
 def _first_page_with_instagram(pages: List[Dict[str, Any]]):
@@ -625,5 +708,9 @@ def _raise_on_error(data: Any, prefix: str) -> None:
         if isinstance(err, dict):
             message = err.get("message", "Unknown error")
             code = err.get("code")
-            raise Exception(f"{prefix}: {message}" + (f" (code {code})" if code else ""))
-        raise Exception(f"{prefix}: {err}")
+            raise Exception(
+                f"{prefix}: {message}"
+                + (f" (code {code})" if code else "")
+                + f"; response_body={_format_response_body(data, data)}"
+            )
+        raise Exception(f"{prefix}: {err}; response_body={_format_response_body(data, data)}")

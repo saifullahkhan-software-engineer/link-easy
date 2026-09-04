@@ -228,6 +228,10 @@ class Settings(BaseSettings):
     # rejected at container-creation time, the worker says so in the post's
     # error and — when PUBLIC_API_URL is set — retries through the URL path.
     INSTAGRAM_DIRECT_UPLOAD: bool = True
+    # Normalize direct-upload media to a conservative H.264/AAC MP4 before
+    # sending it to Meta. This avoids ProcessingFailedError for HEVC, odd
+    # dimensions, variable pixel formats and incompatible audio streams.
+    INSTAGRAM_NORMALIZE_VIDEO: bool = True
 
     # Where uploaded videos are stored. Files are served back under
     # /uploads/social/<generated-name> (a mount in main.py) because Instagram
