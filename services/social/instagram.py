@@ -56,7 +56,7 @@ class InstagramService:
     """Service for Instagram Reels publishing."""
 
     GRAPH_API = "https://graph.facebook.com/v18.0"
-    SCOPES = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement"
+    SCOPES = "instagram_basic,instagram_content_publish"
 
     def __init__(self):
         self.app_id = settings.INSTAGRAM_APP_ID
@@ -78,7 +78,7 @@ class InstagramService:
             "response_type": "code",
             "state": state,
         }
-        return f"https://www.facebook.com/v18.0/dialog/oauth?{urlencode(params)}"
+        return f"https://www.facebook.com/v21.0/dialog/oauth?{urlencode(params)}"
 
     async def exchange_code(self, code: str, *, code_verifier=None) -> Dict[str, Any]:
         """Exchange an authorization code for a (long-lived) access token.
