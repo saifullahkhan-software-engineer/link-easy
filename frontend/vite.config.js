@@ -22,6 +22,14 @@ export default defineConfig({
         target: backendUrl,
         changeOrigin: true,
       },
+      // Uploaded videos/thumbnails are served by the backend's static mount
+      // under /uploads/social/... — proxy those too so the browser can preview
+      // a clip on the same origin it talks to the API on (no CORS, works in
+      // dev/preview environments that are not localhost).
+      '/uploads': {
+        target: backendUrl,
+        changeOrigin: true,
+      },
     },
   },
   preview: {

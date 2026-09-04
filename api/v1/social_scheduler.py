@@ -26,7 +26,9 @@ Route map (prefix /api/v1/social-scheduler):
   GET    /posts/{id}
   PATCH  /posts/{id}                  edit / reschedule / cancel
   DELETE /posts/{id}
-  POST   /upload                      multipart video upload → upload_id
+  POST   /upload                      multipart video upload → upload_id (+ duration)
+  POST   /uploads/{id}/trim           re-encode [start,end) in place → fresh upload meta
+  POST   /uploads/{id}/thumbnail      frame of the clip OR uploaded image → public URL
   POST   /parse-copy                  pasted message → per-platform copy (Groq)
   GET    /platforms                   connection status for all 4 platforms
   GET    /platforms/youtube/playlists channel playlists for the upload editor
@@ -45,6 +47,7 @@ Route map (prefix /api/v1/social-scheduler):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -55,7 +58,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import RedirectResponse
 from jose import JWTError, jwt
 from sqlalchemy import and_, func, select
@@ -95,6 +98,8 @@ from schemas.social_scheduler import (
     ShareTargetIn,
     ShareTargetResponse,
     StatsResponse,
+    ThumbnailResponse,
+    TrimRequest,
     UploadResponse,
     YouTubePlaylist,
     YouTubePlaylistListResponse,
@@ -106,6 +111,14 @@ from services.ai.copy_parser import (
 )
 from services.social import get_service
 from services.social.connections import apply_tokens, read_tokens, reconnect_required
+from services.social.video_editor import (
+    VideoEditError,
+    extract_frame,
+    ffmpeg_available,
+    probe_duration,
+    trim_video,
+    write_jpeg_thumbnail,
+)
 from services.social.credentials import (
     apply_credentials,
     configured_from_credentials,
@@ -167,6 +180,50 @@ def _upload_path(upload_id: str) -> str:
 def _public_video_url(request: Request, upload_id: str) -> str:
     base = settings.PUBLIC_API_URL.rstrip("/") if settings.PUBLIC_API_URL else str(request.base_url).rstrip("/")
     return f"{base}{UPLOADS_URL_PREFIX}/{upload_id}"
+
+
+def _upload_file_or_404(upload_id: str) -> str:
+    """Resolve a stored upload to its path or raise a client-friendly error."""
+    path = _upload_path(upload_id)  # 400 when upload_id is not one of ours
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Upload not found — upload the video again")
+    return path
+
+
+def _thumbnail_path(upload_id: str) -> str:
+    """Absolute path of the single JPEG thumbnail attached to an upload.
+
+    The thumb reuses the upload's uuid stem with a fixed ``.thumb.jpg`` name,
+    so replacing it (video frame → uploaded image → another frame) just
+    overwrites one file and the public URL never changes.
+    """
+    stem = (upload_id or "")[:32]
+    return os.path.join(_upload_dir(), f"{stem}.thumb.jpg")
+
+
+def _public_thumbnail_url(request: Request, upload_id: str) -> str:
+    thumb_name = os.path.basename(_thumbnail_path(upload_id))
+    base = settings.PUBLIC_API_URL.rstrip("/") if settings.PUBLIC_API_URL else str(request.base_url).rstrip("/")
+    return f"{base}{UPLOADS_URL_PREFIX}/{thumb_name}"
+
+
+def _require_ffmpeg() -> None:
+    if not ffmpeg_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Video editing is not available on this instance (no ffmpeg binary).",
+        )
+
+
+async def _probe_duration_optional(path: str) -> Optional[float]:
+    """Best-effort duration probe; None when ffmpeg is unavailable or fails."""
+    if not ffmpeg_available():
+        return None
+    try:
+        return await asyncio.to_thread(probe_duration, path)
+    except VideoEditError as exc:
+        logger.warning("Could not probe video duration for %s: %s", path, exc)
+        return None
 
 
 async def _owned_post(db: AsyncSession, post_id: str, owner_email: str) -> SocialPost:
@@ -484,13 +541,17 @@ async def delete_post(
     # Remove the file only if no other post of this user still references it.
     other = await db.execute(select(func.count()).select_from(SocialPost).where(SocialPost.video_path == video_path))
     if other.scalar_one() == 0:
-        try:
-            if os.path.commonpath([os.path.abspath(video_path), _upload_dir()]) == _upload_dir():
-                os.remove(video_path)
-        except FileNotFoundError:
-            pass
-        except Exception as exc:  # never fail the delete over a stray file
-            logger.warning("Could not remove upload %s: %s", video_path, exc)
+        # The thumbnail shares the upload's uuid stem, so removing the clip
+        # clears its thumbnail too.
+        thumb_path = _thumbnail_path(os.path.basename(video_path))
+        for candidate in (video_path, thumb_path):
+            try:
+                if os.path.commonpath([os.path.abspath(candidate), _upload_dir()]) == _upload_dir():
+                    os.remove(candidate)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:  # never fail the delete over a stray file
+                logger.warning("Could not remove upload %s: %s", candidate, exc)
 
     return PostDeleteResponse(message="Post deleted", id=post_id)
 
@@ -544,12 +605,158 @@ async def upload_video(
         _safe_remove(destination)
         raise HTTPException(status_code=400, detail="The uploaded file is empty")
 
+    # Report the clip's duration so the upload editor can draw its trim
+    # scrubber. Best-effort: when ffmpeg is absent (or the file is unusual) the
+    # value is None and the page simply hides the trim controls.
+    duration = await _probe_duration_optional(destination)
+    if duration is not None:
+        logger.info("Uploaded %s for %s: %.2fs", upload_id, current_user.email, duration)
+
     return UploadResponse(
         upload_id=upload_id,
         filename=file.filename or upload_id,
         size_bytes=written,
         content_type=file.content_type or "video/mp4",
         video_url=_public_video_url(request, upload_id),
+        duration_seconds=duration,
+    )
+
+
+@router.post("/uploads/{upload_id}/trim", response_model=UploadResponse)
+async def trim_upload(
+    upload_id: str,
+    payload: TrimRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Trim the stored clip to ``[start, end)`` and re-encode it in place.
+
+    The trimmed file *replaces* the original upload on disk (same upload_id,
+    same public URL), so whatever the editor keeps is exactly what the worker
+    later streams to the platforms — no change to scheduling or publishing is
+    needed. Returning the same shape as ``POST /upload`` lets the frontend swap
+    its upload state with the response and re-render a preview.
+    """
+    _require_ffmpeg()
+    path = _upload_file_or_404(upload_id)
+    extension = os.path.splitext(upload_id)[1].lower()
+
+    try:
+        total = await asyncio.to_thread(probe_duration, path)
+    except VideoEditError as exc:
+        raise HTTPException(status_code=422, detail=f"Could not read the video: {exc}")
+
+    start = min(max(payload.start, 0.0), total)
+    end = total if payload.end is None else min(max(payload.end, 0.0), total)
+    if end - start < 0.1:
+        raise HTTPException(
+            status_code=400,
+            detail="The trimmed clip would be too short. Keep at least 0.1 s.",
+        )
+    if end < start:
+        raise HTTPException(status_code=400, detail="The end time must be after the start time.")
+
+    # Nothing worth re-encoding: keep the original file untouched.
+    changed = start > 0.05 or end < total - 0.05
+    if changed:
+        temporary = f"{path}.{uuid.uuid4().hex[:8]}.tmp{extension or '.mp4'}"
+        try:
+            await asyncio.to_thread(
+                trim_video, path, temporary, start, end - start, extension
+            )
+        except VideoEditError as exc:
+            _safe_remove(temporary)
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:
+            _safe_remove(temporary)
+            logger.exception("Trim failed for %s", upload_id)
+            raise HTTPException(status_code=500, detail="Could not trim the video.") from exc
+        # Atomic replace so a crash mid-encode never leaves a half-written file
+        # at the upload's real path.
+        os.replace(temporary, path)
+
+    new_size = os.path.getsize(path)
+    logger.info("Trimmed %s for %s → [%.2f, %.2f] (%.2fs)", upload_id, current_user.email, start, end, end - start)
+    return UploadResponse(
+        upload_id=upload_id,
+        filename=os.path.basename(upload_id),
+        size_bytes=new_size,
+        content_type="video/mp4" if extension != ".webm" else "video/webm",
+        video_url=_public_video_url(request, upload_id),
+        duration_seconds=round(end - start, 3),
+    )
+
+
+@router.post("/uploads/{upload_id}/thumbnail", response_model=ThumbnailResponse)
+async def set_thumbnail(
+    upload_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    file: Optional[UploadFile] = File(default=None),
+    at: Optional[float] = Form(default=None),
+):
+    """Attach a thumbnail to an upload, from the video or from the user's PC.
+
+    Two modes, chosen by whether a file is sent:
+
+    * **File present** — the image is validated/normalised and stored (source
+      ``"upload"``). Pillow re-encodes it to a bounded JPEG so a PNG/WebP/HEIC
+      and a giant photo both end up as one small, consistent file.
+    * **File absent** — a JPEG still is extracted from the clip at ``at``
+      seconds (source ``"video_frame"``). ``at`` is clamped to the clip's
+      duration, so a stale time from before a trim still works.
+
+    Either way the image is written to ``<stem>.thumb.jpg`` next to the video
+    and served at the returned public URL. It replaces any thumbnail already
+    set for this upload.
+    """
+    path = _upload_file_or_404(upload_id)
+    destination = _thumbnail_path(upload_id)
+    source = "upload"
+    frame_at: Optional[float] = None
+
+    if file is not None:
+        if file.content_type and not file.content_type.lower().startswith("image/"):
+            raise HTTPException(status_code=400, detail="Thumbnail must be an image file.")
+        data = await file.read(2 * 1024 * 1024 + 1)
+        if not data:
+            raise HTTPException(status_code=400, detail="The thumbnail file is empty.")
+        if len(data) > 2 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Thumbnail image must be smaller than 2 MB.")
+        try:
+            await asyncio.to_thread(write_jpeg_thumbnail, data, destination)
+        except VideoEditError as exc:
+            _safe_remove(destination)
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _safe_remove(destination)
+            logger.exception("Thumbnail image save failed for %s", upload_id)
+            raise HTTPException(status_code=500, detail="Could not save that thumbnail image.") from exc
+        logger.info("Thumbnail image set for %s by %s", upload_id, current_user.email)
+    else:
+        _require_ffmpeg()
+        try:
+            total = await asyncio.to_thread(probe_duration, path)
+        except VideoEditError as exc:
+            raise HTTPException(status_code=422, detail=f"Could not read the video: {exc}")
+        frame_at = 0.0 if at is None else min(max(at, 0.0), max(total - 0.01, 0.0))
+        try:
+            await asyncio.to_thread(extract_frame, path, destination, frame_at)
+        except VideoEditError as exc:
+            _safe_remove(destination)
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:
+            _safe_remove(destination)
+            logger.exception("Thumbnail frame failed for %s", upload_id)
+            raise HTTPException(status_code=500, detail="Could not capture a thumbnail frame.") from exc
+        source = "video_frame"
+        logger.info("Thumbnail frame @%.2fs set for %s by %s", frame_at, upload_id, current_user.email)
+
+    return ThumbnailResponse(
+        upload_id=upload_id,
+        thumbnail_url=_public_thumbnail_url(request, upload_id),
+        source=source,
+        at_seconds=frame_at,
     )
 
 
