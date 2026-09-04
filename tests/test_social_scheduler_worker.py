@@ -245,15 +245,21 @@ class PublishSocialPostTests(unittest.TestCase):
         self.assertEqual(ig.call_args.kwargs["video_url"], "https://cdn.example.com/clip.mp4")
         self.assertEqual(ig.call_args.kwargs["video_path"], self.video)
 
-    def test_instagram_url_flow_refuses_an_unreachable_url_when_direct_upload_is_off(self):
+    def test_instagram_url_flow_decision_is_delegated_to_the_service(self):
+        """The worker hands over BOTH the stored file and the URL and lets the
+        service choose the delivery. A non-public URL is no longer pre-empted
+        here — the service knows the flag, whether the file exists, and whether
+        the URL is reachable, and raises a clear error only when it must."""
         post_id = self._post(["instagram"], video_url="http://192.168.1.20:8000/uploads/clip.mp4")
         self._connect("instagram", expires_in=3600, refresh=None)
+        ig = AsyncMock(return_value={"media_id": "m", "post_url": "https://www.instagram.com/reel/m/"})
         with patch.object(settings, "INSTAGRAM_DIRECT_UPLOAD", False), \
-             patch("services.social.instagram.InstagramService.publish_reel", AsyncMock(side_effect=AssertionError)):
+             patch("services.social.instagram.InstagramService.publish_reel", ig):
             outcome = tasks.publish_post(post_id)
 
-        self.assertEqual(outcome["status"], "failed")
-        self.assertIn("INSTAGRAM_DIRECT_UPLOAD", self._state(post_id)[1]["instagram"].error)
+        self.assertEqual(outcome["status"], "posted")
+        self.assertEqual(ig.call_args.kwargs["video_path"], self.video)
+        self.assertEqual(ig.call_args.kwargs["video_url"], "http://192.168.1.20:8000/uploads/clip.mp4")
 
     # ── YouTube: filing the Short into playlists ─────────────────────────────
 

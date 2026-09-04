@@ -168,10 +168,8 @@ export default function SocialSchedulePage() {
       .catch(() => setConnections([]));
   }, []);
 
-  const facebookSelected = form.platforms.includes('facebook');
   const youtubeSelected = form.platforms.includes('youtube');
   const youtubeConnected = Boolean(connections?.find((c) => c.platform === 'youtube')?.connected);
-
   // Playlists are fetched only once YouTube is actually a target, so an
   // Instagram-only upload never pays for the round trip and never sees the
   // picker. One fetch per mount unless the retry button asks for another.
@@ -209,11 +207,12 @@ export default function SocialSchedulePage() {
         : [...f.youtube_playlist_ids, playlistId],
     }));
 
-  // Saved groups are loaded when Facebook becomes a target. Unlike the
-  // playlist list this needs no OAuth connection: nothing is posted to a group,
-  // so an unconnected Facebook account is not a blocker.
+  // Saved groups load as soon as the page mounts: the picker is shown on every
+  // upload, because sharing a published video to groups is a manual checklist
+  // that works whether or not Facebook is one of the publish targets — it
+  // needs no OAuth connection (nothing is ever posted to a group for the user).
   useEffect(() => {
-    if (!facebookSelected || groupFetchStarted.current) return;
+    if (groupFetchStarted.current) return;
     groupFetchStarted.current = true;
     setGroupState({ status: 'loading', items: null, error: '' });
     socialSchedulerApi
@@ -224,7 +223,7 @@ export default function SocialSchedulePage() {
       .catch((err) => {
         setGroupState({ status: 'error', items: null, error: getErrorMessage(err, 'Could not load your saved groups') });
       });
-  }, [facebookSelected, groupReload]);
+  }, [groupReload]);
 
   const toggleGroup = (target) =>
     setForm((f) => ({
@@ -416,7 +415,9 @@ export default function SocialSchedulePage() {
         tiktok_caption: form.tiktok_caption,
         platform_copy: form.platform_copy,
         youtube_playlist_ids: youtubeSelected ? form.youtube_playlist_ids : [],
-        facebook_groups: facebookSelected ? form.facebook_groups : [],
+        // Groups are a manual share checklist, valid for any upload — even
+        // when Facebook is not one of the publish targets.
+        facebook_groups: form.facebook_groups,
       });
       toast.success(mode === 'direct' ? 'Video sent to the publish queue' : 'Post scheduled');
       navigate('/app/social-scheduler/queue');
@@ -616,18 +617,18 @@ export default function SocialSchedulePage() {
         )}
 
         {/* Facebook Groups — picked here, shared by hand after publishing */}
-        {facebookSelected && (
-          <section className="card p-6" data-testid="facebook-groups">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 className="text-base font-semibold text-zinc-100">Share to Facebook groups</h2>
-                <p className="mt-1 text-xs text-zinc-500">
-                  Facebook closed its Groups API, so LinkEasy cannot post into a group for you. Pick the groups here and
-                  the published post shows a checklist — each group one click away, with the caption ready to copy.
-                </p>
-              </div>
-              <span className="text-xs text-zinc-500">{form.facebook_groups.length} selected</span>
+        <section className="card p-6" data-testid="facebook-groups">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-zinc-100">Share to Facebook groups</h2>
+              <p className="mt-1 text-xs text-zinc-500">
+                Optional, and available on every upload — no Facebook Page connection needed. Facebook closed its
+                Groups API, so LinkEasy cannot post into a group for you: pick the groups here and the published post
+                shows a checklist with each group one click away and the caption ready to copy.
+              </p>
             </div>
+            <span className="text-xs text-zinc-500">{form.facebook_groups.length} selected</span>
+          </div>
 
             {groupState.status === 'loading' && (
               <p className="mt-4 text-xs text-zinc-500" data-testid="groups-loading">Loading your saved groups…</p>
@@ -717,7 +718,6 @@ export default function SocialSchedulePage() {
               </div>
             </form>
           </section>
-        )}
 
         {/* Copy */}
         <section className="card space-y-4 p-6">

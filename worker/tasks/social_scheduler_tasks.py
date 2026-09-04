@@ -54,7 +54,6 @@ from models.social_scheduler import (
 from services.social import get_service
 from services.social.connections import PlatformTokens, apply_tokens, read_tokens
 from services.social.credentials import apply_credentials_sync
-from services.social.instagram import is_public_video_url
 from worker.celery_app import celery_app
 from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 
@@ -381,16 +380,11 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
             return _success(result["video_id"], result["video_url"], note=note)
 
         if platform == "instagram":
-            # The file is read straight off this machine's uploads folder and
-            # pushed to Meta (no public video URL, no ngrok). ``video_url`` is
-            # kept only as a fallback for an instance that has one and has
-            # turned direct upload off.
-            if not settings.INSTAGRAM_DIRECT_UPLOAD and not is_public_video_url(post["video_url"]):
-                return _failure(
-                    "Instagram direct upload is disabled on this instance and the video URL is not "
-                    f"publicly reachable ({post['video_url'] or 'unset'}). Either keep "
-                    "INSTAGRAM_DIRECT_UPLOAD enabled or set PUBLIC_API_URL."
-                )
+            # The video lives on this server (both "publish now" and scheduled
+            # posts store the file under UPLOAD_DIR), so the worker always hands
+            # the stored file over and lets the service decide: direct upload by
+            # default, URL flow as a fallback for a public instance. No public
+            # URL is required, and a non-public video_url is not an error here.
             result = await service.publish_reel(
                 ig_user_id=account_id,
                 video_url=post["video_url"],

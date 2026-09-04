@@ -46,6 +46,43 @@ RUPLOAD_BASE = "https://rupload.facebook.com/ig-api-upload"
 #: generous timeouts instead of aiohttp's 5-minute default.
 _UPLOAD_TIMEOUT = aiohttp.ClientTimeout(total=3600, connect=30, sock_read=300)
 
+#: How many times a single direct-upload step is retried when the failure is a
+#: transient transport error (connection reset, timeout) rather than a Meta
+#: rejection. Reels can be large, so one dropped connection on a flaky uplink
+#: must not throw away the whole publish. Overridable for operators.
+_DIRECT_UPLOAD_ATTEMPTS = int(os.getenv("INSTAGRAM_DIRECT_UPLOAD_ATTEMPTS", "3"))
+_DIRECT_UPLOAD_RETRY_BASE_SECONDS = float(os.getenv("INSTAGRAM_DIRECT_UPLOAD_RETRY_BASE_SECONDS", "1.5"))
+
+
+async def _retry_transient(action, attempts: int = _DIRECT_UPLOAD_ATTEMPTS):
+    """Run an async ``action``, retrying only transient transport failures.
+
+    Meta's *business* errors (an ``ERROR`` container status, a rejected upload,
+    an auth failure) are raised immediately so the caller can fall back to the
+    URL flow or surface them to the user. Only network-level interruptions are
+    retried; each attempt re-runs the step from the start, which is safe here —
+    a container lost before its id was read is simply abandoned, and the byte
+    upload restarts from offset 0 against the same container.
+    """
+    last: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await action()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last = exc
+            if attempt >= attempts:
+                raise
+            delay = _DIRECT_UPLOAD_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                "Instagram upload step hit a transient error (%s); retrying %d/%d in %.1fs",
+                exc.__class__.__name__,
+                attempt + 1,
+                attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    raise last  # pragma: no cover — the loop always raises on its last attempt
+
 
 def is_public_video_url(url: Optional[str]) -> bool:
     """True when Instagram's servers could actually download ``url``.
@@ -326,22 +363,41 @@ class InstagramService:
         # Instagram's caption ceiling; the API rejects a longer one.
         caption = (caption or "")[:2200]
 
-        if video_path and settings.INSTAGRAM_DIRECT_UPLOAD:
+        url_is_public = is_public_video_url(video_url)
+
+        # The video is uploaded by the app to its own storage, so the bytes are
+        # on this server for BOTH "publish now" and scheduled posts. The direct
+        # (resumable) upload is therefore the default delivery and never needs
+        # a public URL; the URL flow stays as the fallback for an instance that
+        # has a public address (or that explicitly disabled direct upload).
+        if settings.INSTAGRAM_DIRECT_UPLOAD and video_path:
             try:
                 return await self._publish_reel_direct(ig_user_id, video_path, caption, access_token)
             except Exception as exc:
-                if not is_public_video_url(video_url):
+                # A missing local file surfaces as FileNotFoundError; if the
+                # URL flow can take over (a public video_url) it does, otherwise
+                # the original error is what the worker translates for the user.
+                if not url_is_public:
                     raise
                 logger.warning(
                     "Instagram direct upload failed (%s); retrying with the public video URL",
                     exc.__class__.__name__,
                 )
 
-        if not is_public_video_url(video_url):
+        if not url_is_public:
+            if settings.INSTAGRAM_DIRECT_UPLOAD:
+                # Direct upload was requested but the stored file is gone (or
+                # the direct upload failed above). The URL flow needs a public
+                # address, so name both ways out.
+                raise Exception(
+                    "Instagram could not be given the video. The direct upload did not succeed "
+                    "(the stored file may be missing) and this instance has no publicly reachable "
+                    "video URL — set PUBLIC_API_URL or restore the uploaded file."
+                )
             raise Exception(
-                "Instagram could not be given the video. Direct upload is unavailable (the stored file "
-                "is missing) and this instance has no publicly reachable video URL — set PUBLIC_API_URL "
-                "or restore the uploaded file."
+                "Instagram direct upload is disabled on this instance and the stored video URL is "
+                f"not publicly reachable ({video_url or 'unset'}). Enable INSTAGRAM_DIRECT_UPLOAD — "
+                "the video is already stored on this server — or set PUBLIC_API_URL."
             )
         return await self._publish_reel_by_url(ig_user_id, video_url, caption, access_token)
 
@@ -358,11 +414,15 @@ class InstagramService:
             raise ValueError("Video file is empty")
 
         async with aiohttp.ClientSession(timeout=_UPLOAD_TIMEOUT) as session:
-            container_id, upload_uri = await self._create_resumable_container(
-                session, ig_user_id, caption, access_token
+            container_id, upload_uri = await _retry_transient(
+                lambda: self._create_resumable_container(session, ig_user_id, caption, access_token)
             )
-            await self._upload_video_bytes(session, upload_uri, video_path, file_size, access_token)
-            await self._wait_for_processing(session, container_id, access_token)
+            await _retry_transient(
+                lambda: self._upload_video_bytes(session, upload_uri, video_path, file_size, access_token)
+            )
+            await _retry_transient(
+                lambda: self._wait_for_processing(session, container_id, access_token)
+            )
             return await self._publish_container(session, ig_user_id, container_id, access_token)
 
     async def _create_resumable_container(
