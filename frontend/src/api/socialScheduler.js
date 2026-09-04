@@ -15,7 +15,7 @@ export const PLATFORMS = [
   { id: 'youtube', label: 'YouTube Shorts', short: 'YT' },
   { id: 'instagram', label: 'Instagram Reels', short: 'IG' },
   { id: 'tiktok', label: 'TikTok', short: 'TT' },
-  { id: 'facebook', label: 'Facebook Page', short: 'FB' },
+  { id: 'facebook', label: 'Facebook Reels', short: 'FB' },
 ];
 
 export const PLATFORM_LABELS = Object.fromEntries(PLATFORMS.map((p) => [p.id, p.label]));

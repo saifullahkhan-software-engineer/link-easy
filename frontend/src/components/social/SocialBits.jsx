@@ -7,6 +7,7 @@ const PLATFORM_STYLES = {
   youtube: 'text-red-300 bg-red-500/10 ring-red-500/30',
   instagram: 'text-pink-300 bg-pink-500/10 ring-pink-500/30',
   tiktok: 'text-cyan-300 bg-cyan-500/10 ring-cyan-500/30',
+  facebook: 'text-blue-300 bg-blue-500/10 ring-blue-500/30',
 };
 
 const PLATFORM_ICONS = {
@@ -25,6 +26,11 @@ const PLATFORM_ICONS = {
   tiktok: (
     <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
       <path d="M16.6 5.8A4.3 4.3 0 0 1 15.5 3h-3.1v12.4a2.6 2.6 0 1 1-2.6-2.6c.3 0 .5 0 .8.1V9.7a5.7 5.7 0 1 0 4.9 5.7V9.1a7.3 7.3 0 0 0 4.3 1.4V7.4a4.3 4.3 0 0 1-3.2-1.6Z" />
+    </svg>
+  ),
+  facebook: (
+    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M13.6 21v-8h2.7l.4-3h-3.1V8.1c0-.9.3-1.6 1.7-1.6h1.8V3.8c-.3 0-1.3-.1-2.4-.1-2.4 0-4 1.5-4 4.1V10H8v3h2.7v8h2.9Z" />
     </svg>
   ),
 };
@@ -137,7 +143,7 @@ export function fromLocalInputValue(value) {
 
 const TABS = [
   { to: '/app/social-scheduler', label: 'Overview', end: true },
-  { to: '/app/social-scheduler/schedule', label: 'Schedule' },
+  { to: '/app/social-scheduler/schedule', label: 'Upload' },
   { to: '/app/social-scheduler/queue', label: 'Queue' },
   { to: '/app/social-scheduler/calendar', label: 'Calendar' },
   { to: '/app/social-scheduler/history', label: 'History' },

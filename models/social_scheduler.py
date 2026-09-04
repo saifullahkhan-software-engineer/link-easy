@@ -92,7 +92,7 @@ class SocialPost(Base):
     # Public URL of the same file; Instagram fetches the video from here.
     video_url = Column(String, nullable=False)
     thumbnail = Column(String, nullable=False, default="", server_default="")
-    platforms = Column(JSON, nullable=False)  # ["youtube", "instagram", "tiktok"]
+    platforms = Column(JSON, nullable=False)  # youtube | instagram | tiktok | facebook
     scheduled_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(
         String,
@@ -104,6 +104,10 @@ class SocialPost(Base):
     youtube_title = Column(String, nullable=False, default="", server_default="")
     instagram_caption = Column(Text, nullable=False, default="", server_default="")
     tiktok_caption = Column(Text, nullable=False, default="", server_default="")
+    # Structured copy for the platform editor. Each key is a platform and each
+    # value may contain title, description and hashtags. The legacy override
+    # columns above remain for backwards compatibility with existing posts.
+    platform_copy = Column(JSON, nullable=False, default=dict, server_default="{}")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

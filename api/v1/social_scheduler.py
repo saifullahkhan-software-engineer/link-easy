@@ -343,7 +343,12 @@ async def create_post(
 
     # Platforms that are not connected can still be scheduled (the worker
     # reports a clear per-platform failure), but tell the user up front.
-    if payload.scheduled_at < _now() - timedelta(minutes=1):
+    # Direct uploads use the same durable queue, but are dispatched immediately
+    # after the database commit instead of waiting for the next Beat tick.
+    scheduled_at = _now() if payload.publish_now else payload.scheduled_at
+    if scheduled_at is None:
+        raise HTTPException(status_code=400, detail="scheduled_at is required when scheduling a post")
+    if not payload.publish_now and scheduled_at < _now() - timedelta(minutes=1):
         raise HTTPException(status_code=400, detail="scheduled_at must be in the future")
 
     post = SocialPost(
@@ -355,15 +360,27 @@ async def create_post(
         video_url=_public_video_url(request, payload.upload_id),
         thumbnail=payload.thumbnail,
         platforms=payload.platforms,
-        scheduled_at=payload.scheduled_at,
+        scheduled_at=scheduled_at,
         status=SocialPostStatus.PENDING.value,
         youtube_title=payload.youtube_title,
         instagram_caption=payload.instagram_caption,
         tiktok_caption=payload.tiktok_caption,
+        platform_copy=payload.platform_copy,
     )
     db.add(post)
     await db.commit()
     await db.refresh(post)
+
+    if payload.publish_now:
+        # The pending row is intentional: if Redis/Celery is temporarily
+        # unavailable, the normal one-minute dispatcher can still pick it up.
+        try:
+            from worker.celery_app import celery_app
+
+            celery_app.send_task("tasks.publish_social_post", args=[post.id])
+        except Exception as exc:  # pragma: no cover - broker availability is deployment-specific
+            logger.warning("Could not dispatch direct social upload %s: %s", post.id, exc)
+
     return post
 
 

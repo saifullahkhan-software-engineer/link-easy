@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 from models.social_scheduler import SocialPlatform, SocialPostStatus
 
 PLATFORM_VALUES = tuple(p.value for p in SocialPlatform)
-PLATFORM_LABELS = {"youtube": "YouTube Shorts", "instagram": "Instagram Reels", "tiktok": "TikTok", "facebook": "Facebook Page"}
+PLATFORM_LABELS = {"youtube": "YouTube Shorts", "instagram": "Instagram Reels", "tiktok": "TikTok", "facebook": "Facebook Reels"}
 
 
 def _validate_platforms(values: list[str]) -> list[str]:
@@ -56,10 +56,16 @@ class PostCreate(BaseModel):
     upload_id: str = Field(..., min_length=1, max_length=200)
     thumbnail: str = ""
     platforms: list[str]
-    scheduled_at: datetime
+    # A direct upload does not need a client-provided time; the API stamps it
+    # when the post is committed. Scheduled posts must provide one.
+    scheduled_at: Optional[datetime] = None
     youtube_title: str = Field("", max_length=100)
     instagram_caption: str = Field("", max_length=2200)
     tiktok_caption: str = Field("", max_length=2200)
+    # Structured per-platform copy populated by the upload editor (and later
+    # by the optional Groq copy parser). Example: {"youtube": {"title": ...}}
+    platform_copy: dict[str, dict[str, str]] = Field(default_factory=dict)
+    publish_now: bool = False
 
     @field_validator("platforms")
     @classmethod
@@ -69,7 +75,7 @@ class PostCreate(BaseModel):
     @field_validator("scheduled_at")
     @classmethod
     def _aware(cls, v):
-        return _ensure_aware(v)
+        return None if v is None else _ensure_aware(v)
 
     @field_validator("title", "caption", "hashtags", "youtube_title", "instagram_caption", "tiktok_caption")
     @classmethod
@@ -89,6 +95,7 @@ class PostUpdate(BaseModel):
     youtube_title: Optional[str] = Field(None, max_length=100)
     instagram_caption: Optional[str] = Field(None, max_length=2200)
     tiktok_caption: Optional[str] = Field(None, max_length=2200)
+    platform_copy: Optional[dict[str, dict[str, str]]] = None
 
     @field_validator("platforms")
     @classmethod
@@ -138,6 +145,7 @@ class PostResponse(BaseModel):
     youtube_title: str
     instagram_caption: str
     tiktok_caption: str
+    platform_copy: dict[str, dict[str, str]] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     results: list[PostResultResponse] = []

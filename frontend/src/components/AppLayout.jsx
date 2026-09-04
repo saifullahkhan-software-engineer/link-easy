@@ -179,7 +179,7 @@ const socialGroup = {
       end: true,
       icon: null,
     },
-    { to: '/app/social-scheduler/schedule', label: 'Schedule Post', icon: null },
+    { to: '/app/social-scheduler/schedule', label: 'Upload Video', icon: null },
     { to: '/app/social-scheduler/queue', label: 'Queue', icon: null },
     { to: '/app/social-scheduler/calendar', label: 'Calendar', icon: null },
     { to: '/app/social-scheduler/history', label: 'History', icon: null },

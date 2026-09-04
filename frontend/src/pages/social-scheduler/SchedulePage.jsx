@@ -14,10 +14,41 @@ import {
 
 const ACCEPT = '.mp4,.mov,.m4v,.webm,video/mp4,video/quicktime,video/x-m4v,video/webm';
 const LIMITS = {
-  youtube_title: 100,
-  instagram_caption: 2200,
-  tiktok_caption: 2200,
+  youtubeTitle: 100,
+  copyDescription: 5000,
+  copyHashtags: 1000,
 };
+
+const COPY_META = {
+  youtube: {
+    title: 'YouTube title',
+    titleHint: 'The title shown on the Short',
+    description: 'YouTube description',
+    descriptionHint: 'Explain the Short and add any call to action',
+  },
+  instagram: {
+    title: 'Headline / caption hook',
+    titleHint: 'The first line people see in the Reel caption',
+    description: 'Instagram description',
+    descriptionHint: 'The body of the Reel caption',
+  },
+  tiktok: {
+    title: 'Caption hook',
+    titleHint: 'A short opening line for TikTok',
+    description: 'TikTok description',
+    descriptionHint: 'The body of the TikTok caption',
+  },
+  facebook: {
+    title: 'Headline',
+    titleHint: 'The opening line for the Facebook Reel',
+    description: 'Facebook description',
+    descriptionHint: 'The body of the Facebook Reel caption',
+  },
+};
+
+const EMPTY_PLATFORM_COPY = Object.fromEntries(
+  PLATFORMS.map(({ id }) => [id, { title: '', description: '', hashtags: '' }]),
+);
 
 function formatBytes(n) {
   if (!n) return '0 B';
@@ -27,9 +58,52 @@ function formatBytes(n) {
 }
 
 /**
- * Schedule a new post: upload one video, pick platforms, set a time and
- * (optionally) per-platform copy. The video is uploaded first and the post
- * references it by the server-issued upload_id.
+ * Pull the most common labelled fields out of the copy format shown in the
+ * upload helper. This is deliberately small and predictable; the optional
+ * Groq integration can replace this function later without changing the
+ * platform fields or the API contract.
+ */
+function extractPastedCopy(text) {
+  const clean = String(text || '').trim();
+  if (!clean) return {};
+  const aliases = {
+    youtube: /youtube\s+shorts?/i,
+    instagram: /instagram\s+reels?/i,
+    tiktok: /tiktok/i,
+    facebook: /facebook\s+(?:reels?|page)/i,
+  };
+  const starts = Object.entries(aliases)
+    .map(([platform, pattern]) => {
+      const match = pattern.exec(clean);
+      return match ? { platform, index: match.index } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.index - b.index);
+
+  const output = {};
+  starts.forEach(({ platform, index }, position) => {
+    const end = position + 1 < starts.length ? starts[position + 1].index : clean.length;
+    const section = clean.slice(index, end).replace(/\*\*/g, '').trim();
+    const readLine = (labels) => {
+      const expression = new RegExp(`(?:${labels})\\s*:\\s*([^\\n]+)`, 'i');
+      return section.match(expression)?.[1]?.trim() || '';
+    };
+    const title = readLine('Title|Headline(?: \\(Caption Hook\\))?|Caption');
+    const descriptionMatch = section.match(/Description\s*:\s*([\s\S]*?)(?=\n\s*(?:#|Hashtags?\s*:)|$)/i);
+    const description = descriptionMatch?.[1]?.trim() || '';
+    const hashtags = [...section.matchAll(/#[\p{L}\p{N}_-]+/gu)].map((match) => match[0]);
+    output[platform] = {
+      title,
+      description: description.replace(/\s*\n\s*/g, '\n').trim(),
+      hashtags: [...new Set(hashtags)].join(' '),
+    };
+  });
+  return output;
+}
+
+/**
+ * Upload one video, then either put it in the durable schedule queue or
+ * dispatch it to the connected platforms immediately.
  */
 export default function SocialSchedulePage() {
   const navigate = useNavigate();
@@ -37,11 +111,13 @@ export default function SocialSchedulePage() {
 
   const [connections, setConnections] = useState(null);
   const [file, setFile] = useState(null);
-  const [upload, setUpload] = useState(null); // { upload_id, video_url, size_bytes }
+  const [upload, setUpload] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [showPerPlatform, setShowPerPlatform] = useState(false);
+  const [mode, setMode] = useState('schedule');
+  const [sourceText, setSourceText] = useState('');
   const [form, setForm] = useState({
     title: '',
     caption: '',
@@ -51,6 +127,7 @@ export default function SocialSchedulePage() {
     youtube_title: '',
     instagram_caption: '',
     tiktok_caption: '',
+    platform_copy: EMPTY_PLATFORM_COPY,
   });
 
   useEffect(() => {
@@ -58,7 +135,6 @@ export default function SocialSchedulePage() {
       .listPlatforms()
       .then(({ data }) => {
         setConnections(data);
-        // Pre-select whatever is connected so the common case is one click.
         setForm((f) => ({
           ...f,
           platforms: f.platforms.length ? f.platforms : data.filter((p) => p.connected).map((p) => p.platform),
@@ -68,6 +144,15 @@ export default function SocialSchedulePage() {
   }, []);
 
   const update = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+
+  const updatePlatformCopy = (platform, field) => (e) =>
+    setForm((f) => ({
+      ...f,
+      platform_copy: {
+        ...f.platform_copy,
+        [platform]: { ...f.platform_copy[platform], [field]: e.target.value },
+      },
+    }));
 
   const togglePlatform = (id) =>
     setForm((f) => ({
@@ -101,32 +186,67 @@ export default function SocialSchedulePage() {
     handleFile(e.dataTransfer?.files?.[0]);
   };
 
+  const fillFromPastedCopy = () => {
+    const parsed = extractPastedCopy(sourceText);
+    if (!Object.keys(parsed).length) {
+      toast.error('No platform sections found. Use headings such as YouTube Shorts or Instagram Reels.');
+      return;
+    }
+    setForm((f) => ({
+      ...f,
+      title: f.title || parsed.youtube?.title || parsed.instagram?.title || '',
+      platform_copy: {
+        ...f.platform_copy,
+        ...Object.fromEntries(
+          Object.entries(parsed).map(([platform, values]) => [
+            platform,
+            { ...f.platform_copy[platform], ...values },
+          ]),
+        ),
+      },
+    }));
+    setShowPerPlatform(true);
+    toast.success('Copy added to the platform fields');
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!upload) return toast.error('Upload a video first');
-    if (!form.title.trim()) return toast.error('Give the post a title');
     if (form.platforms.length === 0) return toast.error('Pick at least one platform');
-    const when = fromLocalInputValue(form.scheduled_at);
-    if (!when) return toast.error('Choose when to publish');
-    if (new Date(when).getTime() < Date.now() - 60_000) return toast.error('Pick a time in the future');
+    const fallbackTitle = form.platforms
+      .map((platform) => form.platform_copy[platform]?.title)
+      .find((value) => value?.trim()) || '';
+    const postTitle = form.title.trim() || fallbackTitle.trim();
+    if (!postTitle) return toast.error('Add a title in Details or in one platform section');
+
+    let when = null;
+    if (mode === 'schedule') {
+      when = fromLocalInputValue(form.scheduled_at);
+      if (!when) return toast.error('Choose when to publish');
+      if (new Date(when).getTime() < Date.now() - 60_000) return toast.error('Pick a time in the future');
+    } else {
+      when = new Date().toISOString();
+    }
 
     setSubmitting(true);
     try {
       await socialSchedulerApi.createPost({
-        title: form.title.trim(),
+        title: postTitle,
         caption: form.caption,
         hashtags: form.hashtags,
         upload_id: upload.upload_id,
         platforms: form.platforms,
         scheduled_at: when,
+        publish_now: mode === 'direct',
         youtube_title: form.youtube_title,
         instagram_caption: form.instagram_caption,
         tiktok_caption: form.tiktok_caption,
+        platform_copy: form.platform_copy,
       });
-      toast.success('Post scheduled');
+      toast.success(mode === 'direct' ? 'Video sent to the publish queue' : 'Post scheduled');
       navigate('/app/social-scheduler/queue');
     } catch (err) {
-      toast.error(getErrorMessage(err, 'Failed to schedule the post'));
+      toast.error(getErrorMessage(err, mode === 'direct' ? 'Failed to publish the video' : 'Failed to schedule the post'));
     } finally {
       setSubmitting(false);
     }
@@ -139,11 +259,11 @@ export default function SocialSchedulePage() {
     <div className="mx-auto max-w-4xl">
       <SocialPageHeader
         current="/app/social-scheduler/schedule"
-        title="Schedule a post"
-        description="Upload one vertical video and publish it to every selected platform at the same moment."
+        title="Upload a video"
+        description="Upload one vertical video, customise the copy for each connected platform, then publish now or schedule it."
       />
 
-      <SchedulingDisabledNotice className="mb-6" />
+      {mode === 'schedule' && <SchedulingDisabledNotice className="mb-6" />}
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Video */}
@@ -183,9 +303,7 @@ export default function SocialSchedulePage() {
             ) : upload ? (
               <>
                 <p className="text-sm font-medium text-emerald-300">✓ {file?.name}</p>
-                <p className="mt-1 text-xs text-zinc-500">
-                  {formatBytes(upload.size_bytes)} · click to replace
-                </p>
+                <p className="mt-1 text-xs text-zinc-500">{formatBytes(upload.size_bytes)} · click to replace</p>
               </>
             ) : (
               <>
@@ -201,8 +319,14 @@ export default function SocialSchedulePage() {
 
         {/* Platforms */}
         <section className="card p-6">
-          <h2 className="text-base font-semibold text-zinc-100">Platforms</h2>
-          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-zinc-100">Platforms</h2>
+              <p className="mt-1 text-xs text-zinc-500">Choose the connected accounts that should receive this video.</p>
+            </div>
+            <span className="text-xs text-zinc-500">{form.platforms.length} selected</span>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
             {PLATFORMS.map((p) => {
               const conn = connectionFor(p.id);
               const selected = form.platforms.includes(p.id);
@@ -233,124 +357,151 @@ export default function SocialSchedulePage() {
             <p className="mt-3 text-xs text-amber-300">
               {unconnectedSelected.map((id) => PLATFORMS.find((p) => p.id === id)?.label).join(', ')}{' '}
               {unconnectedSelected.length === 1 ? 'is' : 'are'} not connected — connect{' '}
-              {unconnectedSelected.length === 1 ? 'it' : 'them'} in Settings before the scheduled time or that
-              publish will fail.
+              {unconnectedSelected.length === 1 ? 'it' : 'them'} in Settings before publishing or that platform will fail.
             </p>
           )}
         </section>
 
         {/* Copy */}
         <section className="card space-y-4 p-6">
-          <h2 className="text-base font-semibold text-zinc-100">Details</h2>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-title">
-              Title
-            </label>
-            <input
-              id="sp-title"
-              className="input-field"
-              value={form.title}
-              onChange={update('title')}
-              maxLength={200}
-              placeholder="Product launch teaser"
-              required
-            />
+            <h2 className="text-base font-semibold text-zinc-100">Details</h2>
+            <p className="mt-1 text-xs text-zinc-500">These fields are the shared fallback. Platform-specific copy below takes priority.</p>
           </div>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-caption">
-              Caption
-            </label>
+            <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-title">Internal post title</label>
+            <input id="sp-title" className="input-field" value={form.title} onChange={update('title')} maxLength={200} placeholder="Day 17 — Dictionaries in Python" />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-caption">Shared description</label>
+            <textarea id="sp-caption" className="input-field min-h-[96px]" value={form.caption} onChange={update('caption')} maxLength={5000} placeholder="Used when a platform does not have custom copy" />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-hashtags">Shared hashtags</label>
+            <input id="sp-hashtags" className="input-field" value={form.hashtags} onChange={update('hashtags')} maxLength={1000} placeholder="#Shorts #Python #LearnToCode" />
+            <p className="mt-1 text-xs text-zinc-500">Used as a fallback when a platform does not have custom hashtags.</p>
+          </div>
+
+          <div className="rounded-xl border border-accent-500/20 bg-accent-500/5 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100">Paste your platform copy</h3>
+                <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-400">
+                  Paste the complete YouTube, Instagram, TikTok or Facebook text generated by your workflow. The helper recognises the labelled format in your examples. Groq can later populate these same fields through this editor.
+                </p>
+              </div>
+              <button type="button" className="btn-secondary !px-3 !py-2 text-xs" onClick={fillFromPastedCopy} disabled={!sourceText.trim()}>
+                Use text to fill fields
+              </button>
+            </div>
             <textarea
-              id="sp-caption"
-              className="input-field min-h-[96px]"
-              value={form.caption}
-              onChange={update('caption')}
-              maxLength={5000}
-              placeholder="What is this video about?"
+              className="input-field mt-3 min-h-[150px] bg-surface-900/70"
+              value={sourceText}
+              onChange={(e) => setSourceText(e.target.value)}
+              placeholder={'Example:\n1. YouTube Shorts\nTitle: ...\nDescription: ...\n#Shorts #Python\n\n2. Instagram Reels\nHeadline (Caption Hook): ...'}
+              aria-label="Paste full platform copy"
             />
-          </div>
-          <div>
-            <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-hashtags">
-              Hashtags
-            </label>
-            <input
-              id="sp-hashtags"
-              className="input-field"
-              value={form.hashtags}
-              onChange={update('hashtags')}
-              maxLength={1000}
-              placeholder="#launch #startup"
-            />
-            <p className="mt-1 text-xs text-zinc-500">Appended to the caption on every platform.</p>
           </div>
 
           <button
             type="button"
             onClick={() => setShowPerPlatform((v) => !v)}
-            className="text-sm font-medium text-accent-400 hover:text-accent-300"
+            className="flex w-full items-center justify-between rounded-lg border border-surface-700 bg-surface-800/50 px-4 py-3 text-left text-sm font-medium text-accent-400 hover:text-accent-300"
+            aria-expanded={showPerPlatform}
           >
-            {showPerPlatform ? 'Hide' : 'Customise'} per-platform text
+            <span>Customise per-platform text <span className="ml-1 text-xs font-normal text-zinc-500">({form.platforms.length || 0} selected)</span></span>
+            <span aria-hidden="true">{showPerPlatform ? '−' : '+'}</span>
           </button>
           {showPerPlatform && (
             <div className="space-y-4 rounded-lg border border-surface-700 bg-surface-800/60 p-4">
-              <Field
-                id="sp-yt"
-                label="YouTube title"
-                hint={`Defaults to the title · ${form.youtube_title.length}/${LIMITS.youtube_title}`}
-                value={form.youtube_title}
-                onChange={update('youtube_title')}
-                maxLength={LIMITS.youtube_title}
-              />
-              <Field
-                id="sp-ig"
-                label="Instagram caption"
-                hint={`Defaults to caption + hashtags · ${form.instagram_caption.length}/${LIMITS.instagram_caption}`}
-                value={form.instagram_caption}
-                onChange={update('instagram_caption')}
-                maxLength={LIMITS.instagram_caption}
-                textarea
-              />
-              <Field
-                id="sp-tt"
-                label="TikTok caption"
-                hint={`Defaults to caption + hashtags · ${form.tiktok_caption.length}/${LIMITS.tiktok_caption}`}
-                value={form.tiktok_caption}
-                onChange={update('tiktok_caption')}
-                maxLength={LIMITS.tiktok_caption}
-                textarea
-              />
+              {form.platforms.length === 0 ? (
+                <p className="text-sm text-zinc-500">Select at least one platform above to customise its copy.</p>
+              ) : (
+                form.platforms.map((platform) => {
+                  const meta = COPY_META[platform];
+                  const platformInfo = PLATFORMS.find((p) => p.id === platform);
+                  const values = form.platform_copy[platform] || EMPTY_PLATFORM_COPY[platform];
+                  return (
+                    <div key={platform} className="rounded-xl border border-surface-700 bg-surface-900/60 p-4">
+                      <div className="mb-3 flex items-center gap-2">
+                        <PlatformIcon platform={platform} className="h-6 w-6 text-zinc-300" />
+                        <div>
+                          <h3 className="text-sm font-semibold text-zinc-100">{platformInfo?.label || platform}</h3>
+                          <p className="text-xs text-zinc-500">Title, description and hashtags for this platform</p>
+                        </div>
+                      </div>
+                      <div className="space-y-3">
+                        <CopyField
+                          id={`copy-${platform}-title`}
+                          label={meta.title}
+                          hint={`${meta.titleHint}${platform === 'youtube' ? ` · ${values.title.length}/${LIMITS.youtubeTitle}` : ''}`}
+                          value={values.title}
+                          onChange={updatePlatformCopy(platform, 'title')}
+                          maxLength={platform === 'youtube' ? LIMITS.youtubeTitle : 2200}
+                        />
+                        <CopyField
+                          id={`copy-${platform}-description`}
+                          label={meta.description}
+                          hint={meta.descriptionHint}
+                          value={values.description}
+                          onChange={updatePlatformCopy(platform, 'description')}
+                          maxLength={LIMITS.copyDescription}
+                          textarea
+                        />
+                        <CopyField
+                          id={`copy-${platform}-hashtags`}
+                          label="Hashtags"
+                          hint={`Keep hashtags separate so they can be changed per platform · ${values.hashtags.length}/${LIMITS.copyHashtags}`}
+                          value={values.hashtags}
+                          onChange={updatePlatformCopy(platform, 'hashtags')}
+                          maxLength={LIMITS.copyHashtags}
+                        />
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           )}
         </section>
 
-        {/* When */}
+        {/* Publish mode */}
         <section className="card p-6">
-          <h2 className="text-base font-semibold text-zinc-100">When</h2>
-          <div className="mt-4 max-w-xs">
-            <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-when">
-              Publish at
-            </label>
-            <input
-              id="sp-when"
-              type="datetime-local"
-              className="input-field"
-              value={form.scheduled_at}
-              onChange={update('scheduled_at')}
-              required
-            />
-            <p className="mt-1 text-xs text-zinc-500">
-              Your local time ({Intl.DateTimeFormat().resolvedOptions().timeZone}). The worker checks every minute.
-            </p>
+          <h2 className="text-base font-semibold text-zinc-100">Publish</h2>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2" role="group" aria-label="Publish mode">
+            <button
+              type="button"
+              onClick={() => setMode('schedule')}
+              aria-pressed={mode === 'schedule'}
+              className={`rounded-xl border p-4 text-left transition ${mode === 'schedule' ? 'border-accent-500/60 bg-accent-500/10 ring-1 ring-inset ring-accent-500/30' : 'border-surface-600 bg-surface-800 hover:border-surface-500'}`}
+            >
+              <span className="block text-sm font-semibold text-zinc-100">Schedule</span>
+              <span className="mt-1 block text-xs leading-5 text-zinc-500">Choose a future date and time. The worker publishes it automatically.</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('direct')}
+              aria-pressed={mode === 'direct'}
+              className={`rounded-xl border p-4 text-left transition ${mode === 'direct' ? 'border-accent-500/60 bg-accent-500/10 ring-1 ring-inset ring-accent-500/30' : 'border-surface-600 bg-surface-800 hover:border-surface-500'}`}
+            >
+              <span className="block text-sm font-semibold text-zinc-100">Direct upload</span>
+              <span className="mt-1 block text-xs leading-5 text-zinc-500">Send the video to the publish queue immediately after upload.</span>
+            </button>
           </div>
+          {mode === 'schedule' && (
+            <div className="mt-4 max-w-xs">
+              <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-when">Publish at</label>
+              <input id="sp-when" type="datetime-local" className="input-field" value={form.scheduled_at} onChange={update('scheduled_at')} required />
+              <p className="mt-1 text-xs text-zinc-500">Your local time ({Intl.DateTimeFormat().resolvedOptions().timeZone}). The worker checks every minute.</p>
+            </div>
+          )}
         </section>
 
         <div className="flex items-center justify-end gap-3">
-          <button type="button" className="btn-secondary" onClick={() => navigate('/app/social-scheduler')}>
-            Cancel
-          </button>
+          <button type="button" className="btn-secondary" onClick={() => navigate('/app/social-scheduler')}>Cancel</button>
           <button type="submit" className="btn-primary" disabled={submitting || uploading || !upload}>
             {submitting && <Spinner />}
-            Schedule post
+            {mode === 'direct' ? 'Upload & publish now' : 'Schedule post'}
           </button>
         </div>
       </form>
@@ -358,20 +509,12 @@ export default function SocialSchedulePage() {
   );
 }
 
-function Field({ id, label, hint, value, onChange, maxLength, textarea = false }) {
+function CopyField({ id, label, hint, value, onChange, maxLength, textarea = false }) {
   const Tag = textarea ? 'textarea' : 'input';
   return (
     <div>
-      <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor={id}>
-        {label}
-      </label>
-      <Tag
-        id={id}
-        className={`input-field ${textarea ? 'min-h-[80px]' : ''}`}
-        value={value}
-        onChange={onChange}
-        maxLength={maxLength}
-      />
+      <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor={id}>{label}</label>
+      <Tag id={id} className={`input-field ${textarea ? 'min-h-[100px]' : ''}`} value={value} onChange={onChange} maxLength={maxLength} />
       {hint && <p className="mt-1 text-xs text-zinc-500">{hint}</p>}
     </div>
   );
