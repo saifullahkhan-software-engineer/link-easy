@@ -50,6 +50,33 @@ export const socialSchedulerApi = {
     });
   },
 
+  // Edit an uploaded clip in place on the server (ffmpeg). `payload` is
+  // { start, end } in seconds; the video file is re-encoded to that range and
+  // the response is a fresh upload object (same upload_id, new duration/size)
+  // the page can swap in for its preview. Returns the trimmed clip's metadata.
+  trimVideo: (uploadId, payload) => api.post(`${BASE}/uploads/${uploadId}/trim`, payload, { timeout: 5 * 60_000 }),
+
+  // Thumbnail for an upload. Two sources, both under the one endpoint:
+  //   setThumbnailFrame  — extract a JPEG still of the clip at `at` seconds;
+  //   setThumbnailImage  — store an image chosen from the user's PC.
+  // Each returns { upload_id, thumbnail_url, source, at_seconds }.
+  setThumbnailFrame: (uploadId, at) => {
+    const formData = new FormData();
+    formData.append('at', String(Number(at) || 0));
+    return api.post(`${BASE}/uploads/${uploadId}/thumbnail`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60_000,
+    });
+  },
+  setThumbnailImage: (uploadId, file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post(`${BASE}/uploads/${uploadId}/thumbnail`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60_000,
+    });
+  },
+
   // AI copy extraction — split one large pasted message into the per-platform
   // title/description/hashtags the editor keeps. The backend calls Groq with
   // its own key (never the browser's), so this is a plain POST with the text;

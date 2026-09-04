@@ -278,12 +278,40 @@ class PostDeleteResponse(BaseModel):
 # ── Upload ────────────────────────────────────────────────────────────────────
 
 
+# ── Upload / edit ─────────────────────────────────────────────────────────────
+# ``POST /upload`` stores the raw clip and reports its duration (so the upload
+# editor can draw a scrubber). ``POST /uploads/{id}/trim`` re-encodes the kept
+# range in place and returns the same shape with the new size/duration.
+# ``POST /uploads/{id}/thumbnail`` produces a frame-of-the-video or stored
+# uploaded image and reports its public URL.
+
+
 class UploadResponse(BaseModel):
     upload_id: str
     filename: str
     size_bytes: int
     content_type: str
     video_url: str
+    # Seconds, when ffmpeg is available to read it (None otherwise). The trim
+    # controls are hidden/disabled whenever this is missing.
+    duration_seconds: Optional[float] = None
+
+
+class TrimRequest(BaseModel):
+    """Trim range in seconds. ``end`` defaults to the end of the video."""
+
+    start: float = Field(0.0, ge=0)
+    end: Optional[float] = Field(None, gt=0)
+
+
+class ThumbnailResponse(BaseModel):
+    upload_id: str
+    thumbnail_url: str
+    # "video_frame" when extracted from the clip, "upload" when a file was sent.
+    source: str
+    # The frame's timestamp in the (current, possibly trimmed) clip when the
+    # thumbnail was captured from the video; None for an uploaded image.
+    at_seconds: Optional[float] = None
 
 
 # ── AI copy extraction (POST /parse-copy) ─────────────────────────────────────

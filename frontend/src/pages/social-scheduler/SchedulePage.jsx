@@ -11,6 +11,7 @@ import {
   fromLocalInputValue,
   toLocalInputValue,
 } from '../../components/social/SocialBits';
+import VideoEditPanel from '../../components/social/VideoEditPanel';
 
 const ACCEPT = '.mp4,.mov,.m4v,.webm,video/mp4,video/quicktime,video/x-m4v,video/webm';
 const LIMITS = {
@@ -115,6 +116,9 @@ export default function SocialSchedulePage() {
   const [file, setFile] = useState(null);
   const [upload, setUpload] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+  // Public URL of the chosen cover image (a frame of the clip or an uploaded
+  // image), or '' for none. Persisted with the post as ``thumbnail``.
+  const [thumbnail, setThumbnail] = useState('');
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [showPerPlatform, setShowPerPlatform] = useState(false);
@@ -285,6 +289,7 @@ export default function SocialSchedulePage() {
     if (!picked) return;
     setFile(picked);
     setUpload(null);
+    setThumbnail('');
     setUploadProgress(0);
     setUploading(true);
     try {
@@ -407,6 +412,7 @@ export default function SocialSchedulePage() {
         caption: form.caption,
         hashtags: form.hashtags,
         upload_id: upload.upload_id,
+        thumbnail,
         platforms: form.platforms,
         scheduled_at: when,
         publish_now: mode === 'direct',
@@ -491,6 +497,15 @@ export default function SocialSchedulePage() {
               </>
             )}
           </div>
+
+          {upload && !uploading && (
+            <VideoEditPanel
+              upload={upload}
+              thumbnail={thumbnail}
+              onThumbnailChange={setThumbnail}
+              onEdited={setUpload}
+            />
+          )}
         </section>
 
         {/* Platforms */}
