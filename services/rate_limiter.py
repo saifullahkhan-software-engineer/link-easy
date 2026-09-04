@@ -86,6 +86,11 @@ DEFAULT_RULES: dict[str, RateLimitRule] = {
         RateLimitRule("user-data:request", 5, 3600, "Account-deletion emails per hour"),
         RateLimitRule("user-data:confirm", 10, 3600, "Account-deletion confirmations per hour"),
         RateLimitRule("profile:scan", 20, 3600, "LinkedIn profile scans per hour"),
+        # Each call spends tokens on a third-party LLM, so it is metered per
+        # user like the other expensive operations. 60/hour is far above what
+        # the upload editor needs (one extraction per video) and still stops
+        # a looped client from running up a bill.
+        RateLimitRule("social:parse-copy", 60, 3600, "AI copy extractions per hour"),
         RateLimitRule("live:start", 30, 3600, "Live-chat browser starts per hour"),
     )
 }

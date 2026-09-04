@@ -78,12 +78,26 @@ export default function SocialSettingsPage() {
   const [idValue, setIdValue] = useState('');
   const [secretValue, setSecretValue] = useState('');
 
+  // Saved Facebook Group destinations. Meta closed the Groups API, so these
+  // are only ever a manual checklist — this card exists so a mistyped group can
+  // be renamed or removed (the upload page can add, not delete).
+  const [groups, setGroups] = useState([]);
+  const [groupForm, setGroupForm] = useState({ name: '', url: '' });
+  const [groupBusy, setGroupBusy] = useState(false);
+  const [removingGroup, setRemovingGroup] = useState(null);
+
   const [searchParams, setSearchParams] = useSearchParams();
 
   const load = useCallback(async () => {
     try {
       const { data } = await socialSchedulerApi.listPlatforms();
       setConnections(Array.isArray(data) ? data : []);
+      try {
+        const saved = await socialSchedulerApi.listShareTargets('facebook');
+        setGroups(Array.isArray(saved.data) ? saved.data : []);
+      } catch {
+        // The checklist is a convenience; the connect cards must still work.
+      }
       if (isAdmin) {
         try {
           const creds = await socialSchedulerApi.listPlatformCredentials();
@@ -103,6 +117,44 @@ export default function SocialSettingsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const addGroup = async (event) => {
+    event.preventDefault();
+    const name = groupForm.name.trim();
+    const url = groupForm.url.trim();
+    if (!name) return toast.error('Give the group a name');
+    if (!/^https?:\/\//i.test(url)) return toast.error('Paste the group link, starting with https://');
+    setGroupBusy(true);
+    try {
+      const { data } = await socialSchedulerApi.createShareTarget({ name, url });
+      // Saving an existing URL returns that row rather than a duplicate.
+      setGroups((prev) =>
+        prev.some((target) => target.id === data.id)
+          ? prev.map((target) => (target.id === data.id ? data : target))
+          : [...prev, data],
+      );
+      setGroupForm({ name: '', url: '' });
+      toast.success('Group saved');
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not save that group'));
+    } finally {
+      setGroupBusy(false);
+    }
+    return undefined;
+  };
+
+  const removeGroup = async (target) => {
+    setRemovingGroup(target.id);
+    try {
+      await socialSchedulerApi.deleteShareTarget(target.id);
+      setGroups((prev) => prev.filter((item) => item.id !== target.id));
+      toast.success('Group removed');
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not remove that group'));
+    } finally {
+      setRemovingGroup(null);
+    }
+  };
 
   // OAuth round-trip result (backend redirects here).
   useEffect(() => {
@@ -330,7 +382,7 @@ export default function SocialSettingsPage() {
         <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed">
           <li>Every minute the scheduler picks up posts whose time has come and publishes them to each selected platform.</li>
           <li>Expired access tokens are refreshed automatically where the platform allows it; otherwise the platform shows “Reconnect needed” here and that publish fails with a clear reason.</li>
-          <li>Instagram fetches the video from this server, so the API must be publicly reachable for Reels to work.</li>
+          <li>Instagram receives the video as a direct upload from this server’s upload folder, so no public URL or tunnel (ngrok) is needed for Reels.</li>
           <li>Disconnecting removes the stored tokens immediately. Already scheduled posts to that platform will fail until you reconnect.</li>
           {isAdmin && (
             <li>
@@ -339,6 +391,69 @@ export default function SocialSettingsPage() {
             </li>
           )}
         </ul>
+      </div>
+
+      {/* Saved Facebook Groups — a manual-share list, not a connection */}
+      <div className="card mt-5 p-6" data-testid="saved-groups">
+        <h2 className="text-base font-semibold text-zinc-100">Facebook groups for manual sharing</h2>
+        <p className="mt-1 text-xs text-zinc-500">
+          Facebook removed its Groups API in April 2024, so no app — including this one — can post into a group for
+          you. Save the groups you use and the upload page will offer them as a checklist once a Reel is published.
+          Nothing here is ever posted automatically, and no Facebook login is needed.
+        </p>
+
+        {groups.length > 0 && (
+          <ul className="mt-4 divide-y divide-surface-700 rounded-lg border border-surface-700">
+            {groups.map((target) => (
+              <li key={target.id} className="flex items-center gap-3 px-3 py-2.5">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm text-zinc-100">{target.name}</span>
+                  <span className="block truncate text-xs text-zinc-500">{target.url}</span>
+                </span>
+                <a
+                  href={target.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0 text-xs text-accent-400 underline-offset-2 hover:underline"
+                >
+                  Open
+                </a>
+                <button
+                  type="button"
+                  onClick={() => removeGroup(target)}
+                  disabled={removingGroup === target.id}
+                  data-testid={`remove-group-${target.id}`}
+                  className="shrink-0 rounded-md border border-surface-600 px-2.5 py-1 text-xs text-zinc-300 transition hover:border-red-500/50 hover:text-red-200 disabled:opacity-50"
+                >
+                  {removingGroup === target.id ? 'Removing…' : 'Remove'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <form onSubmit={addGroup} className="mt-4 flex flex-wrap gap-2">
+          <input
+            value={groupForm.name}
+            onChange={(event) => setGroupForm((g) => ({ ...g, name: event.target.value }))}
+            placeholder="Group name"
+            aria-label="Group name"
+            maxLength={120}
+            className="min-w-[10rem] flex-1 rounded-lg border border-surface-600 bg-surface-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-accent-500 focus:outline-none"
+          />
+          <input
+            value={groupForm.url}
+            onChange={(event) => setGroupForm((g) => ({ ...g, url: event.target.value }))}
+            placeholder="https://www.facebook.com/groups/…"
+            aria-label="Group link"
+            maxLength={500}
+            className="min-w-[14rem] flex-[2] rounded-lg border border-surface-600 bg-surface-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-accent-500 focus:outline-none"
+          />
+          <button type="submit" className="btn-secondary" disabled={groupBusy}>
+            {groupBusy && <Spinner />}
+            Save group
+          </button>
+        </form>
       </div>
 
       {/* Operator app-credentials modal */}

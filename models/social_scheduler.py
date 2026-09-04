@@ -108,6 +108,18 @@ class SocialPost(Base):
     # value may contain title, description and hashtags. The legacy override
     # columns above remain for backwards compatibility with existing posts.
     platform_copy = Column(JSON, nullable=False, default=dict, server_default="{}")
+    # Facebook Groups the user wants the Reel shared to. Meta removed the
+    # Groups API on 22 Apr 2024, so nothing here is posted by the worker: each
+    # entry is a destination the *user* opens after publishing, and the post
+    # shows them as a checklist with the caption ready to copy. The entries are
+    # snapshotted (name + url) rather than referenced by id, so deleting a
+    # saved target never blanks an old post's history.
+    facebook_groups = Column(JSON, nullable=False, default=list, server_default="[]")
+    # YouTube playlists the Short is added to *after* the upload succeeds
+    # (playlistItems.insert per id). Empty list = publish without adding it
+    # anywhere. YouTube-only for now: the other three platforms have no
+    # equivalent collection a video can be filed into through their APIs.
+    youtube_playlist_ids = Column(JSON, nullable=False, default=list, server_default="[]")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -153,6 +165,10 @@ class SocialPostResult(Base):
     platform_id = Column(String, nullable=False, default="", server_default="")   # video/media id
     platform_url = Column(String, nullable=False, default="", server_default="")  # link to the post
     error = Column(Text, nullable=False, default="", server_default="")
+    # Non-fatal detail about a *successful* publish, e.g. "added to 2 of 3
+    # playlists". ``error`` is only rendered for failed rows, so a partial
+    # success needs its own column to stay visible in the UI.
+    note = Column(Text, nullable=False, default="", server_default="")
     posted_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -226,6 +242,50 @@ class PlatformCredential(Base):
     platform = Column(String, primary_key=True)  # youtube | instagram | tiktok | facebook
     client_id = Column(String, nullable=False, default="", server_default="")
     client_secret = Column(String, nullable=False, default="", server_default="")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ShareTarget(Base):
+    """A place LinkEasy cannot post to through an API — a Facebook Group.
+
+    Group publishing went away with Meta's Groups API (removed across every
+    Graph API version on 22 Apr 2024; ``publish_to_groups`` included), and no
+    supported endpoint replaced it. What is left is a person opening the group
+    in their own browser and posting. This row only remembers *where*, so the
+    upload page can offer a picker instead of a free-text field and the
+    published post can render a checklist.
+
+    Nothing here is a credential and nothing is posted automatically: it is a
+    bookmark list scoped to one user, which is why it stores a plain URL and a
+    display name rather than a token or a group id.
+    """
+
+    __tablename__ = "share_targets"
+    __table_args__ = (
+        # One entry per (user, platform, destination) — the picker must not
+        # offer the same group twice.
+        UniqueConstraint("owner_email", "platform", "url", name="uq_share_target_owner_platform_url"),
+    )
+
+    id = Column(String, primary_key=True, default=_uuid)
+    owner_email = Column(
+        String,
+        ForeignKey("users.email", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Always "facebook" today; kept as a column so another API-less surface
+    # (a Telegram channel, a WhatsApp community) does not need a new table.
+    platform = Column(String, nullable=False, default="facebook", server_default="facebook", index=True)
+    name = Column(String, nullable=False, default="")
+    url = Column(String, nullable=False, default="")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

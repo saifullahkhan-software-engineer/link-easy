@@ -84,6 +84,15 @@ google-api-python-client==2.200.0
 google-auth==2.57.0
 google-auth-oauthlib==1.4.1
 
+# ── AI copy extraction (POST /api/v1/social-scheduler/parse-copy) ────────────
+# Groq chat completions, used by services/ai/copy_parser.py to split one
+# pasted message into per-platform title/description/hashtags. Backend only —
+# the key (GROQ_API_KEY) is read server-side and never reaches the frontend
+# bundle. Pure-python wheel, so it installs on the slim image like the rest.
+# A future Google Cloud provider (Gemini / Vertex AI) would add its SDK here
+# too; the parser seam is already provider-independent.
+groq==1.7.0
+
 # ── Local dev / test ──────────────────────────────────────────────────────────
 # run_dev_server.py and the test suite use an in-memory SQLite database
 # (sqlite+aiosqlite:///:memory:) and tests are collected with pytest — neither

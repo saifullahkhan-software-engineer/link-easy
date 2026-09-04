@@ -186,6 +186,49 @@ class Settings(BaseSettings):
     FACEBOOK_APP_SECRET: str = ""
     FACEBOOK_REDIRECT_URI: str = ""
 
+    # ── AI copy extraction (POST /api/v1/social-scheduler/parse-copy) ────────
+    # Turns one large pasted message into per-platform title / description /
+    # hashtags. The key is backend-only: it is read here, never sent to the
+    # browser, and never echoed in a response or a log line. Leave
+    # GROQ_API_KEY empty and the endpoint answers 503 — the upload page keeps
+    # its local (regex) parser as the fallback.
+    #
+    # Future work: a Google Cloud provider (Gemini / Vertex AI) plugs into the
+    # same seam — services/ai/copy_parser.py owns the prompt, the JSON repair
+    # and the field validation, all of which are provider-independent, so
+    # adding Google means one more parser class there plus its own key here.
+    # Nothing in api/v1/social_scheduler.py or the frontend needs to change.
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    # Hard cap on the pasted message in characters. Past this the endpoint
+    # answers 413 instead of burning tokens on a message the editor cannot
+    # use anyway (every platform field it would fill is far smaller).
+    GROQ_MAX_SOURCE_CHARS: int = 50_000
+    # Seconds to wait for one completion. Groq answers in well under a
+    # second normally; a stalled call should fail loudly rather than hold a
+    # worker slot.
+    GROQ_TIMEOUT_SECONDS: float = 45.0
+
+    # ── Instagram Reels delivery ────────────────────────────────────────────
+    # How the worker hands the video to Instagram.
+    #
+    #   True  (default) — DIRECT UPLOAD. The worker streams the file it
+    #         already stored under UPLOAD_DIR straight to Meta's
+    #         rupload.facebook.com endpoint (Instagram's resumable upload
+    #         session). Nothing has to be reachable from the internet, so an
+    #         instance running on a laptop behind NAT publishes fine — no
+    #         ngrok, no tunnel, no CDN.
+    #   False — the classic flow: Instagram *downloads* the video from
+    #         PUBLIC_API_URL/uploads/social/<id>, which must be publicly
+    #         reachable. Still the fallback when the stored file is missing
+    #         (e.g. a post created on another machine sharing one database).
+    #
+    # Meta documents the resumable session as being for apps that implemented
+    # Facebook Login for Business. If an app on classic Facebook Login is
+    # rejected at container-creation time, the worker says so in the post's
+    # error and — when PUBLIC_API_URL is set — retries through the URL path.
+    INSTAGRAM_DIRECT_UPLOAD: bool = True
+
     # Where uploaded videos are stored. Files are served back under
     # /uploads/social/<generated-name> (a mount in main.py) because Instagram
     # downloads the video from a public URL rather than accepting an upload —

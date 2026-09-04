@@ -15,17 +15,75 @@ apart from:
   told *why* no Page was found instead of a generic "No Facebook Page found".
 """
 import asyncio
+import ipaddress
+import json
 import logging
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
+import os
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode, urlparse
 
 import aiohttp
 
 from core.config import settings
 
-from .meta_graph import GRAPH_API_BASE, OAUTH_DIALOG, PAGES_SHOW_LIST, signed_in_account_name, token_scopes
+from .meta_graph import (
+    GRAPH_API_BASE,
+    GRAPH_API_VERSION,
+    OAUTH_DIALOG,
+    PAGES_SHOW_LIST,
+    signed_in_account_name,
+    token_scopes,
+)
 
 logger = logging.getLogger(__name__)
+
+# Host for Instagram's resumable video upload. Graph API calls go to
+# graph.facebook.com; the video bytes themselves go here (Meta documents the
+# two hosts separately for this flow).
+RUPLOAD_BASE = "https://rupload.facebook.com/ig-api-upload"
+
+#: Uploads are big and Meta's processing is slow, so this flow gets its own
+#: generous timeouts instead of aiohttp's 5-minute default.
+_UPLOAD_TIMEOUT = aiohttp.ClientTimeout(total=3600, connect=30, sock_read=300)
+
+
+def is_public_video_url(url: Optional[str]) -> bool:
+    """True when Instagram's servers could actually download ``url``.
+
+    The URL-flow needs a video Meta can fetch from the internet. An instance
+    running on a laptop produces ``http://localhost:8000/...`` (or no
+    PUBLIC_API_URL at all), which is exactly the case the direct upload exists
+    for — so this decides between the two flows and produces the error text
+    when neither can work.
+    """
+    value = (url or "").strip()
+    if not value:
+        return False
+    try:
+        host = (urlparse(value).hostname or "").strip().lower()
+    except ValueError:
+        return False
+    if not host or urlparse(value).scheme not in ("http", "https"):
+        return False
+    if host in ("localhost", "0.0.0.0", "::1") or host.endswith(".localhost"):
+        return False
+    if host.startswith("[") and host.endswith("]"):  # bracketed IPv6
+        host = host[1:-1]
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True  # a hostname — assume it resolves publicly
+    # A literal LAN/loopback/link-local address is reachable from this laptop
+    # and from nowhere Meta operates, so it is not "public" even though it
+    # looks like a real URL (http://192.168.1.5:8000/... is the classic case).
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
 
 # The Graph API reaches an Instagram Business/Creator account *through* a
 # Facebook Page, so connecting Instagram is really a Facebook Login whose
@@ -76,7 +134,10 @@ NO_FACEBOOK_PAGE = no_page_message()
 class InstagramService:
     """Service for Instagram Reels publishing."""
 
-    GRAPH_API = "https://graph.facebook.com/v18.0"
+    # Derived from services/social/meta_graph.py so the Instagram and Facebook
+    # Page integrations always speak the same (currently supported) Graph API
+    # version — this was pinned to v18.0, which Meta retired in Jan 2026.
+    GRAPH_API = GRAPH_API_BASE
     SCOPES = "instagram_basic,instagram_content_publish"
 
     def __init__(self):
@@ -99,7 +160,7 @@ class InstagramService:
             "response_type": "code",
             "state": state,
         }
-        return f"https://www.facebook.com/v21.0/dialog/oauth?{urlencode(params)}"
+        return f"{OAUTH_DIALOG}?{urlencode(params)}"
 
     async def exchange_code(self, code: str, *, code_verifier=None) -> Dict[str, Any]:
         """Exchange an authorization code for a (long-lived) access token.
@@ -234,51 +295,199 @@ class InstagramService:
     # ── Publish ──────────────────────────────────────────────────────────────
 
     async def publish_reel(
-        self, ig_user_id: str, video_url: str, caption: str, access_token: str
+        self,
+        ig_user_id: str,
+        video_url: str,
+        caption: str,
+        access_token: str,
+        *,
+        video_path: Optional[str] = None,
     ) -> Dict[str, str]:
-        """Publish a video as an Instagram Reel (container → processing → publish)."""
+        """Publish a video as an Instagram Reel.
+
+        Two ways to get the bytes to Meta:
+
+        * **direct upload** (default, ``video_path`` + ``INSTAGRAM_DIRECT_UPLOAD``)
+          — create a *resumable* container, stream the local file to
+          ``rupload.facebook.com``, wait for processing, publish. Nothing has
+          to be publicly reachable, which is what lets an instance running on
+          a laptop publish without a tunnel or a CDN.
+        * **URL flow** — Instagram downloads the video from ``video_url``, so
+          it must be public.
+
+        The direct path is tried first when it is available and the URL path
+        is the fallback. Falling back is safe against double-posting: every
+        failure below happens *before* ``media_publish`` succeeds, so at worst
+        an unpublished container is abandoned.
+        """
         if not ig_user_id:
             raise Exception("Instagram account id is missing. Reconnect Instagram.")
 
-        # Step 1: Create media container
+        # Instagram's caption ceiling; the API rejects a longer one.
+        caption = (caption or "")[:2200]
+
+        if video_path and settings.INSTAGRAM_DIRECT_UPLOAD:
+            try:
+                return await self._publish_reel_direct(ig_user_id, video_path, caption, access_token)
+            except Exception as exc:
+                if not is_public_video_url(video_url):
+                    raise
+                logger.warning(
+                    "Instagram direct upload failed (%s); retrying with the public video URL",
+                    exc.__class__.__name__,
+                )
+
+        if not is_public_video_url(video_url):
+            raise Exception(
+                "Instagram could not be given the video. Direct upload is unavailable (the stored file "
+                "is missing) and this instance has no publicly reachable video URL — set PUBLIC_API_URL "
+                "or restore the uploaded file."
+            )
+        return await self._publish_reel_by_url(ig_user_id, video_url, caption, access_token)
+
+    # ── Direct (resumable) upload ────────────────────────────────────────────
+
+    async def _publish_reel_direct(
+        self, ig_user_id: str, video_path: str, caption: str, access_token: str
+    ) -> Dict[str, str]:
+        """Container → stream the file to rupload → wait → publish."""
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        file_size = os.path.getsize(video_path)
+        if file_size == 0:
+            raise ValueError("Video file is empty")
+
+        async with aiohttp.ClientSession(timeout=_UPLOAD_TIMEOUT) as session:
+            container_id, upload_uri = await self._create_resumable_container(
+                session, ig_user_id, caption, access_token
+            )
+            await self._upload_video_bytes(session, upload_uri, video_path, file_size, access_token)
+            await self._wait_for_processing(session, container_id, access_token)
+            return await self._publish_container(session, ig_user_id, container_id, access_token)
+
+    async def _create_resumable_container(
+        self, session: aiohttp.ClientSession, ig_user_id: str, caption: str, access_token: str
+    ) -> Tuple[str, str]:
+        """Open a resumable upload session; returns ``(container_id, upload_uri)``.
+
+        ``upload_type=resumable`` is what makes this a *session* rather than a
+        URL fetch — the response carries the rupload URI the bytes go to.
+        """
+        payload = {
+            "media_type": "REELS",
+            "upload_type": "resumable",
+            "caption": caption,
+            "share_to_feed": "true",
+            "access_token": access_token,
+        }
+        async with session.post(f"{self.GRAPH_API}/{ig_user_id}/media", data=payload) as response:
+            data = await response.json(content_type=None)
+        _raise_on_error(data, "Instagram resumable container creation failed")
+        container_id = str(data.get("id") or "")
+        if not container_id:
+            raise Exception("Instagram did not return a media container id")
+        # Meta returns the full rupload URI; build it if a response omits it.
+        upload_uri = data.get("uri") or f"{RUPLOAD_BASE}/{GRAPH_API_VERSION}/{container_id}"
+        return container_id, str(upload_uri)
+
+    async def _upload_video_bytes(
+        self,
+        session: aiohttp.ClientSession,
+        upload_uri: str,
+        video_path: str,
+        file_size: int,
+        access_token: str,
+    ) -> None:
+        """Stream the local file to Meta's upload host.
+
+        ``offset`` is 0 because a Reel is uploaded in one pass here; the
+        protocol exists so an interrupted upload can be resumed by sending the
+        rest with the offset Meta reports in ``video_status``.
+        """
+        headers = {
+            # rupload takes an OAuth scheme header, not the Graph API's
+            # access_token form field.
+            "Authorization": f"OAuth {access_token}",
+            "offset": "0",
+            "file_size": str(file_size),
+            # Meta's own sample posts the raw file with `curl --data-binary`,
+            # which sends this content type; matching it keeps the request
+            # byte-for-byte the documented one.
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        with open(video_path, "rb") as handle:
+            async with session.post(upload_uri, data=handle, headers=headers) as response:
+                status = response.status
+                raw = await response.text()
+
+        data = _maybe_json(raw)
+        if status >= 400 or (isinstance(data, dict) and not data.get("success")):
+            # The failure body nests the real reason inside debug_info.message.
+            debug = data.get("debug_info") if isinstance(data, dict) else None
+            detail = str(debug.get("message") or debug.get("type") or "") if isinstance(debug, dict) else ""
+            if isinstance(data, dict):
+                detail = detail or str(data.get("message") or "rejected")
+            raise Exception(
+                f"Instagram video upload failed (HTTP {status}): "
+                f"{detail or (raw[:200] if isinstance(raw, str) else 'rejected')}"
+            )
+        if not isinstance(data, dict):
+            # An empty 200, or a proxy's HTML error page. Not treated as a
+            # failure: the container status poll that follows is the real gate,
+            # and a false failure here would abandon a perfectly good upload.
+            logger.warning(
+                "Instagram upload answered HTTP %s with a non-JSON body (%d bytes); "
+                "relying on the container status",
+                status,
+                len(raw or ""),
+            )
+        logger.info("Instagram direct upload complete: %s bytes → %s", file_size, upload_uri.rsplit("/", 1)[0])
+
+    # ── URL flow ─────────────────────────────────────────────────────────────
+
+    async def _publish_reel_by_url(
+        self, ig_user_id: str, video_url: str, caption: str, access_token: str
+    ) -> Dict[str, str]:
+        """The classic flow: Instagram downloads the video from ``video_url``."""
         container_data = {
             "media_type": "REELS",
             "video_url": video_url,
-            "caption": caption[:2200],  # Max 2200 chars
+            "caption": caption,
             "share_to_feed": "true",
             "access_token": access_token,
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.GRAPH_API}/{ig_user_id}/media", data=container_data) as response:
-                container_response = await response.json()
+                container_response = await response.json(content_type=None)
             _raise_on_error(container_response, "Instagram container creation failed")
             creation_id = container_response.get("id")
             if not creation_id:
                 raise Exception("Failed to create Instagram media container")
 
-            # Step 2: Wait for video processing
             await self._wait_for_processing(session, creation_id, access_token)
+            return await self._publish_container(session, ig_user_id, creation_id, access_token)
 
-            # Step 3: Publish the container
-            publish_data = {"creation_id": creation_id, "access_token": access_token}
-            async with session.post(
-                f"{self.GRAPH_API}/{ig_user_id}/media_publish", data=publish_data
+    async def _publish_container(
+        self, session: aiohttp.ClientSession, ig_user_id: str, creation_id: str, access_token: str
+    ) -> Dict[str, str]:
+        """Publish a processed container and resolve the Reel's permalink."""
+        publish_data = {"creation_id": creation_id, "access_token": access_token}
+        async with session.post(f"{self.GRAPH_API}/{ig_user_id}/media_publish", data=publish_data) as response:
+            publish_response = await response.json(content_type=None)
+        _raise_on_error(publish_response, "Instagram publish failed")
+        media_id = publish_response.get("id", "")
+
+        # Resolve the permalink; fall back to the reel URL shape if it fails.
+        post_url = f"https://www.instagram.com/reel/{media_id}/"
+        try:
+            async with session.get(
+                f"{self.GRAPH_API}/{media_id}",
+                params={"fields": "permalink", "access_token": access_token},
             ) as response:
-                publish_response = await response.json()
-            _raise_on_error(publish_response, "Instagram publish failed")
-            media_id = publish_response.get("id", "")
-
-            # Resolve the permalink; fall back to the reel URL shape if it fails.
-            post_url = f"https://www.instagram.com/reel/{media_id}/"
-            try:
-                async with session.get(
-                    f"{self.GRAPH_API}/{media_id}",
-                    params={"fields": "permalink", "access_token": access_token},
-                ) as response:
-                    link_data = await response.json()
-                post_url = link_data.get("permalink") or post_url
-            except Exception:
-                pass
+                link_data = await response.json(content_type=None)
+            post_url = link_data.get("permalink") or post_url
+        except Exception:
+            pass
 
         return {"media_id": media_id, "post_url": post_url}
 
@@ -290,22 +499,52 @@ class InstagramService:
         max_attempts: int = 20,
         poll_seconds: float = 15.0,
     ) -> None:
-        """Wait for Instagram video processing to complete."""
+        """Wait for Instagram video processing to complete.
+
+        ``video_status`` is requested too: for a direct upload it carries the
+        upload/processing phase detail, which is what makes a failure here
+        diagnosable instead of a bare "ERROR".
+        """
         for _attempt in range(max_attempts):
             async with session.get(
                 f"{self.GRAPH_API}/{creation_id}",
-                params={"fields": "status_code,status", "access_token": access_token},
+                params={"fields": "status_code,status,video_status", "access_token": access_token},
             ) as response:
-                data = await response.json()
+                data = await response.json(content_type=None)
             _raise_on_error(data, "Instagram processing status failed")
 
             status_code = data.get("status_code")
             if status_code == "FINISHED":
                 return
             if status_code == "ERROR":
-                raise Exception(f"Instagram video processing failed: {data.get('status', 'Unknown error')}")
+                detail = data.get("status", "Unknown error")
+                video_status = data.get("video_status")
+                if isinstance(video_status, dict):
+                    phases = {
+                        phase: (video_status.get(phase) or {}).get("status")
+                        for phase in ("uploading_phase", "processing_phase")
+                    }
+                    detail = f"{detail} ({phases})"
+                raise Exception(f"Instagram video processing failed: {detail}")
             await asyncio.sleep(poll_seconds)
         raise Exception("Instagram video processing timed out")
+
+
+def _maybe_json(raw: Any) -> Any:
+    """Parse a response body that is *usually* JSON but not always.
+
+    The upload host answers ``{"success": true, ...}`` on the happy path, but
+    an empty body or an intermediary's HTML page shows up in the wild; the
+    caller distinguishes the cases instead of crashing on a decode error.
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
 
 
 def _first_page_with_instagram(pages: List[Dict[str, Any]]):

@@ -71,6 +71,16 @@ services:
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
       - UPLOAD_DIR=${UPLOAD_DIR:-./uploads/social}
       - SOCIAL_OAUTH_RETURN_URL=${SOCIAL_OAUTH_RETURN_URL:-}
+      # Instagram Reels: stream the stored file to Meta instead of handing it
+      # a video_url (see docs/running_locally.md → Instagram publishing).
+      - INSTAGRAM_DIRECT_UPLOAD=${INSTAGRAM_DIRECT_UPLOAD:-true}
+      # AI copy extraction (POST /api/v1/social-scheduler/parse-copy). The
+      # key is read by the API only — never exposed to the frontend. Left
+      # empty, the endpoint answers 503 and the upload page keeps its own
+      # local parser. Only the api service needs it (the worker never calls
+      # Groq).
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
       # Every feature (Beat, scheduled campaigns, recurring scans) is on by
       # default in ALL environments, including the public hosted instance
       # (ENVIRONMENT=deployment). Timers can be switched off per deployment
@@ -119,6 +129,8 @@ services:
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
       - UPLOAD_DIR=${UPLOAD_DIR:-./uploads/social}
       - SOCIAL_OAUTH_RETURN_URL=${SOCIAL_OAUTH_RETURN_URL:-}
+      # The worker does the publishing, so it needs the same upload flag.
+      - INSTAGRAM_DIRECT_UPLOAD=${INSTAGRAM_DIRECT_UPLOAD:-true}
       - ENVIRONMENT=production
     depends_on: &celery_dependencies
       postgres:

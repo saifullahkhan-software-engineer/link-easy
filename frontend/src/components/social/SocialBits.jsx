@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { PLATFORMS, PLATFORM_LABELS } from '../../api/socialScheduler';
 
@@ -210,4 +211,79 @@ export function shortError(text, max = 140) {
   if (!text) return '';
   const line = String(text).split('\n')[0];
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * The manual Facebook Group checklist.
+ *
+ * Meta removed the Groups API on 22 Apr 2024, so nothing here is posted by the
+ * app. These are the groups chosen on the upload page; each row is a link the
+ * user opens and posts into, with the caption one click away. The ticks are
+ * local to the open page — they are a working aid, not stored state, and the
+ * post's real outcome lives in its platform result.
+ */
+export function GroupShareChecklist({ groups, caption = '' }) {
+  const [copied, setCopied] = useState(false);
+  const [done, setDone] = useState({});
+  if (!groups || groups.length === 0) return null;
+
+  const copyCaption = async () => {
+    try {
+      await navigator.clipboard.writeText(caption);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can be blocked (a non-secure origin, or a denied
+      // permission). The caption stays on screen in the post row, so the user
+      // can still select it by hand — no toast needed.
+    }
+  };
+
+  const remaining = groups.filter((g) => !done[g.url]).length;
+
+  return (
+    <div className="mt-3 rounded-lg border border-blue-500/20 bg-blue-500/5 px-3 py-2" data-testid="group-checklist">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-blue-200">
+          Share to {groups.length} Facebook {groups.length === 1 ? 'group' : 'groups'} yourself
+          {remaining === 0 ? ' — all ticked' : ` · ${remaining} left`}
+        </p>
+        {caption && (
+          <button
+            type="button"
+            onClick={copyCaption}
+            data-testid="copy-caption"
+            className="rounded-md border border-surface-600 px-2.5 py-1 text-[11px] text-zinc-200 transition hover:border-surface-500"
+          >
+            {copied ? 'Caption copied' : 'Copy caption'}
+          </button>
+        )}
+      </div>
+      <p className="mt-1 text-[11px] text-zinc-400">
+        Facebook closed its Groups API, so LinkEasy cannot post into a group for you — open each one and paste the
+        caption.
+      </p>
+      <ul className="mt-2 space-y-1">
+        {groups.map((group) => (
+          <li key={group.url} className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={Boolean(done[group.url])}
+              onChange={() => setDone((prev) => ({ ...prev, [group.url]: !prev[group.url] }))}
+              data-testid={`group-tick-${group.url}`}
+              className="h-3.5 w-3.5 rounded border-surface-500 bg-surface-700 text-accent-500"
+            />
+            <a
+              href={group.url}
+              target="_blank"
+              rel="noreferrer"
+              className={`truncate hover:underline ${done[group.url] ? 'text-zinc-500 line-through' : 'text-blue-300'}`}
+            >
+              {group.name || group.url}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
