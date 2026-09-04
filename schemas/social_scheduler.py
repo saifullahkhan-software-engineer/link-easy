@@ -193,6 +193,58 @@ class PlatformDisconnectResponse(BaseModel):
     platform: str
 
 
+# ── Platform app credentials (operator-set DB overrides) ─────────────────────
+# Providers name their OAuth app credential fields differently, so a PUT body
+# uses each platform's own field names (client_id/client_secret for YouTube,
+# app_id/app_secret for Instagram & Facebook, client_key/client_secret for
+# TikTok). The response never contains the secret — it is write-only.
+
+
+class PlatformCredentialsIn(BaseModel):
+    """Credentials for one platform; only that platform's pair is accepted.
+
+    ``extra="forbid"`` turns a typo'd field name into a clear 422 instead of
+    silently dropping the value the operator just pasted from the console.
+    """
+
+    client_id: str = ""
+    client_secret: str = ""
+    app_id: str = ""
+    app_secret: str = ""
+    client_key: str = ""
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator(
+        "client_id", "client_secret", "app_id", "app_secret", "client_key"
+    )
+    @classmethod
+    def _strip(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+class PlatformCredentialsResponse(BaseModel):
+    """Credential status for one platform — never the secret itself."""
+
+    platform: str
+    label: str
+    # True when an effective pair exists (DB row or environment).
+    configured: bool
+    # Where the effective pair comes from: "database" | "environment" | "none".
+    source: str = "none"
+    # The non-secret identifier when it is stored in the database (empty when
+    # the pair comes purely from the environment or nothing is configured).
+    identifier: str = ""
+    # True when a DB row holds a secret (the value itself is never echoed).
+    has_secret: bool = False
+    updated_at: Optional[datetime] = None
+
+
+class PlatformCredentialsMessageResponse(BaseModel):
+    message: str
+    platform: str
+
+
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
 

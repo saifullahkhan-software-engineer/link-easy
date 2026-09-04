@@ -55,6 +55,12 @@ export const socialSchedulerApi = {
   getAuthUrl: (platform) => api.get(`${BASE}/platforms/${platform}/auth-url`),
   disconnectPlatform: (platform) => api.delete(`${BASE}/platforms/${platform}`),
 
+  // Platform app credentials — operator-set DB overrides of the environment
+  // pair (admin-gated on the backend; secrets are write-only).
+  listPlatformCredentials: () => api.get(`${BASE}/platforms/credentials`),
+  savePlatformCredentials: (platform, payload) => api.put(`${BASE}/platforms/credentials/${platform}`, payload),
+  deletePlatformCredentials: (platform) => api.delete(`${BASE}/platforms/credentials/${platform}`),
+
   // Aggregates
   getStats: () => api.get(`${BASE}/stats`),
   getCalendar: (month) => api.get(`${BASE}/calendar`, { params: month ? { month } : {} }),

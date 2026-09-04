@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str = ""
     FROM_EMAIL: str = ""
 
+    # Where the browser is sent after clicking the one-time account-deletion
+    # link in the email (a frontend route: /delete-confirm?token=...). The
+    # page reads the token and calls the API to finish the deletion, so this
+    # must point at the PUBLIC frontend origin, not the API. It is the "User
+    # Data Deletion URL" callback target Meta's app review expects.
+    DATA_DELETION_URL: str = ""
+
     # Redis settings
     REDIS_URL: str
 
@@ -279,6 +286,7 @@ class Settings(BaseSettings):
         "JWT_SECRET": "login tokens cannot be signed or verified — authentication fails",
         "BACKEND_CORS_ORIGINS": "browsers block every API call from the frontend (CORS)",
         "PASSWORD_RESET_URL": "password-reset emails carry no link back to the app",
+        "DATA_DELETION_URL": "account-deletion confirmation emails carry no link back to the app",
         "RESEND_API_KEY": "no transactional email is sent (Resend key missing)",
         "FROM_EMAIL": "no transactional email is sent (sender address missing)",
     }

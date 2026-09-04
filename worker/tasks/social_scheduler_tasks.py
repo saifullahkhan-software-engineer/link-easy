@@ -53,6 +53,7 @@ from models.social_scheduler import (
 )
 from services.social import get_service
 from services.social.connections import PlatformTokens, apply_tokens, read_tokens
+from services.social.credentials import apply_credentials_sync
 from worker.celery_app import celery_app
 from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 
@@ -289,6 +290,10 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
         return _failure(str(exc))
 
     with get_sync_db() as db:
+        # The service was built from env-only settings; overlay the operator's
+        # DB credential row (if any) so refresh/publish authenticate with the
+        # same app the settings page configured.
+        apply_credentials_sync(db, platform, service)
         conn = (
             db.query(SocialPlatformConnection)
             .filter(

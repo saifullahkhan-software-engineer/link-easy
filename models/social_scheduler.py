@@ -51,7 +51,6 @@ class SocialPlatform(str, enum.Enum):
     TIKTOK = "tiktok"
     FACEBOOK = "facebook"
 
-
 class SocialPostStatus(str, enum.Enum):
     PENDING = "pending"      # scheduled, waiting for scheduled_at
     POSTING = "posting"      # claimed by the worker, uploads in progress
@@ -187,6 +186,42 @@ class SocialPlatformConnection(Base):
     account_id = Column(String, nullable=False, default="", server_default="")
     # Platform-specific extras, e.g. {"page_id": ...} for Instagram.
     extra_data = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PlatformCredential(Base):
+    """Operator-set OAuth *app* credentials for one scheduler platform.
+
+    Normally platform app credentials come from the environment
+    (``YOUTUBE_CLIENT_ID`` … in ``core.config.Settings``). This table lets an
+    operator enter them from the settings page instead — a row here *overrides*
+    the corresponding environment pair (see services/social/credentials.py).
+
+    The two columns store the provider's identifier and secret pair under
+    generic names because each provider spells them differently:
+
+      youtube     → client_id / client_secret
+      instagram   → app_id   / app_secret
+      tiktok      → client_key / client_secret
+      facebook    → app_id   / app_secret
+
+    The identifier is not secret and may be echoed to an operator; the secret
+    is write-only (never returned by any API response). Rows are deployment
+    global (one per platform), not per user.
+    """
+
+    __tablename__ = "platform_credentials"
+
+    platform = Column(String, primary_key=True)  # youtube | instagram | tiktok | facebook
+    client_id = Column(String, nullable=False, default="", server_default="")
+    client_secret = Column(String, nullable=False, default="", server_default="")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

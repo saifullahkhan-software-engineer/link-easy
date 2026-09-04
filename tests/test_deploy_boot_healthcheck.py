@@ -58,6 +58,7 @@ def _settings(**overrides):
         "JWT_SECRET": "test-secret",
         "BACKEND_CORS_ORIGINS": "http://localhost:5173",
         "PASSWORD_RESET_URL": "http://localhost/reset",
+        "DATA_DELETION_URL": "http://localhost/delete-confirm",
         "RESEND_API_KEY": "test",
         "FROM_EMAIL": "test@example.com",
     }
@@ -77,6 +78,7 @@ class MissingOptionalSettingsTests(unittest.TestCase):
             JWT_SECRET="",
             BACKEND_CORS_ORIGINS="",
             PASSWORD_RESET_URL="",
+            DATA_DELETION_URL="",
             RESEND_API_KEY="",
             FROM_EMAIL="",
         ).missing_optional_settings()
@@ -84,6 +86,7 @@ class MissingOptionalSettingsTests(unittest.TestCase):
             sorted(missing),
             [
                 "BACKEND_CORS_ORIGINS",
+                "DATA_DELETION_URL",
                 "FROM_EMAIL",
                 "JWT_SECRET",
                 "PASSWORD_RESET_URL",

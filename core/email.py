@@ -44,6 +44,37 @@ async def send_verification_email(email: str, code: str) -> None:
         raise EmailDeliveryError(f"Could not send verification email: {str(e)}") from e
 
 
+async def send_account_deletion_email(email: str, deletion_link: str) -> None:
+    """Send the one-time account-deletion confirmation link via Resend."""
+    if not resend.api_key:
+        logger.warning("Resend API key is not configured; account-deletion email was not sent")
+        return
+
+    escaped_link = html.escape(deletion_link)
+
+    try:
+        response = await resend.Emails.send_async({
+            "from": f"LinkeFlow <{settings.FROM_EMAIL}>",
+            "to": [email],
+            "subject": "Confirm deleting your LinkEasy account",
+            "html": f"""
+                <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto;">
+                    <h2>Delete your account?</h2>
+                    <p>We received a request to delete your LinkEasy account and all of its data. This cannot be undone.</p>
+                    <p>Click the button below to confirm the deletion:</p>
+                    <div style="text-align: center; margin: 24px 0;">
+                        <a href="{escaped_link}" style="display: inline-block; background-color: #dc2626; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Delete my account</a>
+                    </div>
+                    <p style="color: #888; font-size: 13px;">This link expires in 30 minutes and can only be used once. If you did not request this, please ignore this email — nothing will be deleted.</p>
+                </div>
+            """,
+        })
+        logger.info(f"Account-deletion email sent successfully. ID: {response.id}")
+    except Exception as e:
+        logger.error(f"Failed to send account-deletion email via Resend: {str(e)}")
+        raise EmailDeliveryError(f"Could not send account-deletion email: {str(e)}") from e
+
+
 async def send_password_reset_email(email: str, reset_link: str) -> None:
     """Send a password reset link via Resend."""
     if not resend.api_key:

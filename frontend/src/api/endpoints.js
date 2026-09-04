@@ -413,3 +413,12 @@ export const liveApi = {
   browserStop: () => api.post('/live/browser/stop'),
   browserInput: (payload) => api.post('/live/browser/input', payload),
 };
+
+/* ------------------------------ user data -------------------------------- */
+// Public account-deletion endpoints (Meta User Data Deletion requirement).
+// Email-confirmed: the request endpoint only emails a one-time signed link;
+// nothing is ever deleted from a bare email address.
+export const userDataApi = {
+  requestDeletion: (email) => api.post('/user-data/deletion-request', { email }),
+  confirmDeletion: (token) => api.post('/user-data/deletion-confirm', { token }),
+};
