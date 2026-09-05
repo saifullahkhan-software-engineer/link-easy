@@ -71,6 +71,12 @@ services:
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
       - UPLOAD_DIR=${UPLOAD_DIR:-./uploads/social}
       - SOCIAL_OAUTH_RETURN_URL=${SOCIAL_OAUTH_RETURN_URL:-}
+      # Gmail (Google Cloud OAuth web client). Empty credentials → users see
+      # "Gmail is not configured" and the connect flow is disabled.
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_OAUTH_RETURN_URL=${GOOGLE_OAUTH_RETURN_URL:-}
       # Instagram Reels: stream the stored file to Meta instead of handing it
       # a video_url (see docs/running_locally.md → Instagram publishing).
       - INSTAGRAM_DIRECT_UPLOAD=${INSTAGRAM_DIRECT_UPLOAD:-true}
@@ -129,6 +135,10 @@ services:
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
       - UPLOAD_DIR=${UPLOAD_DIR:-./uploads/social}
       - SOCIAL_OAUTH_RETURN_URL=${SOCIAL_OAUTH_RETURN_URL:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_OAUTH_RETURN_URL=${GOOGLE_OAUTH_RETURN_URL:-}
       # The worker does the publishing, so it needs the same upload flag.
       - INSTAGRAM_DIRECT_UPLOAD=${INSTAGRAM_DIRECT_UPLOAD:-true}
       - ENVIRONMENT=production

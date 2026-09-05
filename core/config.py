@@ -186,6 +186,25 @@ class Settings(BaseSettings):
     FACEBOOK_APP_SECRET: str = ""
     FACEBOOK_REDIRECT_URI: str = ""
 
+    # ── Gmail (OAuth web client) ─────────────────────────────────────────────
+    # Credentials of the Google Cloud OAuth *web* client used to connect users'
+    # personal Gmail (or Workspace) accounts: read the inbox, check for new
+    # mail, manage labels and send messages (scopes gmail.modify + gmail.send —
+    # deliberately NOT mail.google.com full access; see docs/gmail_setup.md).
+    # Leave empty and GET /api/v1/gmail/status reports configured=false with
+    # the connect flow disabled; nothing else breaks.
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    # Exact URI registered in the Google Cloud console, e.g.
+    #   https://YOUR-BACKEND-DOMAIN.com/api/v1/gmail/callback
+    # or http://localhost:8000/api/v1/gmail/callback for local development
+    # (Google, unlike TikTok, accepts localhost redirect URIs). Empty → derived
+    # from PUBLIC_API_URL (or the request origin) + /api/v1/gmail/callback.
+    GOOGLE_REDIRECT_URI: str = ""
+    # Where the browser lands after the OAuth callback (the app's Gmail page).
+    # Empty → first CORS origin + /app/gmail.
+    GOOGLE_OAUTH_RETURN_URL: str = ""
+
     # ── AI copy extraction (POST /api/v1/social-scheduler/parse-copy) ────────
     # Turns one large pasted message into per-platform title / description /
     # hashtags. The key is backend-only: it is read here, never sent to the
@@ -317,6 +336,32 @@ class Settings(BaseSettings):
         base = origins[0].rstrip("/") if origins else ""
         return f"{base}/app/social-scheduler/settings"
 
+    @property
+    def gmail_configured(self) -> bool:
+        """True when the Google OAuth web-client credentials are set.
+
+        Gmail connection is a configuration-gated feature (like a social
+        platform): with no client id/secret there is no way to start Google's
+        OAuth, so the UI reports "not configured" instead of failing the
+        sign-in. Credentials come from the environment only — there is no
+        database override, so no per-platform admin form is involved.
+        """
+        return bool(self.GOOGLE_CLIENT_ID and self.GOOGLE_CLIENT_SECRET)
+
+    @property
+    def gmail_oauth_return_url(self) -> str:
+        """Frontend page the browser lands on after the Gmail OAuth callback.
+
+        Explicit GOOGLE_OAUTH_RETURN_URL wins; otherwise the first CORS origin
+        (the frontend) + the app's Gmail inbox page. Falls back to a relative
+        path so a same-origin dev proxy setup still works.
+        """
+        if self.GOOGLE_OAUTH_RETURN_URL:
+            return self.GOOGLE_OAUTH_RETURN_URL.rstrip("/")
+        origins = self.cors_origins
+        base = origins[0].rstrip("/") if origins else ""
+        return f"{base}/app/gmail"
+
     def social_platform_configured(self, platform: str) -> bool:
         """True when the OAuth app credentials for ``platform`` are set."""
         return {
@@ -337,6 +382,8 @@ class Settings(BaseSettings):
         "DATA_DELETION_URL": "account-deletion confirmation emails carry no link back to the app",
         "RESEND_API_KEY": "no transactional email is sent (Resend key missing)",
         "FROM_EMAIL": "no transactional email is sent (sender address missing)",
+        "GOOGLE_CLIENT_ID": "users cannot connect Gmail (no Google OAuth client id)",
+        "GOOGLE_CLIENT_SECRET": "users cannot connect Gmail (no Google OAuth client secret)",
     }
 
     def missing_optional_settings(self) -> dict[str, str]:

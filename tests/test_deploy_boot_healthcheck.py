@@ -39,6 +39,8 @@ _required_env = {
     "BACKEND_CORS_ORIGINS": "http://localhost:5173",
     "RESEND_API_KEY": "test",
     "FROM_EMAIL": "test@example.com",
+    "GOOGLE_CLIENT_ID": "client",
+    "GOOGLE_CLIENT_SECRET": "secret",
     "REDIS_URL": "redis://localhost:6379/0",
 }
 for _key, _value in _required_env.items():
@@ -61,6 +63,10 @@ def _settings(**overrides):
         "DATA_DELETION_URL": "http://localhost/delete-confirm",
         "RESEND_API_KEY": "test",
         "FROM_EMAIL": "test@example.com",
+        # Gmail ships as part of the product; a deployment without the Google
+        # OAuth client is diagnosably half-configured, not fully configured.
+        "GOOGLE_CLIENT_ID": "client",
+        "GOOGLE_CLIENT_SECRET": "secret",
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
@@ -97,6 +103,14 @@ class MissingOptionalSettingsTests(unittest.TestCase):
         # is actionable rather than just a list of names.
         for name, effect in missing.items():
             self.assertTrue(effect, f"{name} has no explanation attached")
+
+    def test_missing_gmail_credentials_are_reported_not_fatal(self):
+        # Gmail is configuration-gated (GOOGLE_CLIENT_ID / _SECRET): leaving
+        # them out must never crash boot, only report the gap.
+        missing = _settings(GOOGLE_CLIENT_ID="", GOOGLE_CLIENT_SECRET="").missing_optional_settings()
+        self.assertIn("GOOGLE_CLIENT_ID", missing)
+        self.assertIn("GOOGLE_CLIENT_SECRET", missing)
+        self.assertIn("Gmail", missing["GOOGLE_CLIENT_ID"])
 
     def test_legacy_jwt_alias_satisfies_the_check(self):
         # docker-compose sets JWT_SECRET_KEY; that must not be flagged.

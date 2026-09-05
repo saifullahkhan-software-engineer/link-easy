@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { linkedinApi, whatsappApi } from '../api/endpoints';
+import { gmailApi } from '../api/gmail';
 import { AccountStatusBadge } from '../components/Badge';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
+import { GmailStatusBadge } from '../components/gmail/GmailBits';
 import { Spinner } from '../components/Spinner';
 
 function NotConnectedBadge() {
@@ -15,7 +17,7 @@ function NotConnectedBadge() {
 }
 
 /**
- * Accounts hub — one card per connection (LinkedIn + WhatsApp).
+ * Accounts hub — one card per connection (LinkedIn + WhatsApp + Gmail).
  *
  * Each card only shows the account and its status. All details — when it was
  * added, session health, disconnect, and the Scan / Live Chat shortcuts —
@@ -27,6 +29,8 @@ export default function AccountsPage() {
   const [waLoading, setWaLoading] = useState(true);
   const [waStatus, setWaStatus] = useState('disconnected');
   const [waReconnectRequired, setWaReconnectRequired] = useState(false);
+  const [gmLoading, setGmLoading] = useState(true);
+  const [gmStatus, setGmStatus] = useState(null);
 
   const loadLinkedIn = useCallback(async () => {
     setLiLoading(true);
@@ -54,16 +58,29 @@ export default function AccountsPage() {
     }
   }, []);
 
+  const loadGmail = useCallback(async () => {
+    setGmLoading(true);
+    try {
+      const { data } = await gmailApi.status();
+      setGmStatus(data);
+    } catch {
+      setGmStatus(null);
+    } finally {
+      setGmLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadLinkedIn();
     loadWhatsApp();
-  }, [loadLinkedIn, loadWhatsApp]);
+    loadGmail();
+  }, [loadLinkedIn, loadWhatsApp, loadGmail]);
 
   return (
     <div className="max-w-4xl">
       <h1 className="text-2xl font-bold text-zinc-50">Accounts</h1>
       <p className="mt-1 text-sm text-zinc-400">
-        Manage the LinkedIn and WhatsApp connections your automations run from.
+        Manage the LinkedIn, WhatsApp and Gmail connections your automations run from.
       </p>
 
       <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
@@ -130,6 +147,43 @@ export default function AccountsPage() {
             <Link to="/app/account/whatsapp" className="btn-primary">
               {waStatus === 'connected' ? 'Manage WhatsApp connection' : 'Connect WhatsApp'}
             </Link>
+          </div>
+        </div>
+
+        {/* ── Gmail card ─────────────────────────────────────────────── */}
+        <div className="card flex flex-col p-6">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-rose-500/10 text-rose-300">
+                <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M1.5 5.25A2.25 2.25 0 0 1 3.75 3h16.5a2.25 2.25 0 0 1 2.25 2.25v13.5A2.25 2.25 0 0 1 20.25 21H3.75a2.25 2.25 0 0 1-2.25-2.25V5.25Zm1.5.66v12.84c0 .41.34.75.75.75h16.5c.41 0 .75-.34.75-.75V5.91l-8.28 6.07a1.5 1.5 0 0 1-1.68 0L3 5.91Zm1.03-.66L12 11.32l7.97-6.07H4.03Z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-zinc-100">Gmail</h2>
+                {gmLoading ? (
+                  <p className="mt-0.5 h-4 w-28 animate-pulse rounded bg-surface-700" />
+                ) : gmStatus?.connected ? (
+                  <p className="mt-0.5 text-sm text-zinc-400">{gmStatus.account_email}</p>
+                ) : gmStatus?.configured === false ? (
+                  <p className="mt-0.5 text-sm text-zinc-500">Needs operator setup</p>
+                ) : (
+                  <p className="mt-0.5 text-sm text-zinc-500">No account connected</p>
+                )}
+              </div>
+            </div>
+            {gmLoading ? <Spinner /> : <GmailStatusBadge status={gmStatus} />}
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-3 border-t border-surface-700 pt-4">
+            <Link to="/app/gmail" className="btn-primary">
+              {gmStatus?.connected ? 'Open Gmail inbox' : 'Connect Gmail'}
+            </Link>
+            {gmStatus?.connected && (
+              <Link to="/app/gmail/compose" className="btn-secondary">
+                Compose
+              </Link>
+            )}
           </div>
         </div>
       </div>

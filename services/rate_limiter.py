@@ -92,6 +92,15 @@ DEFAULT_RULES: dict[str, RateLimitRule] = {
         # a looped client from running up a bill.
         RateLimitRule("social:parse-copy", 60, 3600, "AI copy extractions per hour"),
         RateLimitRule("live:start", 30, 3600, "Live-chat browser starts per hour"),
+        # Gmail writes go to the user's real mailbox, so sending is metered
+        # like every other side-effectful action. 60/hour is far below
+        # Google's own ~500/day consumer limit and still plenty for a human
+        # replying from the inbox.
+        RateLimitRule("gmail:send", 60, 3600, "Gmail messages sent per hour"),
+        # The inbox page's "checking mail" tick plus explicit refreshes. Each
+        # call fans out into a handful of Gmail API requests, so it is capped
+        # per user per hour.
+        RateLimitRule("gmail:check", 300, 3600, "Gmail check calls per hour"),
     )
 }
 
