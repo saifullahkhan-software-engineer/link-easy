@@ -13,6 +13,7 @@ export default defineConfig({
   // 'spa'; we set it explicitly so preview/dev stay consistent.
   appType: 'spa',
   server: {
+    host: '0.0.0.0',
     port: 5173,
     // Dev previews (e.g. sandboxed environments) reach the app through a
     // hostname that is not localhost — accept any host in development.
