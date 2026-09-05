@@ -26,7 +26,9 @@ class TikTokService:
     """Service for TikTok video publishing."""
 
     TIKTOK_API = "https://open.tiktokapis.com/v2"
-    SCOPES = "user.info.basic,video.publish,video.upload"
+    # LinkEasy uses Content Posting API Direct Post. Draft upload is not used,
+    # so do not request the separate video.upload permission.
+    SCOPES = "user.info.basic,video.publish"
 
     def __init__(self):
         self.client_key = settings.TIKTOK_CLIENT_KEY
