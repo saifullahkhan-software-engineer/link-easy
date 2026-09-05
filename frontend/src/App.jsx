@@ -45,6 +45,7 @@ import SocialCalendarPage from './pages/social-scheduler/CalendarPage';
 import SocialSettingsPage from './pages/social-scheduler/SettingsPage';
 import FacebookGroupsPage from './pages/social-scheduler/FacebookGroupsPage';
 import PrivacyPolicy from './pages/PrivacyPolicy';
+import TermsOfService from './pages/TermsOfService';
 import DataDeletion from './pages/DataDeletion';
 import DeleteConfirm from './pages/DeleteConfirm';
 
@@ -77,6 +78,7 @@ export default function App() {
           {/* Public compliance pages — reachable without logging in (Meta app
               Basic settings: Privacy Policy URL and User Data Deletion URL). */}
           <Route path="/privacy" element={<PrivacyPolicy />} />
+          <Route path="/terms" element={<TermsOfService />} />
           <Route path="/delete" element={<DataDeletion />} />
           <Route path="/delete-confirm" element={<DeleteConfirm />} />
 

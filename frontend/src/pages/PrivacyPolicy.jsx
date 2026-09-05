@@ -140,6 +140,9 @@ export default function PrivacyPolicy() {
             <Link to="/privacy" className="hover:text-zinc-400">
               Privacy Policy
             </Link>
+            <Link to="/terms" className="hover:text-zinc-400">
+              Terms of Service
+            </Link>
             <Link to="/delete" className="hover:text-zinc-400">
               Data Deletion
             </Link>

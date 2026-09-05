@@ -23,6 +23,7 @@ from models.rbac import AppSetting, Role, UserRoleLink  # noqa: F401
 from models.rate_limit import RateLimitCounter  # noqa: F401
 from models.social_scheduler import (
     PlatformCredential,  # noqa: F401
+    ShareTarget,  # noqa: F401
     SocialPlatformConnection,
     SocialPost,
     SocialPostResult,

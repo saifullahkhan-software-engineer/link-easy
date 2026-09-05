@@ -406,7 +406,14 @@ export default function Landing() {
             <img src="/favicon.svg" alt="" className="h-5 w-5 opacity-70" />
             <span>LinkEasy</span>
           </Link>
-          <p className="text-center sm:text-right">Connect your tools. Automate responsibly. Keep conversations human.</p>
+          <div className="flex flex-col items-center gap-2 sm:items-end">
+            <p className="text-center sm:text-right">Connect your tools. Automate responsibly. Keep conversations human.</p>
+            <nav className="flex gap-4 text-xs text-zinc-600" aria-label="Legal links">
+              <Link to="/privacy" className="transition hover:text-zinc-300">Privacy Policy</Link>
+              <Link to="/terms" className="transition hover:text-zinc-300">Terms of Service</Link>
+              <Link to="/delete" className="transition hover:text-zinc-300">Data Deletion</Link>
+            </nav>
+          </div>
         </div>
       </footer>
     </div>
