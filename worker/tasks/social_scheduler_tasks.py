@@ -225,6 +225,7 @@ def publish_post(post_id: str) -> dict:
             "hashtags": post.hashtags or "",
             "video_path": post.video_path,
             "video_url": post.video_url,
+            "thumbnail": post.thumbnail or "",
             "youtube_title": post.youtube_title or "",
             "instagram_caption": post.instagram_caption or "",
             "tiktok_caption": post.tiktok_caption or "",
@@ -289,6 +290,9 @@ def publish_post(post_id: str) -> dict:
             .values(status=final_status, updated_at=_now())
         )
 
+    if final_status == SocialPostStatus.POSTED.value:
+        _cleanup_completed_upload(snapshot["video_path"])
+
     logger.info("[%s] done: %s", post_id, final_status)
     return {"status": final_status, "post_id": post_id, "results": outcomes}
 
@@ -308,6 +312,46 @@ def _platform_copy(post: dict, platform: str) -> dict[str, str]:
         key: str(raw.get(key) or "").strip()
         for key in ("title", "description", "hashtags")
     }
+
+
+def _thumbnail_path_for_video(video_path: str) -> str:
+    """The API stores covers beside the clip as ``<stem>.thumb.jpg``."""
+    stem, _extension = os.path.splitext(video_path)
+    return f"{stem}.thumb.jpg"
+
+
+def _cleanup_completed_upload(video_path: str) -> None:
+    """Remove a video and thumbnail after every selected platform succeeds."""
+    # Retain files when a platform fails so the post can be retried and
+    # diagnosed. Cleanup itself is best-effort and must not change a POSTED
+    # result into a failure.
+    for path in (video_path, _thumbnail_path_for_video(video_path)):
+        if not path:
+            continue
+        try:
+            os.remove(path)
+            logger.info("Removed completed social upload artifact %s", path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not remove completed social upload artifact %s: %s", path, exc)
+
+
+async def _set_youtube_thumbnail(service, *, video_id: str, thumbnail_path: str, tokens) -> str:
+    """Set a cover if one exists; a cover failure must not undo publication."""
+    if not os.path.exists(thumbnail_path):
+        return ""
+    try:
+        await service.set_thumbnail(
+            video_id,
+            thumbnail_path,
+            tokens.access_token,
+            tokens.refresh_token,
+        )
+        return "Custom thumbnail applied"
+    except Exception as exc:
+        logger.warning("YouTube video %s published but thumbnail failed: %s", video_id, exc)
+        return f"Published, but custom thumbnail could not be applied: {str(exc)[:300]}"
 
 
 async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> dict:
@@ -370,6 +414,13 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
                 access_token=tokens.access_token,
                 refresh_token=tokens.refresh_token,
             )
+            thumbnail_path = _thumbnail_path_for_video(video_path)
+            thumbnail_note = await _set_youtube_thumbnail(
+                service,
+                video_id=result["video_id"],
+                thumbnail_path=thumbnail_path,
+                tokens=tokens,
+            )
             note = await _add_to_youtube_playlists(
                 service,
                 video_id=result["video_id"],
@@ -377,7 +428,11 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
                 tokens=tokens,
                 label=label,
             )
-            return _success(result["video_id"], result["video_url"], note=note)
+            return _success(
+                result["video_id"],
+                result["video_url"],
+                note="; ".join(item for item in (thumbnail_note, note) if item),
+            )
 
         if platform == "instagram":
             # The video lives on this server (both "publish now" and scheduled
@@ -391,6 +446,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
                 caption=platform_caption or post["instagram_caption"] or common_caption,
                 access_token=tokens.access_token,
                 video_path=video_path,
+                thumbnail_url=post.get("thumbnail") or None,
             )
             return _success(result["media_id"], result["post_url"])
 

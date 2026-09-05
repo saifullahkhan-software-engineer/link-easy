@@ -43,6 +43,7 @@ import SocialQueuePage from './pages/social-scheduler/QueuePage';
 import SocialHistoryPage from './pages/social-scheduler/HistoryPage';
 import SocialCalendarPage from './pages/social-scheduler/CalendarPage';
 import SocialSettingsPage from './pages/social-scheduler/SettingsPage';
+import FacebookGroupsPage from './pages/social-scheduler/FacebookGroupsPage';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import DataDeletion from './pages/DataDeletion';
 import DeleteConfirm from './pages/DeleteConfirm';
@@ -143,6 +144,7 @@ export default function App() {
             <Route path="social-scheduler/history" element={<SocialHistoryPage />} />
             <Route path="social-scheduler/calendar" element={<SocialCalendarPage />} />
             <Route path="social-scheduler/settings" element={<SocialSettingsPage />} />
+            <Route path="social-scheduler/facebook-groups" element={<FacebookGroupsPage />} />
             <Route
               path="linkedin-live"
               element={

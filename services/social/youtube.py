@@ -58,6 +58,7 @@ class YouTubeService:
         # comes back 403 and is recorded as a note on the post instead of
         # failing an upload that already succeeded.
         "https://www.googleapis.com/auth/youtube",
+        "https://www.googleapis.com/auth/youtube.force-ssl",
         # Added to the OAuth client's scope set; used to store which Google
         # account (name/email/picture) is connected, alongside the channel.
         "https://www.googleapis.com/auth/userinfo.profile",
@@ -180,13 +181,26 @@ class YouTubeService:
         from googleapiclient.errors import HttpError
 
         def _fetch():
-            youtube = self._client("youtube", "v3", access_token, refresh_token)
-            return youtube.channels().list(part="snippet", mine=True).execute()
+            last_error = None
+            for attempt in range(1, self.UPLOAD_RETRY_ATTEMPTS + 1):
+                try:
+                    youtube = self._client("youtube", "v3", access_token, refresh_token)
+                    return youtube.channels().list(part="snippet", mine=True).execute()
+                except (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
+                    last_error = exc
+                    if attempt < self.UPLOAD_RETRY_ATTEMPTS:
+                        time.sleep(2 ** (attempt - 1))
+            raise last_error
 
         try:
             response = await asyncio.to_thread(_fetch)
         except HttpError as e:
             raise Exception(f"YouTube API error: {e}")
+        except (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
+            raise Exception(
+                "YouTube connection failed after retries. Check your internet connection, "
+                f"VPN/proxy/antivirus HTTPS inspection, then try again: {exc}"
+            ) from exc
 
         items = response.get("items") or []
         if not items:
@@ -375,28 +389,41 @@ class YouTubeService:
         from googleapiclient.errors import HttpError
 
         def _fetch():
-            youtube = self._client("youtube", "v3", access_token, refresh_token)
-            collected: list[Dict[str, Any]] = []
-            page_token: Optional[str] = None
-            for _page in range(max_pages):
-                params: Dict[str, Any] = {
-                    "part": "snippet,contentDetails,status",
-                    "mine": True,
-                    "maxResults": min(max_results, 50),
-                }
-                if page_token:
-                    params["pageToken"] = page_token
-                response = youtube.playlists().list(**params).execute()
-                collected.extend(response.get("items") or [])
-                page_token = response.get("nextPageToken")
-                if not page_token or len(collected) >= max_results:
-                    break
-            return collected[:max_results]
+            last_error = None
+            for attempt in range(1, self.UPLOAD_RETRY_ATTEMPTS + 1):
+                try:
+                    youtube = self._client("youtube", "v3", access_token, refresh_token)
+                    collected: list[Dict[str, Any]] = []
+                    page_token: Optional[str] = None
+                    for _page in range(max_pages):
+                        params: Dict[str, Any] = {
+                            "part": "snippet,contentDetails,status",
+                            "mine": True,
+                            "maxResults": min(max_results, 50),
+                        }
+                        if page_token:
+                            params["pageToken"] = page_token
+                        response = youtube.playlists().list(**params).execute()
+                        collected.extend(response.get("items") or [])
+                        page_token = response.get("nextPageToken")
+                        if not page_token or len(collected) >= max_results:
+                            break
+                    return collected[:max_results]
+                except (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
+                    last_error = exc
+                    if attempt < self.UPLOAD_RETRY_ATTEMPTS:
+                        time.sleep(2 ** (attempt - 1))
+            raise last_error
 
         try:
             items = await asyncio.to_thread(_fetch)
         except HttpError as exc:
             raise Exception(_http_error_message(exc, "YouTube playlist list failed"))
+        except (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
+            raise Exception(
+                "YouTube playlist list connection failed after retries. Check your internet connection, "
+                f"VPN/proxy/antivirus HTTPS inspection, then try again: {exc}"
+            ) from exc
         except Exception as exc:
             raise Exception(f"YouTube playlist list error: {exc}")
 
@@ -468,6 +495,26 @@ class YouTubeService:
 
         added, failed = await asyncio.to_thread(_add)
         return {"added": added, "failed": failed}
+
+    async def set_thumbnail(
+        self,
+        video_id: str,
+        thumbnail_path: str,
+        access_token: str,
+        refresh_token: Optional[str] = None,
+    ) -> None:
+        """Set a custom JPEG thumbnail after the video upload succeeds."""
+        from googleapiclient.http import MediaFileUpload
+
+        if not os.path.exists(thumbnail_path):
+            raise FileNotFoundError(f"Thumbnail file not found: {thumbnail_path}")
+
+        def _set():
+            youtube = self._client("youtube", "v3", access_token, refresh_token)
+            media = MediaFileUpload(thumbnail_path, mimetype="image/jpeg", resumable=False)
+            return youtube.thumbnails().set(videoId=video_id, media_body=media).execute()
+
+        await asyncio.to_thread(_set)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 

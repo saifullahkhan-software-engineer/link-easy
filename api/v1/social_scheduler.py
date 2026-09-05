@@ -107,6 +107,7 @@ from schemas.social_scheduler import (
 from services.ai.copy_parser import (
     CopyParseError,
     CopyProviderUnavailable,
+    CopyRateLimitError,
     get_copy_parser,
 )
 from services.social import get_service
@@ -820,13 +821,38 @@ async def parse_platform_copy(
     try:
         platform_copy = await parser.aparse(source_text)
     except CopyProviderUnavailable:
+        logger.warning(
+            "Copy extraction unavailable provider=%s source_chars=%d elapsed_ms=%d",
+            parser.provider,
+            len(source_text),
+            int((time.perf_counter() - started) * 1000),
+        )
         # A deployment without a key. The upload page falls back to its own
         # parser, so this is a "feature off here" message, not a bug.
         raise HTTPException(
             status_code=503,
             detail="AI copy extraction is not configured on this instance. Use 'Use text to fill fields' instead.",
         )
-    except CopyParseError:
+    except CopyRateLimitError as exc:
+        logger.warning(
+            "Copy extraction rate-limited provider=%s source_chars=%d elapsed_ms=%d reason=%s",
+            parser.provider,
+            len(source_text),
+            int((time.perf_counter() - started) * 1000),
+            str(exc),
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="The AI provider rate limit was reached. Wait briefly and try again.",
+        )
+    except CopyParseError as exc:
+        logger.warning(
+            "Copy extraction rejected provider=%s source_chars=%d elapsed_ms=%d reason=%s",
+            parser.provider,
+            len(source_text),
+            int((time.perf_counter() - started) * 1000),
+            str(exc),
+        )
         # The parser logged what went wrong (exception class, model name) —
         # the client gets advice, not the model's raw reply.
         raise HTTPException(

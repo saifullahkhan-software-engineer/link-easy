@@ -199,7 +199,8 @@ class Settings(BaseSettings):
     # adding Google means one more parser class there plus its own key here.
     # Nothing in api/v1/social_scheduler.py or the frontend needs to change.
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_MODEL: str = "qwen/qwen3.6-27b"
     # Hard cap on the pasted message in characters. Past this the endpoint
     # answers 413 instead of burning tokens on a message the editor cannot
     # use anyway (every platform field it would fill is far smaller).

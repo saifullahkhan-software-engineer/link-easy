@@ -69,31 +69,37 @@ function formatBytes(n) {
 function extractPastedCopy(text) {
   const clean = String(text || '').trim();
   if (!clean) return {};
-  const aliases = {
-    youtube: /youtube\s+shorts?/i,
-    instagram: /instagram\s+reels?/i,
-    tiktok: /tiktok/i,
-    facebook: /facebook\s+(?:reels?|page)/i,
-  };
-  const starts = Object.entries(aliases)
-    .map(([platform, pattern]) => {
-      const match = pattern.exec(clean);
-      return match ? { platform, index: match.index } : null;
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.index - b.index);
+  // Match only a complete heading line. This supports the common numbered
+  // form (`1. YouTube Shorts`) and avoids treating a platform name mentioned
+  // inside the copy as the beginning of a new section.
+  const heading = /^\s*(?:\*{2})?(?:\d+\s*[.)]\s*)?(youtube\s+shorts?|instagram\s+reels?|tiktok|facebook\s+(?:reels?|page))(?:\*{2})?\s*:?\s*$/gim;
+  const aliases = [
+    { platform: 'youtube', pattern: /youtube\s+shorts?/i },
+    { platform: 'instagram', pattern: /instagram\s+reels?/i },
+    { platform: 'tiktok', pattern: /tiktok/i },
+    { platform: 'facebook', pattern: /facebook\s+(?:reels?|page)/i },
+  ];
+  const starts = [];
+  let match;
+  while ((match = heading.exec(clean)) !== null) {
+    const label = match[1].toLowerCase();
+    const platform = aliases.find(({ pattern }) => pattern.test(label))?.platform;
+    if (platform) starts.push({ platform, index: match.index, end: match.index + match[0].length });
+    if (match.index === heading.lastIndex) heading.lastIndex += 1;
+  }
 
   const output = {};
-  starts.forEach(({ platform, index }, position) => {
+  starts.forEach(({ platform, end: sectionStart }, position) => {
     const end = position + 1 < starts.length ? starts[position + 1].index : clean.length;
-    const section = clean.slice(index, end).replace(/\*\*/g, '').trim();
-    const readLine = (labels) => {
-      const expression = new RegExp(`(?:${labels})\\s*:\\s*([^\\n]+)`, 'i');
-      return section.match(expression)?.[1]?.trim() || '';
-    };
-    const title = readLine('Title|Headline(?: \\(Caption Hook\\))?|Caption');
-    const descriptionMatch = section.match(/Description\s*:\s*([\s\S]*?)(?=\n\s*(?:#|Hashtags?\s*:)|$)/i);
-    const description = descriptionMatch?.[1]?.trim() || '';
+    const section = clean.slice(sectionStart, end).replace(/\*\*/g, '').trim();
+    const labelPattern = '(?:Title|Headline(?: \\(Caption Hook\\))?|Caption)';
+    const labelledTitle = section.match(new RegExp(`${labelPattern}\\s*:\\s*([^\\n]+)`, 'i'))?.[1]?.trim() || '';
+    const captionMatch = section.match(/Caption\s*:\s*([\s\S]*?)(?=\n\s*(?:Description|Hashtags?\s*:|#)|$)/i);
+    const captionLines = captionMatch?.[1]?.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean) || [];
+    if (captionMatch && labelledTitle) captionLines.shift();
+    const title = labelledTitle || captionLines.shift() || '';
+    const descriptionMatch = section.match(/Description\s*:\s*([\s\S]*?)(?=\n\s*(?:Hashtags?\s*:|#)|$)/i);
+    const description = descriptionMatch?.[1]?.trim() || (captionLines.length ? captionLines.join('\n') : '');
     const hashtags = [...section.matchAll(/#[\p{L}\p{N}_-]+/gu)].map((match) => match[0]);
     output[platform] = {
       title,

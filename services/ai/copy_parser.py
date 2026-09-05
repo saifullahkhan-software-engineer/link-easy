@@ -105,8 +105,8 @@ Extraction rules:
 
 1. Platform sections are introduced by headings or labels such as "YouTube Shorts", "Instagram Reels", "TikTok", "Facebook Reels", "Facebook Page". Numbered sections ("1. YouTube Shorts", "2. Instagram Reels", "3. Facebook Reels") and Markdown headings ("**YouTube Shorts**") mean the same thing. Never copy the heading itself into a returned value.
 2. "Title", "Headline" and "Headline (Caption Hook)" all populate "title".
-3. If a platform has only a "Caption", use its first meaningful line or sentence as "title" and the rest of the caption as "description". If the caption is a single short line, use it as "title" and leave "description" empty.
-4. Everything after "Description:" belongs to "description", up to the next platform heading or the hashtag block.
+3. If a platform has only a "Caption", treat the entire multiline value after "Caption:" as one caption block. Use its first meaningful non-empty line as "title" and preserve every remaining line as "description". If the caption is a single short line, use it as "title" and leave "description" empty. Do not discard paragraphs just because there is no separate "Description:" label.
+4. Everything after "Description:" belongs to "description", up to the next platform heading or the hashtag block. A description may span multiple lines and paragraphs.
 5. Collect every hashtag from that platform's section into "hashtags", de-duplicated, and remove those hashtags from "description".
 6. If a platform section is absent, return empty strings for it. Never borrow copy from another platform.
 7. Remove Markdown formatting from the returned values: **bold**, *italic*, bullet prefixes and code fences. Keep emojis, punctuation, casing and line breaks exactly as written.
@@ -146,6 +146,10 @@ class CopyParseError(Exception):
 
 class CopyProviderUnavailable(Exception):
     """No provider credentials are configured on this instance → HTTP 503."""
+
+
+class CopyRateLimitError(CopyParseError):
+    """The configured AI provider rejected the request with HTTP 429."""
 
 
 # ── defensive JSON parsing ───────────────────────────────────────────────────
@@ -434,8 +438,46 @@ class CopyParser:
 
     def parse(self, source_text: str) -> PlatformCopy:
         """Blocking: call the provider and validate its reply."""
+        logger.info(
+            "copy parser: starting provider=%s source_chars=%d",
+            self.provider,
+            len(source_text or ""),
+        )
         raw = self.complete(source_text)
-        return normalize_platform_copy(extract_json_object(raw))
+        logger.info(
+            "copy parser: provider returned provider=%s response_chars=%d",
+            self.provider,
+            len(raw or ""),
+        )
+        try:
+            payload = extract_json_object(raw)
+        except CopyParseError as exc:
+            logger.warning(
+                "copy parser: JSON extraction failed provider=%s response_chars=%d reason=%s",
+                self.provider,
+                len(raw or ""),
+                str(exc),
+            )
+            raise
+        try:
+            result = normalize_platform_copy(payload)
+        except CopyParseError as exc:
+            logger.warning(
+                "copy parser: platform normalization failed provider=%s keys=%s reason=%s",
+                self.provider,
+                sorted(str(key) for key in payload.keys())[:10] if isinstance(payload, dict) else [],
+                str(exc),
+            )
+            raise
+        logger.info(
+            "copy parser: normalization succeeded provider=%s platforms=%s",
+            self.provider,
+            ",".join(
+                platform for platform, fields in result.model_dump().items()
+                if any(fields.values())
+            ) or "none",
+        )
+        return result
 
     async def aparse(self, source_text: str) -> PlatformCopy:
         """Non-blocking wrapper — provider SDKs are synchronous HTTP clients.
@@ -478,6 +520,20 @@ class GroqCopyParser(CopyParser):
         return self._model or settings.GROQ_MODEL
 
     @property
+    def base_url(self) -> str:
+        """Return the host URL expected by the Groq SDK.
+
+        The SDK appends ``/openai/v1/chat/completions`` itself. Accept the
+        full OpenAI-compatible URL in configuration, but remove that path
+        before constructing the client so it is not duplicated.
+        """
+        configured = (settings.GROQ_BASE_URL or "https://api.groq.com").rstrip("/")
+        suffix = "/openai/v1"
+        if configured.lower().endswith(suffix):
+            configured = configured[: -len(suffix)]
+        return configured or "https://api.groq.com"
+
+    @property
     def timeout(self) -> float:
         return self._timeout if self._timeout is not None else settings.GROQ_TIMEOUT_SECONDS
 
@@ -494,7 +550,7 @@ class GroqCopyParser(CopyParser):
         except ImportError as exc:  # pragma: no cover - wheel is in requirements
             logger.error("copy parser: the groq package is not installed")
             raise CopyProviderUnavailable("the AI copy provider is not installed") from exc
-        self._client = Groq(api_key=api_key)
+        self._client = Groq(api_key=api_key, base_url=self.base_url)
         return self._client
 
     def complete(self, source_text: str) -> str:
@@ -516,11 +572,25 @@ class GroqCopyParser(CopyParser):
             # Safe diagnostics only: the exception class (and HTTP status when
             # the SDK gives one). Never the key, the request or the reply —
             # SDK messages can echo parts of the request.
+            response = getattr(exc, "response", None)
+            headers = getattr(response, "headers", None)
+            retry_after = headers.get("retry-after") if headers else None
+            request_id = headers.get("x-request-id") if headers else None
             logger.warning(
-                "copy parser: Groq request failed (%s%s)",
+                "copy parser: Groq request failed base_url=%s model=%s timeout=%ss (%s%s)",
+                self.base_url,
+                self.model,
+                self.timeout,
                 type(exc).__name__,
                 f", status {exc.status_code}" if getattr(exc, "status_code", None) else "",
             )
+            if getattr(exc, "status_code", None) == 429:
+                logger.warning(
+                    "copy parser: Groq rate limit response retry_after=%s request_id=%s",
+                    retry_after or "unknown",
+                    request_id or "unknown",
+                )
+                raise CopyRateLimitError("Groq rate limit exceeded") from None
             raise CopyParseError("Groq request failed") from None
 
         choices = getattr(completion, "choices", None) or []
