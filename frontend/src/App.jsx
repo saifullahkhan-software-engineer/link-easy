@@ -31,6 +31,8 @@ import WhatsAppFilterCreatePage from './pages/WhatsAppFilterCreatePage';
 import WhatsAppFilterEditPage from './pages/WhatsAppFilterEditPage';
 import LinkedInLiveChatPage from './pages/LinkedInLiveChatPage';
 import LinkedInProfileScanPage from './pages/LinkedInProfileScanPage';
+import GmailPage from './pages/gmail/GmailPage';
+import GmailComposePage from './pages/gmail/GmailComposePage';
 import SystemQueuesPage from './pages/SystemQueuesPage';
 import DashboardPage from './pages/DashboardPage';
 import AdminAccountsPage from './pages/admin/AdminAccountsPage';
@@ -113,7 +115,7 @@ export default function App() {
             <Route path="whatsapp" element={<AdminWhatsAppPage />} />
           </Route>
 
-          {/* app shell — app module: Account, LinkedIn, WhatsApp only */}
+          {/* app shell — app module: Account, LinkedIn, WhatsApp, Gmail */}
           <Route
             path="/app"
             element={
@@ -139,6 +141,9 @@ export default function App() {
             <Route path="whatsapp-scanner/jobs/:filterId" element={<WhatsAppScannerPage />} />
             <Route path="whatsapp-scanner/jobs/:filterId/edit" element={<WhatsAppFilterEditPage />} />
             <Route path="whatsapp-live" element={<WhatsAppLiveChatPage />} />
+            {/* Gmail — read/check the inbox, manage labels, send */}
+            <Route path="gmail" element={<GmailPage />} />
+            <Route path="gmail/compose" element={<GmailComposePage />} />
             {/* Social scheduler — YouTube Shorts / Instagram Reels / TikTok */}
             <Route path="social-scheduler" element={<SocialSchedulerDashboard />} />
             <Route path="social-scheduler/schedule" element={<SocialSchedulePage />} />

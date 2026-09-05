@@ -22,6 +22,9 @@ import HostedDemoBanner from './HostedDemoBanner';
  *   WhatsApp
  *     ├─ WhatsApp Group Scan
  *     └─ WhatsApp Live Chat
+ *   Gmail
+ *     ├─ Inbox
+ *     └─ Compose
  *   Social Scheduler
  *     ├─ Overview
  *     ├─ Schedule Post
@@ -161,6 +164,24 @@ const whatsappGroup = {
   ],
 };
 
+const gmailGroup = {
+  label: 'Gmail',
+  icon: (
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M1.5 5.25A2.25 2.25 0 0 1 3.75 3h16.5a2.25 2.25 0 0 1 2.25 2.25v13.5A2.25 2.25 0 0 1 20.25 21H3.75a2.25 2.25 0 0 1-2.25-2.25V5.25Zm1.5.66v12.84c0 .41.34.75.75.75h16.5c.41 0 .75-.34.75-.75V5.91l-8.28 6.07a1.5 1.5 0 0 1-1.68 0L3 5.91Zm1.03-.66L12 11.32l7.97-6.07H4.03Z" />
+    </svg>
+  ),
+  items: [
+    {
+      to: '/app/gmail',
+      label: 'Inbox',
+      end: true,
+      icon: null,
+    },
+    { to: '/app/gmail/compose', label: 'Compose', icon: null },
+  ],
+};
+
 const socialGroup = {
   label: 'Social Scheduler',
   icon: (
@@ -235,8 +256,8 @@ export default function AppLayout() {
             </NavLink>
           </div>
 
-          {/* Per-product groups (LinkedIn, WhatsApp, Social Scheduler). */}
-          {[linkedinGroup, whatsappGroup, socialGroup].map((group) => (
+          {/* Per-product groups (LinkedIn, WhatsApp, Gmail, Social Scheduler). */}
+          {[linkedinGroup, whatsappGroup, gmailGroup, socialGroup].map((group) => (
             <div key={group.label}>
               <p className="flex items-center gap-2 px-3 pb-2 pt-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
                 <span className="text-zinc-600">{group.icon}</span>

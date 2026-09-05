@@ -28,6 +28,7 @@ from models.social_scheduler import (
     SocialPost,
     SocialPostResult,
 )
+from models.gmail import GmailConnection  # noqa: F401
 
 # Connection-pool sizing.
 #

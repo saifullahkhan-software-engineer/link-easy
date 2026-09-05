@@ -119,6 +119,7 @@ A healthy local install reports:
 {
   "linkedin":       { "enabled": true },
   "whatsapp":       { "enabled": true },
+  "gmail":          { "enabled": true, "message": null },
   "scheduled_jobs": { "enabled": true, "message": null },
   "deployment":     { "is_demo": false, "notice": null }
 }
@@ -187,6 +188,32 @@ UPLOAD_DIR=./uploads/social
 # origin + /app/social-scheduler/settings.
 SOCIAL_OAUTH_RETURN_URL=http://localhost:5173/app/social-scheduler/settings
 ```
+
+## Gmail
+
+Connecting Gmail uses one Google Cloud **OAuth web client** (the same style of
+credentials as the YouTube scheduler entry above, but a separate client if you
+prefer to keep the Gmail scopes isolated — see docs/gmail_setup.md for the
+full Google Cloud walkthrough).
+
+```env
+# Google Cloud Console → APIs & Services → Credentials → OAuth client
+# (type "Web application").
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# Must match the console's "Authorized redirect URIs" exactly. Google accepts
+# http://localhost:8000 for local development.
+GOOGLE_REDIRECT_URI=http://localhost:8000/api/v1/gmail/callback
+
+# Optional: where the browser lands after the Gmail callback. Defaults to the
+# first BACKEND_CORS_ORIGINS origin + /app/gmail.
+GOOGLE_OAUTH_RETURN_URL=http://localhost:5173/app/gmail
+```
+
+With empty `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` nothing breaks — the
+Gmail page and the Accounts hub report "needs operator setup" and the
+`/health` probe names the missing pair.
 
 Register the `*_REDIRECT_URI` values **exactly** as written above in each
 provider's console. They all point at the API on port `8000` — the frontend

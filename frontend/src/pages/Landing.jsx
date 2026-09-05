@@ -6,7 +6,7 @@ import { useAdminAccess } from '../hooks/useAdminAccess';
 const coreFeatures = [
   {
     title: 'Connect your social tools',
-    body: 'Bring LinkedIn, WhatsApp, YouTube Shorts, Instagram Reels, TikTok, and Facebook into one focused workspace without changing how your accounts are used.',
+    body: 'Bring LinkedIn, WhatsApp, Gmail, YouTube Shorts, Instagram Reels, TikTok, and Facebook into one focused workspace without changing how your accounts are used.',
     icon: 'connect',
     tag: 'Universal Sync',
   },
@@ -24,7 +24,7 @@ const coreFeatures = [
   },
   {
     title: 'Take over when it matters',
-    body: 'Open live conversations on LinkedIn and WhatsApp, read incoming replies, and respond yourself whenever a real human touch is needed.',
+    body: 'Open live conversations on LinkedIn and WhatsApp or check your Gmail inbox, read what came in, and respond yourself whenever a real human touch is needed.',
     icon: 'chat',
     tag: 'Live Takeover',
   },
@@ -98,7 +98,7 @@ const steps = [
     number: '01',
     title: 'Connect',
     tagline: 'Link your accounts in seconds',
-    body: 'Securely connect the LinkedIn, WhatsApp, YouTube, Instagram, TikTok, and Facebook accounts you already use with official OAuth and durable sessions.',
+    body: 'Securely connect the LinkedIn, WhatsApp, Gmail, YouTube, Instagram, TikTok, and Facebook accounts you already use with official OAuth and durable sessions.',
   },
   {
     number: '02',
@@ -163,6 +163,14 @@ const platforms = [
     color: 'text-emerald-400 border-emerald-500/20 bg-emerald-500/5',
     iconColor: 'text-emerald-400',
   },
+  {
+    id: 'gmail',
+    name: 'Gmail',
+    badge: 'Ready',
+    description: 'Connect your mailbox: check & read email, manage labels, reply in one place.',
+    color: 'text-rose-400 border-rose-500/20 bg-rose-500/5',
+    iconColor: 'text-rose-400',
+  },
 ];
 
 function LinkedInMark({ className = 'h-5 w-5' }) {
@@ -215,6 +223,14 @@ function FacebookMark({ className = 'h-5 w-5' }) {
   );
 }
 
+function GmailMark({ className = 'h-5 w-5' }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M1.5 5.25A2.25 2.25 0 0 1 3.75 3h16.5a2.25 2.25 0 0 1 2.25 2.25v13.5A2.25 2.25 0 0 1 20.25 21H3.75a2.25 2.25 0 0 1-2.25-2.25V5.25Zm1.5.66v12.84c0 .41.34.75.75.75h16.5c.41 0 .75-.34.75-.75V5.91l-8.28 6.07a1.5 1.5 0 0 1-1.68 0L3 5.91Zm1.03-.66L12 11.32l7.97-6.07H4.03Z" />
+    </svg>
+  );
+}
+
 function PlatformIcon({ id, className = 'h-5 w-5' }) {
   switch (id) {
     case 'youtube':
@@ -229,6 +245,8 @@ function PlatformIcon({ id, className = 'h-5 w-5' }) {
       return <LinkedInMark className={className} />;
     case 'whatsapp':
       return <WhatsAppMark className={className} />;
+    case 'gmail':
+      return <GmailMark className={className} />;
     default:
       return null;
   }

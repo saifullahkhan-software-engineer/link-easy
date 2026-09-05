@@ -26,6 +26,7 @@ from .social_scheduler import (
     SocialPostStatus,
     PlatformCredential,
 )
+from .gmail import GmailConnection
 
 __all__ = [
     "User", "PasswordResetToken", "UserDeletionToken", "UserRole", "LinkedInAccount",
@@ -38,4 +39,5 @@ __all__ = [
     "SocialPost", "SocialPostResult", "SocialPlatformConnection",
     "SocialPlatform", "SocialPostStatus", "SocialPostResultStatus",
     "PlatformCredential",
+    "GmailConnection",
 ]

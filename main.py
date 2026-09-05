@@ -34,6 +34,7 @@ from api.v1.live import router as live_router
 from api.v1.system_queues import router as system_queues_router
 from api.v1.admin import router as admin_router
 from api.v1.social_scheduler import router as social_scheduler_router, UPLOADS_URL_PREFIX
+from api.v1.gmail import router as gmail_router
 from api.v1.user_data import router as user_data_router
 from core.config import settings
 from core.logging_config import get_logger
@@ -282,6 +283,7 @@ app.include_router(live_router)
 app.include_router(system_queues_router)
 app.include_router(admin_router)
 app.include_router(social_scheduler_router)
+app.include_router(gmail_router)
 # Public account-deletion endpoints (Meta User Data Deletion requirement):
 # email-confirmed, rate-limited, no account enumeration. Registered last so
 # every /api/v1/user-data/* path is served exactly by this router.
@@ -364,6 +366,14 @@ async def feature_flags():
             "enabled": True,
             "message": None,
             "scheduled_scans_enabled": settings.whatsapp_scheduled_jobs_enabled,
+        },
+        # Gmail is always *capable* on this deployment; whether a user can
+        # actually connect depends on the Google OAuth credentials
+        # (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET), which
+        # GET /api/v1/gmail/status reports as ``configured``.
+        "gmail": {
+            "enabled": True,
+            "message": None,
         },
         # Overall Beat availability. On deployment Beat remains enabled for
         # social uploads, while LinkedIn and recurring WhatsApp/feed dispatch
