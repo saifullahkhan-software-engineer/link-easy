@@ -40,6 +40,7 @@ function formatDate(value) {
 }
 
 export default function WhatsAppScannerPage() {
+  const { isDemo } = useFeatures();
   const { filterId } = useParams();
   const [filterJob, setFilterJob] = useState(null);
   const [loading, setLoading] = useState(true);
