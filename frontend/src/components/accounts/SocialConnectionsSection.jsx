@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { socialSchedulerApi, PLATFORMS } from '../../api/socialScheduler';
 import { getErrorMessage } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
-import Modal from '../../components/Modal';
-import { Spinner } from '../../components/Spinner';
-import { PlatformIcon, SocialPageHeader, formatDateTime } from '../../components/social/SocialBits';
+import Modal from '../Modal';
+import { Spinner } from '../Spinner';
+import { PlatformIcon, formatDateTime } from '../social/SocialBits';
+import { ChannelIcon } from '../inbox/InboxBits';
 
 const REQUIREMENTS = {
   youtube: 'A Google account with a YouTube channel. Grants upload access only.',
   instagram:
-    'An Instagram Business or Creator account linked to a Facebook Page. Reels, videos and photos are published through the Meta Graph API.',
+    'An Instagram Business or Creator account linked to a Facebook Page. Approve publishing and messaging permissions when connecting.',
   tiktok: 'A TikTok account. Grants video upload and publish access.',
   facebook:
-    'A Facebook Page you manage. Sign in with the Facebook account that administers the Page and approve every permission; the first Page you can post to is connected and used for videos and photos.',
+    'A Facebook Page you manage. Sign in with its administrator and approve the publishing and messaging permissions.',
 };
 
 // Per-platform names for the OAuth app credential pair (what each provider's
@@ -53,7 +54,7 @@ function ConnectionBadge({ conn }) {
 }
 
 /**
- * Settings: one card per platform with connect / reconnect / disconnect.
+ * Accounts → Socials: one card per platform with connect / reconnect / disconnect.
  * Connecting opens the platform's OAuth consent page; the backend callback
  * stores the tokens (encrypted) and sends the browser back here with
  * ?platform=…&connected=1 or ?error=… which we surface as a toast.
@@ -63,7 +64,7 @@ function ConnectionBadge({ conn }) {
  * pair ("Manage app credentials"). Regular users only ever see whether a
  * platform is configured and connectable.
  */
-export default function SocialSettingsPage() {
+export default function SocialConnectionsSection() {
   const { isAdmin } = useAuth();
   const [connections, setConnections] = useState([]);
   const [credentials, setCredentials] = useState([]);
@@ -86,9 +87,13 @@ export default function SocialSettingsPage() {
   const [groupBusy, setGroupBusy] = useState(false);
   const [removingGroup, setRemovingGroup] = useState(null);
 
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const [loadError, setLoadError] = useState(null);
 
   const load = useCallback(async () => {
+    setLoadError(null);
     try {
       const { data } = await socialSchedulerApi.listPlatforms();
       setConnections(Array.isArray(data) ? data : []);
@@ -108,7 +113,7 @@ export default function SocialSettingsPage() {
         }
       }
     } catch (err) {
-      toast.error(getErrorMessage(err, 'Failed to load platform connections'));
+      setLoadError(getErrorMessage(err, 'Failed to load platform connections'));
     } finally {
       setLoading(false);
     }
@@ -168,8 +173,10 @@ export default function SocialSettingsPage() {
       toast.error(`${label}: ${error}`, { duration: 8000 });
     }
     // Clear the params so a refresh doesn't repeat the toast.
-    setSearchParams({}, { replace: true });
-  }, [searchParams, setSearchParams]);
+    const remaining = new URLSearchParams(searchParams);
+    ['platform', 'connected', 'error'].forEach((key) => remaining.delete(key));
+    navigate({ pathname, search: remaining.toString(), hash: '#socials' }, { replace: true });
+  }, [searchParams, pathname, navigate]);
 
   const connect = async (platform) => {
     setPending(platform);
@@ -262,42 +269,50 @@ export default function SocialSettingsPage() {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex h-64 items-center justify-center">
-        <Spinner />
-      </div>
-    );
-  }
-
   const connectedCount = connections.filter((c) => c.connected).length;
   const credsPlatformLabel = PLATFORMS.find((p) => p.id === credsPlatform)?.label || credsPlatform || '';
   const activeCred = credentials.find((c) => c.platform === credsPlatform);
 
   return (
-    <div className="mx-auto max-w-5xl">
-      <SocialPageHeader
-        current="/app/social-scheduler/settings"
-        title="Settings"
-        description={`Connected platforms: ${connectedCount} of ${PLATFORMS.length}. Tokens are stored encrypted and only used to publish your scheduled posts.`}
-      />
+    <section id="socials" aria-labelledby="socials-title" className="scroll-mt-20 lg:scroll-mt-6 border-t border-surface-700 pt-8">
+      <div className="mb-5">
+        <h2 id="socials-title" className="text-xl font-semibold text-zinc-100">Socials</h2>
+        <p className="mt-1 text-sm text-zinc-400">
+          Connect and manage the social accounts used by Social Scheduler and Ultimate Inbox.
+        </p>
+        {!loading && !loadError && (
+          <p className="mt-2 text-xs text-zinc-500">Connected platforms: {connectedCount} of {PLATFORMS.length}. Tokens are stored encrypted.</p>
+        )}
+      </div>
 
-      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-        {PLATFORMS.map((p) => {
+      {loading ? (
+        <div className="flex h-40 items-center justify-center gap-2 text-sm text-zinc-400" role="status">
+          <Spinner /> Loading social connections…
+        </div>
+      ) : loadError ? (
+        <div className="mb-5 rounded-xl border border-red-500/20 bg-red-500/5 p-5" role="alert">
+          <p className="text-sm text-red-300">{loadError}</p>
+          <button type="button" className="btn-secondary mt-3" onClick={() => { setLoading(true); load(); }}>Retry connections</button>
+        </div>
+      ) : null}
+      <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+        {!loading && !loadError && PLATFORMS.map((p) => {
           const conn = connections.find((c) => c.platform === p.id) || { platform: p.id, connected: false, configured: false };
           const cred = credentials.find((c) => c.platform === p.id);
           const busy = pending === p.id;
           const operatorManaged = Boolean(cred?.source === 'database');
           return (
-            <div key={p.id} className="card flex h-full min-h-[258px] flex-col p-6" data-testid={`platform-card-${p.id}`}>
-              <div className="flex items-start justify-between gap-3">
+            <div key={p.id} className="card flex h-full min-w-0 min-h-[258px] flex-col p-5" data-testid={`platform-card-${p.id}`}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <PlatformIcon
                   platform={p.id}
                   className={`h-11 w-11 rounded-xl ${conn.connected ? 'bg-accent-500/15 text-accent-300' : 'bg-surface-700 text-zinc-400'}`}
                 />
                 <ConnectionBadge conn={conn} />
               </div>
-              <h2 className="mt-4 text-base font-semibold text-zinc-100">{p.label}</h2>
+              <h3 className="mt-4 text-base font-semibold text-zinc-100">{p.label}</h3>
+              {p.id === 'facebook' && <p className="mt-1 text-xs text-zinc-500">Publishing & Messenger Chat</p>}
+              {p.id === 'instagram' && <p className="mt-1 text-xs text-zinc-500">Publishing & Instagram Chat</p>}
               {conn.connected ? (
                 <div className="mt-1 space-y-0.5 text-sm">
                   <p className="truncate text-zinc-300">{conn.account_name || conn.account_id || 'Connected account'}</p>
@@ -375,6 +390,17 @@ export default function SocialSettingsPage() {
             </div>
           );
         })}
+        <div className="card flex min-h-[258px] flex-col border-dashed p-5" data-testid="platform-card-whatsapp-business">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <ChannelIcon channel="whatsapp-business" className="h-11 w-11 rounded-xl bg-green-500/10 text-green-300" />
+            <span className="rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 ring-1 ring-inset ring-amber-500/20">Coming soon</span>
+          </div>
+          <h3 className="mt-4 text-base font-semibold text-zinc-100">WhatsApp Business</h3>
+          <p className="mt-1 text-sm text-zinc-400">Coming in a future update. Business connections and messaging are not available yet.</p>
+          <div className="mt-auto pt-5">
+            <button type="button" disabled className="btn-secondary min-h-11 w-full">Coming soon</button>
+          </div>
+        </div>
       </div>
 
       <div className="mt-8 rounded-xl border border-surface-700 bg-surface-800/60 p-5 text-sm text-zinc-400">
@@ -383,7 +409,7 @@ export default function SocialSettingsPage() {
           <li>Every minute the scheduler picks up posts whose time has come and publishes them to each selected platform.</li>
           <li>Expired access tokens are refreshed automatically where the platform allows it; otherwise the platform shows “Reconnect needed” here and that publish fails with a clear reason.</li>
           <li>Instagram receives the video as a direct upload from this server’s upload folder, so no public URL or tunnel (ngrok) is needed for Reels.</li>
-          <li>Disconnecting removes the stored tokens immediately. Already scheduled posts to that platform will fail until you reconnect.</li>
+          <li>Disconnecting removes the stored tokens immediately. Already scheduled posts to that platform will fail, and its inbox will be unavailable, until you reconnect.</li>
           {isAdmin && (
             <li>
               App credentials saved here are stored in the database and override the server's environment values for
@@ -394,8 +420,8 @@ export default function SocialSettingsPage() {
       </div>
 
       {/* Saved Facebook Groups — a manual-share list, not a connection */}
-      <div className="card mt-5 p-6" data-testid="saved-groups">
-        <h2 className="text-base font-semibold text-zinc-100">Facebook groups for manual sharing</h2>
+      {!loading && !loadError && <div className="card mt-5 p-6" data-testid="saved-groups">
+        <h3 className="text-base font-semibold text-zinc-100">Facebook groups for manual sharing</h3>
         <p className="mt-1 text-xs text-zinc-500">
           Facebook removed its Groups API in April 2024, so no app — including this one — can post into a group for
           you. Save the groups you use and the upload page will offer them as a checklist once a Reel is published.
@@ -454,7 +480,7 @@ export default function SocialSettingsPage() {
             Save group
           </button>
         </form>
-      </div>
+      </div>}
 
       {/* Operator app-credentials modal */}
       <Modal
@@ -554,7 +580,7 @@ export default function SocialSettingsPage() {
       >
         <p className="text-sm text-zinc-300">
           The stored tokens are deleted right away. Posts already scheduled for this platform will fail until you
-          connect it again.
+          connect it again. Its inbox will also be unavailable until you reconnect.
         </p>
         <div className="mt-6 flex justify-end gap-3">
           <button className="btn-secondary" onClick={() => setConfirmDisconnect(null)} disabled={Boolean(pending)}>
@@ -566,6 +592,6 @@ export default function SocialSettingsPage() {
           </button>
         </div>
       </Modal>
-    </div>
+    </section>
   );
 }

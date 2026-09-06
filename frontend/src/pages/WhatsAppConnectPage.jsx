@@ -282,7 +282,7 @@ export default function WhatsAppConnectPage() {
             <Link to="/app/whatsapp-scanner" className="btn-primary">
               WhatsApp Scan
             </Link>
-            <Link to="/app/whatsapp-live" className="btn-primary">
+            <Link to="/app/inbox/whatsapp" className="btn-primary">
               Live Chat
             </Link>
             <button

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { gmailApi } from '../../api/gmail';
 import { getErrorMessage } from '../../api/client';
@@ -31,20 +31,18 @@ function CountBadge({ count }) {
 }
 
 /**
- * Gmail workspace: connect card → mailbox (labels rail + message list +
+ * Gmail workspace: Accounts connection link → mailbox (labels rail + message list +
  * thread reading pane), with search, per-label unread totals, live "check
  * mail" polling, label/read/star/archive/trash actions, attachment downloads
  * and reply via the compose modal.
  */
 export default function GmailPage() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
 
   // Connection
   const [status, setStatus] = useState(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
-  const [connecting, setConnecting] = useState(false);
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   // Mailbox data
   const [labels, setLabels] = useState([]);
@@ -144,17 +142,13 @@ export default function GmailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.connected]);
 
-  // Toast the OAuth outcome when Google redirects back here.
+  // Older deployments may still return OAuth to the mailbox. Keep those
+  // callbacks working, but finish connection management under Accounts.
   useEffect(() => {
-    const connected = searchParams.get('connected');
-    const error = searchParams.get('error');
-    if (connected === '1') toast.success('Gmail connected — checking your inbox…');
-    if (error) toast.error(error);
-    if (connected === '1' || error) {
-      setSearchParams({}, { replace: true });
-      loadStatus();
+    if (searchParams.get('connected') === '1' || searchParams.get('error')) {
+      navigate(`/app/account/gmail?${searchParams}`, { replace: true });
     }
-  }, [searchParams, setSearchParams, loadStatus]);
+  }, [searchParams, navigate]);
 
   // ── live "check mail" tick (monitoring incoming mail) ─────────────────────
   const checkMail = useCallback(
@@ -197,35 +191,6 @@ export default function GmailPage() {
     const timer = setInterval(() => checkMail(true), LIVE_CHECK_MS);
     return () => clearInterval(timer);
   }, [liveCheck, status?.connected, checkMail]);
-
-  // ── OAuth connect / disconnect ────────────────────────────────────────────
-  async function startConnect() {
-    setConnecting(true);
-    try {
-      const { data } = await gmailApi.authUrl();
-      // Full-page navigation: Google shows the account chooser / consent.
-      window.location.assign(data.auth_url);
-    } catch (err) {
-      setConnecting(false);
-      toast.error(getErrorMessage(err, 'Could not start Google sign-in'));
-    }
-  }
-
-  async function handleDisconnect() {
-    setConfirmDisconnect(false);
-    try {
-      await gmailApi.disconnect();
-      toast.success('Gmail disconnected');
-      setStatus((s) => ({ ...(s || {}), connected: false, account_email: '', messages_total: null }));
-      setMessages([]);
-      setThread(null);
-      setSelectedThreadId(null);
-      setUnreadCount(null);
-      setCheckedAt(null);
-    } catch (err) {
-      toast.error(getErrorMessage(err, 'Could not disconnect Gmail'));
-    }
-  }
 
   // ── view switching (label / search / unread) ──────────────────────────────
   function openLabel(nextLabelId) {
@@ -425,69 +390,18 @@ export default function GmailPage() {
               <button className="btn-secondary" onClick={() => navigate('/app/gmail/compose')}>
                 Compose
               </button>
-              <button className="btn-secondary" onClick={() => setConfirmDisconnect(true)}>
-                Disconnect
-              </button>
+              <Link to="/app/account/gmail" className="btn-secondary">Manage connection</Link>
             </>
           )}
         </div>
       </div>
 
       {!connected ? (
-        /* ── connect / not-configured card ─────────────────────────────── */
-        <div className="card mx-auto mt-6 max-w-xl p-8">
-          <div className="flex flex-col items-center text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-rose-500/10 text-rose-300">
-              <GmailMark className="h-9 w-9" />
-            </div>
-            <h2 className="mt-4 text-xl font-semibold text-zinc-100">
-              {status?.configured ? 'Connect your Gmail' : 'Gmail needs a setup step first'}
-            </h2>
-            {status?.configured ? (
-              <>
-                <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                  LinkEasy connects through Google's official sign-in — it works with free
-                  personal <span className="text-zinc-200">@gmail.com</span> accounts and Google
-                  Workspace mailboxes. Once connected LinkEasy can:
-                </p>
-                <ul className="mt-4 w-full space-y-2 text-left text-sm text-zinc-300">
-                  <li className="flex items-start gap-2">
-                    <span className="mt-0.5 text-emerald-400">✓</span> Check for and read new
-                    messages, and read whole conversations
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <span className="mt-0.5 text-emerald-400">✓</span> Search the mailbox and
-                    manage labels, read/unread, archive and trash
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <span className="mt-0.5 text-emerald-400">✓</span> Compose and send replies
-                  </li>
-                </ul>
-                <button className="btn-primary mt-6" onClick={startConnect} disabled={connecting}>
-                  {connecting ? <Spinner className="h-4 w-4" /> : <GmailMark className="h-4 w-4" />}
-                  {connecting ? 'Opening Google…' : 'Connect Gmail'}
-                </button>
-                <p className="mt-4 max-w-md text-xs leading-relaxed text-zinc-500">
-                  Permission is limited to what the feature needs (read/modify + send). LinkEasy
-                  never asks for full mailbox access, and Google rate-limits bulk sending — this
-                  is for your own outreach and replies, not cold-email blasts.
-                </p>
-              </>
-            ) : (
-              <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                This instance has no Google OAuth client configured yet, so no one can connect
-                Gmail. Ask the operator to set{' '}
-                <code className="rounded bg-surface-800 px-1.5 py-0.5 text-xs text-zinc-200">
-                  GOOGLE_CLIENT_ID
-                </code>{' '}
-                and{' '}
-                <code className="rounded bg-surface-800 px-1.5 py-0.5 text-xs text-zinc-200">
-                  GOOGLE_CLIENT_SECRET
-                </code>{' '}
-                (see <span className="text-zinc-300">docs/gmail_setup.md</span>).
-              </p>
-            )}
-          </div>
+        <div className="card mx-auto mt-6 max-w-xl p-8 text-center">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-rose-500/10 text-rose-300"><GmailMark className="h-9 w-9" /></div>
+          <h2 className="mt-4 text-xl font-semibold text-zinc-100">Connect Gmail from Accounts</h2>
+          <p className="mt-2 text-sm leading-relaxed text-zinc-400">Manage your Gmail connection in Accounts, then come back here to read and reply to your messages.</p>
+          <Link to="/app/account/gmail" className="btn-primary mt-6">Go to Gmail connection</Link>
         </div>
       ) : (
         <>
@@ -803,21 +717,6 @@ export default function GmailPage() {
         </Modal>
       )}
 
-      {/* ── disconnect confirm ────────────────────────────────────────── */}
-      <Modal open={confirmDisconnect} title="Disconnect Gmail?" onClose={() => setConfirmDisconnect(false)}>
-        <p className="text-sm text-zinc-400">
-          LinkEasy will stop checking this mailbox and remove the stored connection. Messages stay
-          in Gmail untouched.
-        </p>
-        <div className="mt-5 flex justify-end gap-3">
-          <button className="btn-secondary" onClick={() => setConfirmDisconnect(false)}>
-            Keep connected
-          </button>
-          <button className="btn-danger" onClick={handleDisconnect}>
-            Disconnect
-          </button>
-        </div>
-      </Modal>
     </div>
   );
 }

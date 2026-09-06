@@ -100,7 +100,7 @@ TIKTOK_REDIRECT_URI=https://YOUR-PUBLIC-TUNNEL/api/v1/social-scheduler/platforms
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=http://localhost:8000/api/v1/gmail/callback
-GOOGLE_OAUTH_RETURN_URL=http://localhost:5173/app/gmail
+GOOGLE_OAUTH_RETURN_URL=http://localhost:5173/app/account/gmail
 
 # AI copy extraction
 GROQ_API_KEY=
@@ -319,8 +319,8 @@ DATABASE_URL=postgresql+asyncpg://<user>:<password>@postgres:5432/<database>
 REDIS_URL=redis://redis:6379/0
 BACKEND_CORS_ORIGINS=https://your-frontend-domain.example
 PUBLIC_API_URL=https://your-api-domain.example
-SOCIAL_OAUTH_RETURN_URL=https://your-frontend-domain.example/app/social-scheduler/settings
-GOOGLE_OAUTH_RETURN_URL=https://your-frontend-domain.example/app/gmail
+SOCIAL_OAUTH_RETURN_URL=https://your-frontend-domain.example/app/account
+GOOGLE_OAUTH_RETURN_URL=https://your-frontend-domain.example/app/account/gmail
 ```
 
 Use HTTPS for all public callback URLs. Set up a reverse proxy such as Caddy or Nginx for TLS, or use a hosting platform that provides TLS.

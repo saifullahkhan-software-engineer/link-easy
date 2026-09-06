@@ -149,7 +149,6 @@ const TABS = [
   { to: '/app/social-scheduler/queue', label: 'Queue' },
   { to: '/app/social-scheduler/calendar', label: 'Calendar' },
   { to: '/app/social-scheduler/history', label: 'History' },
-  { to: '/app/social-scheduler/settings', label: 'Settings' },
   { to: '/app/social-scheduler/facebook-groups', label: 'Facebook Groups' },
 ];
 

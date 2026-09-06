@@ -96,6 +96,8 @@ DEFAULT_RULES: dict[str, RateLimitRule] = {
         # like every other side-effectful action. 60/hour is far below
         # Google's own ~500/day consumer limit and still plenty for a human
         # replying from the inbox.
+        RateLimitRule("inbox:send", 120, 3600, "Instagram and Messenger replies per hour"),
+        RateLimitRule("inbox:read", 600, 3600, "Instagram and Messenger inbox reads per hour"),
         RateLimitRule("gmail:send", 60, 3600, "Gmail messages sent per hour"),
         # The inbox page's "checking mail" tick plus explicit refreshes. Each
         # call fans out into a handful of Gmail API requests, so it is capped

@@ -114,7 +114,7 @@ export default function SocialSchedulerDashboard() {
               {missing.length === 1 ? 'it' : 'them'}.
             </p>
           </div>
-          <Link to="/app/social-scheduler/settings" className="btn-secondary">
+          <Link to="/app/account#socials" className="btn-secondary">
             Connect platforms →
           </Link>
         </div>
