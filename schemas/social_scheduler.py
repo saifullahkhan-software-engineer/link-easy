@@ -18,9 +18,11 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from models.social_scheduler import SocialPlatform, SocialPostStatus
+from models.social_scheduler import SocialContentKind, SocialMediaKind, SocialPlatform, SocialPostStatus
 
 PLATFORM_VALUES = tuple(p.value for p in SocialPlatform)
+CONTENT_KIND_VALUES = tuple(k.value for k in SocialContentKind)
+MEDIA_KIND_VALUES = tuple(k.value for k in SocialMediaKind)
 #: Playlists one Short may be filed into. A Short is one video; more than a
 #: handful of collections is a mistake, not a feature.
 MAX_PLAYLISTS_PER_POST = 10
@@ -28,7 +30,12 @@ MAX_PLAYLISTS_PER_POST = 10
 #: user opens and posts into, so the cap is a usability limit, not a technical
 #: one.
 MAX_GROUPS_PER_POST = 25
-PLATFORM_LABELS = {"youtube": "YouTube Shorts", "instagram": "Instagram Reels", "tiktok": "TikTok", "facebook": "Facebook Reels"}
+PLATFORM_LABELS = {
+    "youtube": "YouTube",
+    "facebook": "Facebook",
+    "instagram": "Instagram",
+    "tiktok": "TikTok",
+}
 
 
 def _validate_platforms(values: list[str]) -> list[str]:
@@ -155,6 +162,9 @@ class PostCreate(BaseModel):
     # API, so these become a post-publish checklist, never an API call.
     facebook_groups: list[FacebookGroup] = Field(default_factory=list)
     publish_now: bool = False
+    # ``shorts`` (default, existing behaviour) vs a regular feed ``post``.
+    # The server still infers ``media_kind`` from the uploaded file.
+    content_kind: str = Field(SocialContentKind.SHORTS.value, max_length=20)
 
     @field_validator("platforms")
     @classmethod
@@ -180,6 +190,14 @@ class PostCreate(BaseModel):
     @classmethod
     def _strip(cls, v):
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("content_kind")
+    @classmethod
+    def _content_kind(cls, v):
+        value = (v or SocialContentKind.SHORTS.value).strip().lower()
+        if value not in CONTENT_KIND_VALUES:
+            raise ValueError(f"content_kind must be one of: {', '.join(CONTENT_KIND_VALUES)}")
+        return value
 
 
 class PostUpdate(BaseModel):
@@ -255,6 +273,8 @@ class PostResponse(BaseModel):
     video_url: str
     thumbnail: str
     platforms: list[str]
+    content_kind: str = SocialContentKind.SHORTS.value
+    media_kind: str = SocialMediaKind.VIDEO.value
     scheduled_at: datetime
     status: str
     youtube_title: str

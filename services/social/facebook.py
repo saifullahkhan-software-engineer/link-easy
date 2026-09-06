@@ -8,6 +8,7 @@ performs for Instagram, because both flows fail in the same three ways
 without the Graph API returning an ``error`` object.
 """
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 import aiohttp
@@ -170,6 +171,28 @@ class FacebookService:
         if data.get("error"): raise ValueError(data["error"].get("message", "Facebook upload failed"))
         video_id = data.get("id") or data.get("video_id")
         return {"video_id": video_id, "video_url": f"https://www.facebook.com/{video_id}"}
+
+    async def upload_photo(self, image_path: str, description: str, access_token: str):
+        """Publish a still image to the connected Page via ``/me/photos``."""
+        filename = os.path.basename(image_path) or "photo.jpg"
+        lower = filename.lower()
+        if lower.endswith(".png"):
+            content_type = "image/png"
+        elif lower.endswith(".webp"):
+            content_type = "image/webp"
+        else:
+            content_type = "image/jpeg"
+        form = aiohttp.FormData()
+        form.add_field("source", open(image_path, "rb"), filename=filename, content_type=content_type)
+        form.add_field("caption", description)
+        form.add_field("access_token", access_token)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self.GRAPH_API}/me/photos", data=form) as r:
+                data = await r.json()
+        if data.get("error"):
+            raise ValueError(data["error"].get("message", "Facebook photo upload failed"))
+        photo_id = data.get("id") or data.get("post_id")
+        return {"video_id": photo_id, "video_url": f"https://www.facebook.com/{photo_id}"}
 
 
 def _pick_page(pages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { socialSchedulerApi, PLATFORMS } from '../../api/socialScheduler';
+import { socialSchedulerApi, PLATFORMS, platformLabel } from '../../api/socialScheduler';
 import { getErrorMessage } from '../../api/client';
 import { Spinner } from '../../components/Spinner';
 import SchedulingDisabledNotice from '../../components/SchedulingDisabledNotice';
@@ -13,7 +13,8 @@ import {
 } from '../../components/social/SocialBits';
 import VideoEditPanel from '../../components/social/VideoEditPanel';
 
-const ACCEPT = '.mp4,.mov,.m4v,.webm,video/mp4,video/quicktime,video/x-m4v,video/webm';
+const ACCEPT_VIDEO = '.mp4,.mov,.m4v,.webm,video/mp4,video/quicktime,video/x-m4v,video/webm';
+const ACCEPT_IMAGE = '.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp';
 const LIMITS = {
   youtubeTitle: 100,
   copyDescription: 5000,
@@ -21,29 +22,57 @@ const LIMITS = {
 };
 
 const COPY_META = {
-  youtube: {
-    title: 'YouTube title',
-    titleHint: 'The title shown on the Short',
-    description: 'YouTube description',
-    descriptionHint: 'Explain the Short and add any call to action',
+  shorts: {
+    youtube: {
+      title: 'YouTube title',
+      titleHint: 'The title shown on the Short',
+      description: 'YouTube description',
+      descriptionHint: 'Explain the Short and add any call to action',
+    },
+    facebook: {
+      title: 'Headline',
+      titleHint: 'The opening line for the Facebook Reel',
+      description: 'Facebook description',
+      descriptionHint: 'The body of the Facebook Reel caption',
+    },
+    instagram: {
+      title: 'Headline / caption hook',
+      titleHint: 'The first line people see in the Reel caption',
+      description: 'Instagram description',
+      descriptionHint: 'The body of the Reel caption',
+    },
+    tiktok: {
+      title: 'Caption hook',
+      titleHint: 'A short opening line for TikTok',
+      description: 'TikTok description',
+      descriptionHint: 'The body of the TikTok caption',
+    },
   },
-  instagram: {
-    title: 'Headline / caption hook',
-    titleHint: 'The first line people see in the Reel caption',
-    description: 'Instagram description',
-    descriptionHint: 'The body of the Reel caption',
-  },
-  tiktok: {
-    title: 'Caption hook',
-    titleHint: 'A short opening line for TikTok',
-    description: 'TikTok description',
-    descriptionHint: 'The body of the TikTok caption',
-  },
-  facebook: {
-    title: 'Headline',
-    titleHint: 'The opening line for the Facebook Reel',
-    description: 'Facebook description',
-    descriptionHint: 'The body of the Facebook Reel caption',
+  post: {
+    youtube: {
+      title: 'YouTube title',
+      titleHint: 'The title shown on the video',
+      description: 'YouTube description',
+      descriptionHint: 'Explain the video and add any call to action',
+    },
+    facebook: {
+      title: 'Headline',
+      titleHint: 'The opening line for the Facebook post',
+      description: 'Facebook description',
+      descriptionHint: 'The body of the Facebook post',
+    },
+    instagram: {
+      title: 'Headline / caption hook',
+      titleHint: 'The first line people see in the caption',
+      description: 'Instagram description',
+      descriptionHint: 'The body of the Instagram caption',
+    },
+    tiktok: {
+      title: 'Caption hook',
+      titleHint: 'A short opening line for TikTok',
+      description: 'TikTok description',
+      descriptionHint: 'The body of the TikTok caption',
+    },
   },
 };
 
@@ -72,12 +101,12 @@ function extractPastedCopy(text) {
   // Match only a complete heading line. This supports the common numbered
   // form (`1. YouTube Shorts`) and avoids treating a platform name mentioned
   // inside the copy as the beginning of a new section.
-  const heading = /^\s*(?:\*{2})?(?:\d+\s*[.)]\s*)?(youtube\s+shorts?|instagram\s+reels?|tiktok|facebook\s+(?:reels?|page))(?:\*{2})?\s*:?\s*$/gim;
+  const heading = /^\s*(?:\*{2})?(?:\d+\s*[.)]\s*)?(youtube(?:\s+shorts?)?|instagram(?:\s+reels?)?|tiktok|facebook(?:\s+(?:reels?|page|post)?)?)(?:\*{2})?\s*:?\s*$/gim;
   const aliases = [
-    { platform: 'youtube', pattern: /youtube\s+shorts?/i },
-    { platform: 'instagram', pattern: /instagram\s+reels?/i },
+    { platform: 'youtube', pattern: /youtube/i },
+    { platform: 'facebook', pattern: /facebook/i },
+    { platform: 'instagram', pattern: /instagram/i },
     { platform: 'tiktok', pattern: /tiktok/i },
-    { platform: 'facebook', pattern: /facebook\s+(?:reels?|page)/i },
   ];
   const starts = [];
   let match;
@@ -114,11 +143,13 @@ function extractPastedCopy(text) {
  * Upload one video, then either put it in the durable schedule queue or
  * dispatch it to the connected platforms immediately.
  */
-export default function SocialSchedulePage() {
+export default function SocialSchedulePage({ kind = 'shorts' }) {
   const navigate = useNavigate();
   const fileInput = useRef(null);
+  const isPost = kind === 'post';
 
   const [connections, setConnections] = useState(null);
+  const [mediaType, setMediaType] = useState(isPost ? 'image' : 'video');
   const [file, setFile] = useState(null);
   const [upload, setUpload] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -304,7 +335,7 @@ export default function SocialSchedulePage() {
       if (!form.title) {
         setForm((f) => ({ ...f, title: picked.name.replace(/\.[^.]+$/, '') }));
       }
-      toast.success('Video uploaded');
+      toast.success(isImage ? 'Photo uploaded' : 'Video uploaded');
     } catch (err) {
       setFile(null);
       toast.error(getErrorMessage(err, 'Upload failed'));
@@ -321,7 +352,7 @@ export default function SocialSchedulePage() {
   const fillFromPastedCopy = () => {
     const parsed = extractPastedCopy(sourceText);
     if (!Object.keys(parsed).length) {
-      toast.error('No platform sections found. Use headings such as YouTube Shorts or Instagram Reels.');
+      toast.error('No platform sections found. Use headings such as YouTube, Facebook, Instagram or TikTok.');
       return;
     }
     setForm((f) => ({
@@ -381,7 +412,7 @@ export default function SocialSchedulePage() {
       }));
       setShowPerPlatform(true);
       if (filled.length) {
-        toast.success(`Extracted copy for ${filled.map(({ label }) => label).join(', ')}`);
+        toast.success(`Extracted copy for ${filled.map(({ id }) => platformLabel(id, kind)).join(', ')}`);
       } else {
         toast.error('No platform sections found in that message — check the headings, or fill the fields yourself.');
       }
@@ -394,7 +425,7 @@ export default function SocialSchedulePage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!upload) return toast.error('Upload a video first');
+    if (!upload) return toast.error(isPost && mediaType === 'image' ? 'Upload a photo first' : 'Upload a video first');
     if (form.platforms.length === 0) return toast.error('Pick at least one platform');
     const fallbackTitle = form.platforms
       .map((platform) => form.platform_copy[platform]?.title)
@@ -422,6 +453,7 @@ export default function SocialSchedulePage() {
         platforms: form.platforms,
         scheduled_at: when,
         publish_now: mode === 'direct',
+        content_kind: kind,
         youtube_title: form.youtube_title,
         instagram_caption: form.instagram_caption,
         tiktok_caption: form.tiktok_caption,
@@ -431,7 +463,7 @@ export default function SocialSchedulePage() {
         // when Facebook is not one of the publish targets.
         facebook_groups: form.facebook_groups,
       });
-      toast.success(mode === 'direct' ? 'Video sent to the publish queue' : 'Post scheduled');
+      toast.success(mode === 'direct' ? 'Sent to the publish queue' : 'Post scheduled');
       navigate('/app/social-scheduler/queue');
     } catch (err) {
       toast.error(getErrorMessage(err, mode === 'direct' ? 'Failed to publish the video' : 'Failed to schedule the post'));
@@ -442,22 +474,75 @@ export default function SocialSchedulePage() {
 
   const connectionFor = (id) => connections?.find((c) => c.platform === id);
   const unconnectedSelected = form.platforms.filter((id) => connections && !connectionFor(id)?.connected);
+  const isImage = isPost && mediaType === 'image';
+  const accept = isImage ? ACCEPT_IMAGE : ACCEPT_VIDEO;
+  const imageOnlyPlatforms = form.platforms.filter((id) => id === 'youtube' || id === 'tiktok');
+  const copyMeta = COPY_META[isPost ? 'post' : 'shorts'];
+  const composerPath = isPost ? '/app/social-scheduler/posts' : '/app/social-scheduler/schedule';
+
+  const switchMedia = (next) => {
+    if (next === mediaType) return;
+    setMediaType(next);
+    setFile(null);
+    setUpload(null);
+    setThumbnail('');
+    setUploadProgress(0);
+  };
 
   return (
     <div className="mx-auto max-w-4xl">
       <SocialPageHeader
-        current="/app/social-scheduler/schedule"
-        title="Upload a video"
-        description="Upload one vertical video, customise the copy for each connected platform, then publish now or schedule it."
+        current={composerPath}
+        title={isPost ? 'Upload a post' : 'Upload a Short'}
+        description={
+          isPost
+            ? 'Share a photo or a regular video to YouTube, Facebook, Instagram and TikTok — customise the copy, then publish now or schedule a post.'
+            : 'Upload one vertical Short, customise the copy for each connected platform, then publish now or schedule a post.'
+        }
       />
 
       {mode === 'schedule' && <SchedulingDisabledNotice className="mb-6" />}
 
       <form onSubmit={handleSubmit} className="space-y-6">
-        {/* Video */}
+        {/* Media */}
         <section className="card p-6">
-          <h2 className="text-base font-semibold text-zinc-100">Video</h2>
-          <p className="mt-1 text-xs text-zinc-500">MP4 or MOV, 9:16 vertical, ≤ 60 s works everywhere.</p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-zinc-100">{isImage ? 'Photo' : 'Video'}</h2>
+              <p className="mt-1 text-xs text-zinc-500">
+                {isImage
+                  ? 'JPG, PNG or WebP. Instagram and Facebook publish photos; YouTube and TikTok need a video.'
+                  : isPost
+                    ? 'MP4 or MOV. Horizontal or vertical — YouTube, Facebook, Instagram and TikTok all accept video posts.'
+                    : 'MP4 or MOV, 9:16 vertical, ≤ 60 s works everywhere.'}
+              </p>
+            </div>
+            {isPost && (
+              <div className="flex rounded-lg border border-surface-600 bg-surface-800 p-1" role="group" aria-label="Media type">
+                <button
+                  type="button"
+                  onClick={() => switchMedia('image')}
+                  aria-pressed={mediaType === 'image'}
+                  className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                    mediaType === 'image' ? 'bg-accent-500/20 text-accent-200' : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  Photo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchMedia('video')}
+                  aria-pressed={mediaType === 'video'}
+                  data-testid="media-video"
+                  className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                    mediaType === 'video' ? 'bg-accent-500/20 text-accent-200' : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  Video
+                </button>
+              </div>
+            )}
+          </div>
 
           <div
             onDragOver={(e) => e.preventDefault()}
@@ -475,7 +560,7 @@ export default function SocialSchedulePage() {
             <input
               ref={fileInput}
               type="file"
-              accept={ACCEPT}
+              accept={accept}
               className="hidden"
               onChange={(e) => handleFile(e.target.files?.[0])}
               data-testid="video-input"
@@ -498,13 +583,15 @@ export default function SocialSchedulePage() {
                 <svg className="h-8 w-8 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z" />
                 </svg>
-                <p className="mt-3 text-sm font-medium text-zinc-200">Drop a video here or click to browse</p>
-                <p className="mt-1 text-xs text-zinc-500">MP4 · MOV · M4V · WEBM</p>
+                <p className="mt-3 text-sm font-medium text-zinc-200">
+                  {isImage ? 'Drop a photo here or click to browse' : 'Drop a video here or click to browse'}
+                </p>
+                <p className="mt-1 text-xs text-zinc-500">{isImage ? 'JPG · PNG · WEBP' : 'MP4 · MOV · M4V · WEBM'}</p>
               </>
             )}
           </div>
 
-          {upload && !uploading && (
+          {upload && !uploading && !isImage && (
             <VideoEditPanel
               upload={upload}
               thumbnail={thumbnail}
@@ -519,7 +606,9 @@ export default function SocialSchedulePage() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="text-base font-semibold text-zinc-100">Platforms</h2>
-              <p className="mt-1 text-xs text-zinc-500">Choose the connected accounts that should receive this video.</p>
+              <p className="mt-1 text-xs text-zinc-500">
+                Choose the connected accounts that should receive this {isImage ? 'photo' : 'video'}. Order: YouTube, Facebook, Instagram, TikTok.
+              </p>
             </div>
             <span className="text-xs text-zinc-500">{form.platforms.length} selected</span>
           </div>
@@ -541,7 +630,7 @@ export default function SocialSchedulePage() {
                 >
                   <PlatformIcon platform={p.id} className={`h-8 w-8 rounded-lg ${selected ? 'bg-accent-500/20 text-accent-300' : 'bg-surface-700 text-zinc-400'}`} />
                   <span className="min-w-0">
-                    <span className="block text-sm font-medium text-zinc-100">{p.label}</span>
+                    <span className="block text-sm font-medium text-zinc-100">{platformLabel(p.id, kind)}</span>
                     <span className={`block text-xs ${conn?.connected ? 'text-emerald-400' : 'text-zinc-500'}`}>
                       {connections === null ? '…' : conn?.connected ? conn.account_name || 'Connected' : 'Not connected'}
                     </span>
@@ -552,22 +641,29 @@ export default function SocialSchedulePage() {
           </div>
           {unconnectedSelected.length > 0 && (
             <p className="mt-3 text-xs text-amber-300">
-              {unconnectedSelected.map((id) => PLATFORMS.find((p) => p.id === id)?.label).join(', ')}{' '}
+              {unconnectedSelected.map((id) => platformLabel(id, kind)).join(', ')}{' '}
               {unconnectedSelected.length === 1 ? 'is' : 'are'} not connected — connect{' '}
               {unconnectedSelected.length === 1 ? 'it' : 'them'} in Settings before publishing or that platform will fail.
             </p>
           )}
+          {isImage && imageOnlyPlatforms.length > 0 && (
+            <p className="mt-3 text-xs text-amber-300">
+              {imageOnlyPlatforms.map((id) => platformLabel(id, kind)).join(' and ')}{' '}
+              {imageOnlyPlatforms.length === 1 ? 'does' : 'do'} not accept photo posts. Switch to Video, or unselect{' '}
+              {imageOnlyPlatforms.length === 1 ? 'it' : 'them'}.
+            </p>
+          )}
         </section>
 
-        {/* YouTube playlists — only when a Short is going out */}
-        {youtubeSelected && (
+        {/* YouTube playlists — video uploads only */}
+        {youtubeSelected && !isImage && (
           <section className="card p-6" data-testid="youtube-playlists">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold text-zinc-100">Add to YouTube playlists</h2>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Optional. The Short is filed into these playlists after it uploads — the upload itself never
-                  waits on them.
+                  Optional. The {isPost ? 'video' : 'Short'} is filed into these playlists after it uploads — the
+                  upload itself never waits on them.
                 </p>
               </div>
               <span className="text-xs text-zinc-500">
@@ -577,8 +673,8 @@ export default function SocialSchedulePage() {
 
             {!youtubeConnected && (
               <p className="mt-4 text-xs text-zinc-500">
-                Connect YouTube in Settings to list the channel&apos;s playlists. The Short still publishes
-                without one.
+                Connect YouTube in Settings to list the channel&apos;s playlists. The {isPost ? 'video' : 'Short'} still
+                publishes without one.
               </p>
             )}
             {youtubeConnected && playlistState.status === 'loading' && (
@@ -765,7 +861,7 @@ export default function SocialSchedulePage() {
               <div>
                 <h3 className="text-sm font-semibold text-zinc-100">Paste your platform copy</h3>
                 <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-400">
-                  Paste the complete YouTube, Instagram, TikTok or Facebook text generated by your workflow.
+                  Paste the complete YouTube, Facebook, Instagram or TikTok text generated by your workflow.
                   “Extract with AI” splits it into the per-platform fields below — headings, captions and
                   hashtags included. Prefer to stay offline? “Use text to fill fields” runs the same job in
                   your browser.
@@ -804,7 +900,7 @@ export default function SocialSchedulePage() {
               className="input-field mt-3 min-h-[150px] bg-surface-900/70"
               value={sourceText}
               onChange={(e) => setSourceText(e.target.value)}
-              placeholder={'Example:\n1. YouTube Shorts\nTitle: ...\nDescription: ...\n#Shorts #Python\n\n2. Instagram Reels\nHeadline (Caption Hook): ...'}
+              placeholder={'Example:\n1. YouTube\nTitle: ...\nDescription: ...\n#Python\n\n2. Facebook\nHeadline: ...\n\n3. Instagram\nHeadline (Caption Hook): ...'}
               aria-label="Paste full platform copy"
               data-testid="paste-source"
             />
@@ -827,16 +923,15 @@ export default function SocialSchedulePage() {
               {form.platforms.length === 0 ? (
                 <p className="text-sm text-zinc-500">Select at least one platform above to customise its copy.</p>
               ) : (
-                form.platforms.map((platform) => {
-                  const meta = COPY_META[platform];
-                  const platformInfo = PLATFORMS.find((p) => p.id === platform);
+                PLATFORMS.filter((p) => form.platforms.includes(p.id)).map(({ id: platform }) => {
+                  const meta = copyMeta[platform];
                   const values = form.platform_copy[platform] || EMPTY_PLATFORM_COPY[platform];
                   return (
                     <div key={platform} className="rounded-xl border border-surface-700 bg-surface-900/60 p-4">
                       <div className="mb-3 flex items-center gap-2">
                         <PlatformIcon platform={platform} className="h-6 w-6 text-zinc-300" />
                         <div>
-                          <h3 className="text-sm font-semibold text-zinc-100">{platformInfo?.label || platform}</h3>
+                          <h3 className="text-sm font-semibold text-zinc-100">{platformLabel(platform, kind)}</h3>
                           <p className="text-xs text-zinc-500">Title, description and hashtags for this platform</p>
                         </div>
                       </div>
@@ -895,7 +990,7 @@ export default function SocialSchedulePage() {
               className={`rounded-xl border p-4 text-left transition ${mode === 'direct' ? 'border-accent-500/60 bg-accent-500/10 ring-1 ring-inset ring-accent-500/30' : 'border-surface-600 bg-surface-800 hover:border-surface-500'}`}
             >
               <span className="block text-sm font-semibold text-zinc-100">Direct upload</span>
-              <span className="mt-1 block text-xs leading-5 text-zinc-500">Send the video to the publish queue immediately after upload.</span>
+              <span className="mt-1 block text-xs leading-5 text-zinc-500">Send it to the publish queue immediately after upload.</span>
             </button>
           </div>
           {mode === 'schedule' && (
@@ -911,7 +1006,7 @@ export default function SocialSchedulePage() {
           <button type="button" className="btn-secondary" onClick={() => navigate('/app/social-scheduler')}>Cancel</button>
           <button type="submit" className="btn-primary" disabled={submitting || uploading || !upload}>
             {submitting && <Spinner />}
-            {mode === 'direct' ? 'Upload & publish now' : 'Schedule post'}
+            {mode === 'direct' ? 'Upload & publish now' : 'Schedule a post'}
           </button>
         </div>
       </form>

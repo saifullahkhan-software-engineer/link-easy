@@ -259,8 +259,15 @@ class YouTubeService:
         access_token: str,
         refresh_token: Optional[str] = None,
         on_tokens_callback=None,
+        *,
+        as_short: bool = True,
     ) -> Dict[str, str]:
-        """Upload a video as a YouTube Short."""
+        """Upload a video to YouTube.
+
+        ``as_short=True`` (the default) tags the clip as a Short so YouTube
+        files it in Shorts. ``as_short=False`` publishes a regular video —
+        same upload API, no ``#Shorts`` tag, watch URL instead of /shorts/.
+        """
         from googleapiclient.errors import HttpError, ResumableUploadError
         from googleapiclient.http import MediaFileUpload
 
@@ -270,16 +277,21 @@ class YouTubeService:
         if os.path.getsize(video_path) == 0:
             raise ValueError("Video file is empty")
 
-        # Ensure #Shorts is in title and description
-        short_title = title if "#Shorts" in title else f"{title} #Shorts"
-        short_description = f"{description}\n\n#Shorts"
+        if as_short:
+            short_title = title if "#Shorts" in title else f"{title} #Shorts"
+            short_description = f"{description}\n\n#Shorts"
+            tags = ["Shorts", "Short"]
+        else:
+            short_title = title
+            short_description = description or ""
+            tags = []
 
         body = {
             "snippet": {
                 "title": short_title[:100],  # Max 100 chars
                 "description": short_description[:5000],
                 "categoryId": "22",  # People & Blogs
-                "tags": ["Shorts", "Short"],
+                "tags": tags,
                 "defaultLanguage": "en",
             },
             "status": {
@@ -367,7 +379,11 @@ class YouTubeService:
             raise Exception("YouTube API did not return a video ID")
         return {
             "video_id": video_id,
-            "video_url": f"https://www.youtube.com/shorts/{video_id}",
+            "video_url": (
+                f"https://www.youtube.com/shorts/{video_id}"
+                if as_short
+                else f"https://www.youtube.com/watch?v={video_id}"
+            ),
         }
 
     # ── Playlists ────────────────────────────────────────────────────────────

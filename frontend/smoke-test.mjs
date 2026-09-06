@@ -363,8 +363,9 @@ const SOCIAL_API_STUBS = {
   },
   'GET /api/v1/social-scheduler/platforms': (res) =>
     json(res, 200, [
-      { platform: 'youtube', label: 'YouTube Shorts', connected: true, configured: true, account_name: 'My Channel', account_id: 'UC1', expires_at: socialFuture, reconnect_required: false, connected_at: socialPast, updated_at: socialPast },
-      { platform: 'instagram', label: 'Instagram Reels', connected: false, configured: false, account_name: '', account_id: '', expires_at: null, reconnect_required: false, connected_at: null, updated_at: null },
+      { platform: 'youtube', label: 'YouTube', connected: true, configured: true, account_name: 'My Channel', account_id: 'UC1', expires_at: socialFuture, reconnect_required: false, connected_at: socialPast, updated_at: socialPast },
+      { platform: 'facebook', label: 'Facebook', connected: false, configured: true, account_name: '', account_id: '', expires_at: null, reconnect_required: false, connected_at: null, updated_at: null },
+      { platform: 'instagram', label: 'Instagram', connected: false, configured: false, account_name: '', account_id: '', expires_at: null, reconnect_required: false, connected_at: null, updated_at: null },
       { platform: 'tiktok', label: 'TikTok', connected: false, configured: true, account_name: '', account_id: '', expires_at: null, reconnect_required: false, connected_at: null, updated_at: null },
     ]),
 };
@@ -1076,9 +1077,37 @@ const CASES = [
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
     mustContain: [
-      'Schedule a post', 'Drop a video here', 'YouTube Shorts', 'Instagram Reels', 'TikTok', 'My Channel',
-      'Not connected', 'Customise', 'Publish at', 'video-input',
+      'Schedule a post', 'Drop a video here', 'YouTube Shorts', 'Facebook Reels', 'Instagram Reels', 'TikTok', 'My Channel',
+      'Not connected', 'Customise', 'Publish at', 'video-input', 'Upload Shorts', 'Upload Posts',
     ],
+  },
+  {
+    name: 'social scheduler — posts form allows photo or video and uses feed labels',
+    path: '/app/social-scheduler/posts',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    interact: async (window) => {
+      const { document } = window;
+      const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const until = async (predicate, message) => {
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const value = predicate();
+          if (value) return value;
+          await tick(20);
+        }
+        throw new Error(`Timed out waiting for ${message}`);
+      };
+      await until(() => document.body.innerHTML.includes('Drop a photo here'), 'the photo dropzone');
+      const videoToggle = document.querySelector('[data-testid="media-video"]');
+      if (!videoToggle) throw new Error('the Video media toggle is missing');
+      videoToggle.click();
+      await until(() => document.body.innerHTML.includes('Drop a video here'), 'the video dropzone after switching');
+    },
+    mustContain: [
+      'Upload a post', 'Schedule a post', 'YouTube', 'Facebook', 'Instagram', 'TikTok',
+      'Photo', 'Video', 'video-input',
+    ],
+    mustNotContain: ['YouTube Shorts', 'Instagram Reels', 'Facebook Reels'],
   },
   {
     name: 'social scheduler — the YouTube playlist picker lists the channel playlists and tracks the selection',
@@ -1406,8 +1435,8 @@ const CASES = [
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
     mustContain: [
-      'Settings', 'Connected platforms: 1 of 3', 'My Channel', 'Disconnect', 'Reconnect', 'Connect TikTok',
-      'Not available on this instance', 'platform-card-instagram',
+      'Settings', 'Connected platforms: 1 of 4', 'My Channel', 'Disconnect', 'Reconnect', 'Connect TikTok',
+      'Connect Facebook', 'Not available on this instance', 'platform-card-instagram',
     ],
   },
 ];

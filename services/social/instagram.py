@@ -346,8 +346,13 @@ class InstagramService:
         *,
         video_path: Optional[str] = None,
         thumbnail_url: Optional[str] = None,
+        media_type: str = "REELS",
     ) -> Dict[str, str]:
-        """Publish a video as an Instagram Reel.
+        """Publish a video as an Instagram Reel or in-feed video.
+
+        ``media_type`` is ``REELS`` (default, Shorts composer) or ``VIDEO``
+        (regular feed post). The rest of the flow — direct upload vs URL —
+        is identical.
 
         Two ways to get the bytes to Meta:
 
@@ -369,6 +374,7 @@ class InstagramService:
 
         # Instagram's caption ceiling; the API rejects a longer one.
         caption = (caption or "")[:2200]
+        media_type = media_type if media_type in ("REELS", "VIDEO") else "REELS"
 
         url_is_public = is_public_video_url(video_url)
 
@@ -384,7 +390,12 @@ class InstagramService:
                 if settings.INSTAGRAM_NORMALIZE_VIDEO:
                     normalized_path = temporary_path = await self._normalize_video(video_path)
                 return await self._publish_reel_direct(
-                    ig_user_id, normalized_path, caption, access_token, thumbnail_url=thumbnail_url
+                    ig_user_id,
+                    normalized_path,
+                    caption,
+                    access_token,
+                    thumbnail_url=thumbnail_url,
+                    media_type=media_type,
                 )
             except Exception as exc:
                 # A missing local file surfaces as FileNotFoundError; if the
@@ -419,7 +430,12 @@ class InstagramService:
                 "the video is already stored on this server — or set PUBLIC_API_URL."
             )
         return await self._publish_reel_by_url(
-            ig_user_id, video_url, caption, access_token, thumbnail_url=thumbnail_url
+            ig_user_id,
+            video_url,
+            caption,
+            access_token,
+            thumbnail_url=thumbnail_url,
+            media_type=media_type,
         )
 
     async def _normalize_video(self, video_path: str) -> str:
@@ -473,7 +489,7 @@ class InstagramService:
 
     async def _publish_reel_direct(
         self, ig_user_id: str, video_path: str, caption: str, access_token: str,
-        *, thumbnail_url: Optional[str] = None
+        *, thumbnail_url: Optional[str] = None, media_type: str = "REELS",
     ) -> Dict[str, str]:
         """Container → stream the file to rupload → wait → publish."""
         if not os.path.exists(video_path):
@@ -485,7 +501,12 @@ class InstagramService:
         async with aiohttp.ClientSession(timeout=_UPLOAD_TIMEOUT) as session:
             container_id, upload_uri = await _retry_transient(
                 lambda: self._create_resumable_container(
-                    session, ig_user_id, caption, access_token, thumbnail_url=thumbnail_url
+                    session,
+                    ig_user_id,
+                    caption,
+                    access_token,
+                    thumbnail_url=thumbnail_url,
+                    media_type=media_type,
                 )
             )
             await _retry_transient(
@@ -498,7 +519,7 @@ class InstagramService:
 
     async def _create_resumable_container(
         self, session: aiohttp.ClientSession, ig_user_id: str, caption: str, access_token: str,
-        *, thumbnail_url: Optional[str] = None
+        *, thumbnail_url: Optional[str] = None, media_type: str = "REELS",
     ) -> Tuple[str, str]:
         """Open a resumable upload session; returns ``(container_id, upload_uri)``.
 
@@ -506,12 +527,14 @@ class InstagramService:
         URL fetch — the response carries the rupload URI the bytes go to.
         """
         payload = {
-            "media_type": "REELS",
+            "media_type": media_type,
             "upload_type": "resumable",
             "caption": caption,
-            "share_to_feed": "true",
             "access_token": access_token,
         }
+        if media_type == "REELS":
+            payload["share_to_feed"] = "true"
+        # In-feed VIDEO containers have no share_to_feed flag.
         if thumbnail_url and is_public_video_url(thumbnail_url):
             payload["cover_url"] = thumbnail_url
         async with session.post(f"{self.GRAPH_API}/{ig_user_id}/media", data=payload) as response:
@@ -581,16 +604,18 @@ class InstagramService:
 
     async def _publish_reel_by_url(
         self, ig_user_id: str, video_url: str, caption: str, access_token: str,
-        *, thumbnail_url: Optional[str] = None
+        *, thumbnail_url: Optional[str] = None, media_type: str = "REELS",
     ) -> Dict[str, str]:
         """The classic flow: Instagram downloads the video from ``video_url``."""
+        resolved_type = media_type if media_type in ("REELS", "VIDEO") else "REELS"
         container_data = {
-            "media_type": "REELS",
+            "media_type": resolved_type,
             "video_url": video_url,
             "caption": caption,
-            "share_to_feed": "true",
             "access_token": access_token,
         }
+        if resolved_type == "REELS":
+            container_data["share_to_feed"] = "true"
         if thumbnail_url and is_public_video_url(thumbnail_url):
             container_data["cover_url"] = thumbnail_url
         async with aiohttp.ClientSession() as session:
@@ -602,6 +627,49 @@ class InstagramService:
                 raise Exception("Failed to create Instagram media container")
 
             await self._wait_for_processing(session, creation_id, access_token)
+            return await self._publish_container(session, ig_user_id, creation_id, access_token)
+
+    async def publish_image(
+        self,
+        ig_user_id: str,
+        image_url: str,
+        caption: str,
+        access_token: str,
+    ) -> Dict[str, str]:
+        """Publish a still image as an Instagram feed photo.
+
+        Instagram's photo container takes a publicly reachable ``image_url``
+        (the same constraint as the video URL flow). Direct binary upload for
+        photos is not offered on this Graph API surface.
+        """
+        if not ig_user_id:
+            raise Exception("Instagram account id is missing. Reconnect Instagram.")
+        caption = (caption or "")[:2200]
+        if not is_public_video_url(image_url):
+            raise Exception(
+                "Instagram photo posts need a publicly reachable image URL. "
+                "Set PUBLIC_API_URL on this instance, or upload a video instead."
+            )
+        payload = {
+            "image_url": image_url,
+            "caption": caption,
+            "access_token": access_token,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self.GRAPH_API}/{ig_user_id}/media", data=payload) as response:
+                data = await response.json(content_type=None)
+            _raise_on_error(data, "Instagram photo container creation failed")
+            creation_id = data.get("id")
+            if not creation_id:
+                raise Exception("Failed to create Instagram photo container")
+            try:
+                await self._wait_for_processing(
+                    session, creation_id, access_token, max_attempts=8, poll_seconds=3.0
+                )
+            except Exception as exc:
+                # Photo containers are often FINISHED immediately and some
+                # replies omit video_status; still try to publish.
+                logger.info("Instagram photo processing poll: %s", exc)
             return await self._publish_container(session, ig_user_id, creation_id, access_token)
 
     async def _publish_container(

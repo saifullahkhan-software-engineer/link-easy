@@ -18,6 +18,8 @@ from .whatsapp import (
     WhatsAppScanFilter,
 )
 from .social_scheduler import (
+    SocialContentKind,
+    SocialMediaKind,
     SocialPlatform,
     SocialPlatformConnection,
     SocialPost,

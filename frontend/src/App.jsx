@@ -144,9 +144,10 @@ export default function App() {
             {/* Gmail — read/check the inbox, manage labels, send */}
             <Route path="gmail" element={<GmailPage />} />
             <Route path="gmail/compose" element={<GmailComposePage />} />
-            {/* Social scheduler — YouTube Shorts / Instagram Reels / TikTok */}
+            {/* Social scheduler — Shorts and feed posts */}
             <Route path="social-scheduler" element={<SocialSchedulerDashboard />} />
-            <Route path="social-scheduler/schedule" element={<SocialSchedulePage />} />
+            <Route path="social-scheduler/schedule" element={<SocialSchedulePage kind="shorts" />} />
+            <Route path="social-scheduler/posts" element={<SocialSchedulePage kind="post" />} />
             <Route path="social-scheduler/queue" element={<SocialQueuePage />} />
             <Route path="social-scheduler/history" element={<SocialHistoryPage />} />
             <Route path="social-scheduler/calendar" element={<SocialCalendarPage />} />

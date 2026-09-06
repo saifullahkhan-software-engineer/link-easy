@@ -88,7 +88,7 @@ export default function SocialHistoryPage() {
       />
 
       {/* Per-platform totals */}
-      <div className="mb-6 grid gap-4 sm:grid-cols-3">
+      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {PLATFORMS.map((p) => {
           const counts = stats?.per_platform?.[p.id] || { posted: 0, failed: 0 };
           return (

@@ -11,10 +11,10 @@ import { PlatformIcon, SocialPageHeader, formatDateTime } from '../../components
 const REQUIREMENTS = {
   youtube: 'A Google account with a YouTube channel. Grants upload access only.',
   instagram:
-    'An Instagram Business or Creator account linked to a Facebook Page. Reels are published through the Meta Graph API.',
+    'An Instagram Business or Creator account linked to a Facebook Page. Reels, videos and photos are published through the Meta Graph API.',
   tiktok: 'A TikTok account. Grants video upload and publish access.',
   facebook:
-    'A Facebook Page you manage. Sign in with the Facebook account that administers the Page and approve every permission; the first Page you can post to is connected and used for video uploads.',
+    'A Facebook Page you manage. Sign in with the Facebook account that administers the Page and approve every permission; the first Page you can post to is connected and used for videos and photos.',
 };
 
 // Per-platform names for the OAuth app credential pair (what each provider's
@@ -282,7 +282,7 @@ export default function SocialSettingsPage() {
         description={`Connected platforms: ${connectedCount} of ${PLATFORMS.length}. Tokens are stored encrypted and only used to publish your scheduled posts.`}
       />
 
-      <div className="grid gap-5 md:grid-cols-3">
+      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
         {PLATFORMS.map((p) => {
           const conn = connections.find((c) => c.platform === p.id) || { platform: p.id, connected: false, configured: false };
           const cred = credentials.find((c) => c.platform === p.id);

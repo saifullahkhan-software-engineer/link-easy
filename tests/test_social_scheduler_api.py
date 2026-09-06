@@ -170,6 +170,30 @@ class SocialSchedulerApiTests(unittest.TestCase):
 
         self.run_async(run)
 
+    def test_upload_accepts_images_for_feed_posts(self):
+        async def run(client):
+            res = await self._upload(client, name="shot.jpg", content=b"\xff\xd8" + b"\x00" * 512, content_type="image/jpeg")
+            self.assertEqual(res.status_code, 200, res.text)
+            data = res.json()
+            self.assertRegex(data["upload_id"], r"^[0-9a-f]{32}\.jpg$")
+            self.assertIsNone(data["duration_seconds"])
+
+            # Shorts cannot be a still image.
+            res = await self._create_post(client, data["upload_id"], content_kind="shorts")
+            self.assertEqual(res.status_code, 400, res.text)
+            self.assertIn("Shorts need a video", res.json()["detail"])
+
+            res = await self._create_post(
+                client, data["upload_id"], content_kind="post", platforms=["facebook", "instagram"]
+            )
+            self.assertEqual(res.status_code, 201, res.text)
+            created = res.json()
+            self.assertEqual(created["content_kind"], "post")
+            self.assertEqual(created["media_kind"], "image")
+            self.assertEqual(created["platforms"], ["facebook", "instagram"])
+
+        self.run_async(run)
+
     # ── posts ────────────────────────────────────────────────────────────────
 
     def test_post_uses_the_server_side_path_never_a_client_path(self):
@@ -181,6 +205,8 @@ class SocialSchedulerApiTests(unittest.TestCase):
             self.assertNotIn("video_path", data, "the filesystem path must never be exposed")
             self.assertEqual(data["status"], "pending")
             self.assertEqual(data["platforms"], ["youtube", "tiktok"])
+            self.assertEqual(data["content_kind"], "shorts")
+            self.assertEqual(data["media_kind"], "video")
             self.assertEqual(data["results"], [])
 
             async with self.Session() as s:

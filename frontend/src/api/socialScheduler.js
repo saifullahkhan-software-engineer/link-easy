@@ -1,7 +1,7 @@
 import api from './client';
 
 /**
- * Social post scheduler — YouTube Shorts / Instagram Reels / TikTok.
+ * Social post scheduler — YouTube, Facebook, Instagram, TikTok (Shorts and posts).
  *
  * Goes through the shared axios client so requests carry the bearer token,
  * hit the same origin / dev proxy as every other module (no hardcoded
@@ -12,11 +12,24 @@ import api from './client';
 const BASE = '/social-scheduler';
 
 export const PLATFORMS = [
-  { id: 'youtube', label: 'YouTube Shorts', short: 'YT' },
-  { id: 'instagram', label: 'Instagram Reels', short: 'IG' },
+  { id: 'youtube', label: 'YouTube', short: 'YT' },
+  { id: 'facebook', label: 'Facebook', short: 'FB' },
+  { id: 'instagram', label: 'Instagram', short: 'IG' },
   { id: 'tiktok', label: 'TikTok', short: 'TT' },
-  { id: 'facebook', label: 'Facebook Reels', short: 'FB' },
 ];
+
+/** Labels on the Shorts composer (Reels / Shorts). Feed posts use PLATFORMS as-is. */
+export const SHORTS_LABELS = {
+  youtube: 'YouTube Shorts',
+  facebook: 'Facebook Reels',
+  instagram: 'Instagram Reels',
+  tiktok: 'TikTok',
+};
+
+export function platformLabel(id, kind = 'shorts') {
+  if (kind === 'post') return PLATFORMS.find((p) => p.id === id)?.label || id;
+  return SHORTS_LABELS[id] || PLATFORMS.find((p) => p.id === id)?.label || id;
+}
 
 export const PLATFORM_LABELS = Object.fromEntries(PLATFORMS.map((p) => [p.id, p.label]));
 
