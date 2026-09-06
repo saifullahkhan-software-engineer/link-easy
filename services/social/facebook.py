@@ -72,7 +72,10 @@ class FacebookService:
     # Meta's Page video publishing requirements include pages_read_engagement
     # alongside pages_show_list and pages_manage_posts. The Page access token
     # returned by /me/accounts is used for the actual publish request.
-    SCOPES = "pages_show_list,pages_read_engagement,pages_manage_posts,business_management"
+    SCOPES = (
+        "pages_show_list,pages_read_engagement,pages_manage_posts,"
+        "pages_messaging,business_management"
+    )
 
     def __init__(self):
         self.app_id = settings.FACEBOOK_APP_ID

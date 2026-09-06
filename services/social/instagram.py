@@ -187,7 +187,7 @@ class InstagramService:
     # connections must reconnect after this list changes.
     SCOPES = (
         "instagram_basic,instagram_content_publish,instagram_manage_messages,"
-        "pages_read_engagement,pages_show_list,business_management"
+        "pages_read_engagement,pages_show_list,pages_messaging,business_management"
     )
 
     def __init__(self):
