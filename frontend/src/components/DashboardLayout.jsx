@@ -1,4 +1,5 @@
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
 import { useAdminAccess } from '../hooks/useAdminAccess';
@@ -38,6 +39,12 @@ export default function DashboardLayout() {
   const { email, name, logout } = useAuth();
   const { canSeeAdmin } = useAdminAccess();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
 
   function handleLogout() {
     logout();
@@ -47,9 +54,21 @@ export default function DashboardLayout() {
 
   return (
     <div className="flex min-h-screen bg-surface-950">
+      {mobileOpen && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
       {/* Sidebar */}
-      <aside className="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-surface-700 bg-surface-900">
-        <Link to="/" className="flex h-16 items-center gap-2.5 border-b border-surface-700 px-5 transition hover:bg-surface-800/50">
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-surface-700 bg-surface-900 transition-transform duration-200 lg:w-64 lg:translate-x-0 ${
+          mobileOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <Link to="/" className="flex h-14 shrink-0 items-center gap-2.5 border-b border-surface-700 px-5 transition hover:bg-surface-800/50 sm:h-16">
           <img src="/favicon.svg" alt="" className="h-7 w-7" />
           <span className="text-lg font-bold tracking-tight text-zinc-100">
             Link<span className="text-accent-400">Easy</span>
@@ -59,7 +78,7 @@ export default function DashboardLayout() {
           </span>
         </Link>
 
-        <nav className="flex-1 space-y-1 p-3">
+        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain p-3 scrollbar-thin">
           <p className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
             Operations
           </p>
@@ -82,7 +101,7 @@ export default function DashboardLayout() {
           ))}
         </nav>
 
-        <div className="border-t border-surface-700 p-3 space-y-3">
+        <div className="shrink-0 space-y-3 border-t border-surface-700 p-3">
           {/* User block */}
           <div className="flex items-center gap-3 rounded-lg bg-surface-800/60 px-2.5 py-2.5">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-500/15 text-sm font-bold text-accent-300">
@@ -141,10 +160,26 @@ export default function DashboardLayout() {
         </div>
       </aside>
 
-      {/* Main content */}
-      <main className="ml-64 min-w-0 flex-1 p-8">
-        <Outlet />
-      </main>
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col lg:ml-64">
+        <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-surface-700 bg-surface-900/95 px-4 backdrop-blur lg:hidden">
+          <button
+            type="button"
+            onClick={() => setMobileOpen((v) => !v)}
+            className="rounded-lg p-2 text-zinc-300 hover:bg-surface-800"
+            aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
+          >
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
+            </svg>
+          </button>
+          <span className="text-base font-bold text-zinc-100">
+            Link<span className="text-accent-400">Easy</span> Ops
+          </span>
+        </header>
+        <main className="min-w-0 flex-1 overflow-x-hidden p-4 sm:p-6 lg:p-8">
+          <Outlet />
+        </main>
+      </div>
     </div>
   );
 }

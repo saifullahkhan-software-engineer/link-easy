@@ -144,7 +144,8 @@ export function fromLocalInputValue(value) {
 
 const TABS = [
   { to: '/app/social-scheduler', label: 'Overview', end: true },
-  { to: '/app/social-scheduler/schedule', label: 'Upload' },
+  { to: '/app/social-scheduler/schedule', label: 'Shorts' },
+  { to: '/app/social-scheduler/posts', label: 'Posts' },
   { to: '/app/social-scheduler/queue', label: 'Queue' },
   { to: '/app/social-scheduler/calendar', label: 'Calendar' },
   { to: '/app/social-scheduler/history', label: 'History' },
@@ -164,7 +165,7 @@ export function SocialPageHeader({ title, description, action, current }) {
         </div>
         {action}
       </div>
-      <nav className="mt-5 flex flex-wrap gap-1 border-b border-surface-700" aria-label="Social scheduler sections">
+      <nav className="mt-5 -mx-1 flex gap-1 overflow-x-auto overscroll-x-contain border-b border-surface-700 px-1 scrollbar-thin" aria-label="Social scheduler sections">
         {TABS.map((tab) => {
           const active = tab.to === current;
           return (
@@ -172,7 +173,7 @@ export function SocialPageHeader({ title, description, action, current }) {
               key={tab.to}
               to={tab.to}
               aria-current={active ? 'page' : undefined}
-              className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition ${
+              className={`-mb-px shrink-0 border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition ${
                 active
                   ? 'border-accent-400 text-accent-300'
                   : 'border-transparent text-zinc-400 hover:border-surface-600 hover:text-zinc-200'

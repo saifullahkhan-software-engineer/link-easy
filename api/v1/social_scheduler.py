@@ -71,6 +71,8 @@ from core.config import settings
 from models.social_scheduler import (
     PlatformCredential,
     ShareTarget,
+    SocialContentKind,
+    SocialMediaKind,
     SocialPlatform,
     SocialPlatformConnection,
     SocialPost,
@@ -139,9 +141,13 @@ router = APIRouter(prefix="/api/v1/social-scheduler", tags=["social-scheduler"])
 # Public path under which uploaded videos are served (mounted in main.py).
 UPLOADS_URL_PREFIX = "/uploads/social"
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_UPLOAD_EXTENSIONS = ALLOWED_VIDEO_EXTENSIONS | ALLOWED_IMAGE_EXTENSIONS
 ALLOWED_VIDEO_TYPES = {"video/mp4", "video/quicktime", "video/x-m4v", "video/webm", "application/octet-stream"}
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg", "application/octet-stream"}
+ALLOWED_UPLOAD_TYPES = ALLOWED_VIDEO_TYPES | ALLOWED_IMAGE_TYPES
 # Upload ids are the server-generated basename: <uuid>.<ext>
-_UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{32}\.(mp4|mov|m4v|webm)$")
+_UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{32}\.(mp4|mov|m4v|webm|jpg|jpeg|png|webp)$")
 OAUTH_STATE_TTL = timedelta(minutes=10)
 OAUTH_STATE_TOKEN_TYPE = "social_oauth_state"
 
@@ -187,8 +193,16 @@ def _upload_file_or_404(upload_id: str) -> str:
     """Resolve a stored upload to its path or raise a client-friendly error."""
     path = _upload_path(upload_id)  # 400 when upload_id is not one of ours
     if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="Upload not found — upload the video again")
+        raise HTTPException(status_code=404, detail="Upload not found — upload the file again")
     return path
+
+
+def _is_image_upload(upload_id: str) -> bool:
+    return os.path.splitext(upload_id or "")[1].lower() in ALLOWED_IMAGE_EXTENSIONS
+
+
+def _media_kind_for(upload_id: str) -> str:
+    return SocialMediaKind.IMAGE.value if _is_image_upload(upload_id) else SocialMediaKind.VIDEO.value
 
 
 def _thumbnail_path(upload_id: str) -> str:
@@ -417,7 +431,14 @@ async def create_post(
 ):
     video_path = _upload_path(payload.upload_id)
     if not os.path.isfile(video_path):
-        raise HTTPException(status_code=400, detail="Upload not found — upload the video again")
+        raise HTTPException(status_code=400, detail="Upload not found — upload the file again")
+
+    media_kind = _media_kind_for(payload.upload_id)
+    if payload.content_kind == SocialContentKind.SHORTS.value and media_kind == SocialMediaKind.IMAGE.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Shorts need a video. Upload an MP4/MOV, or use Upload Posts for a photo.",
+        )
 
     # Platforms that are not connected can still be scheduled (the worker
     # reports a clear per-platform failure), but tell the user up front.
@@ -438,6 +459,8 @@ async def create_post(
         video_url=_public_video_url(request, payload.upload_id),
         thumbnail=payload.thumbnail,
         platforms=payload.platforms,
+        content_kind=payload.content_kind,
+        media_kind=media_kind,
         scheduled_at=scheduled_at,
         status=SocialPostStatus.PENDING.value,
         youtube_title=payload.youtube_title,
@@ -567,12 +590,17 @@ async def upload_video(
     current_user: User = Depends(get_current_user),
 ):
     ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in ALLOWED_VIDEO_EXTENSIONS:
+    if ext not in ALLOWED_UPLOAD_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file type '{ext or '(none)'}'. Upload an MP4, MOV, M4V or WEBM video.",
+            detail=(
+                f"Unsupported file type '{ext or '(none)'}'. "
+                "Upload an MP4, MOV, M4V or WEBM video, or a JPG, PNG or WebP image."
+            ),
         )
-    if file.content_type and file.content_type not in ALLOWED_VIDEO_TYPES:
+    is_image = ext in ALLOWED_IMAGE_EXTENSIONS
+    allowed_types = ALLOWED_IMAGE_TYPES if is_image else ALLOWED_VIDEO_TYPES
+    if file.content_type and file.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail=f"Unsupported content type {file.content_type}")
 
     upload_id = f"{uuid.uuid4().hex}{ext}"
@@ -589,7 +617,7 @@ async def upload_video(
                 if written > limit:
                     raise HTTPException(
                         status_code=413,
-                        detail=f"Video is larger than the {limit // (1024 * 1024)} MB limit",
+                        detail=f"File is larger than the {limit // (1024 * 1024)} MB limit",
                     )
                 out.write(chunk)
     except HTTPException:
@@ -608,8 +636,9 @@ async def upload_video(
 
     # Report the clip's duration so the upload editor can draw its trim
     # scrubber. Best-effort: when ffmpeg is absent (or the file is unusual) the
-    # value is None and the page simply hides the trim controls.
-    duration = await _probe_duration_optional(destination)
+    # value is None and the page simply hides the trim controls. Images have
+    # no duration.
+    duration = None if is_image else await _probe_duration_optional(destination)
     if duration is not None:
         logger.info("Uploaded %s for %s: %.2fs", upload_id, current_user.email, duration)
 
@@ -617,7 +646,7 @@ async def upload_video(
         upload_id=upload_id,
         filename=file.filename or upload_id,
         size_bytes=written,
-        content_type=file.content_type or "video/mp4",
+        content_type=file.content_type or ("image/jpeg" if is_image else "video/mp4"),
         video_url=_public_video_url(request, upload_id),
         duration_seconds=duration,
     )

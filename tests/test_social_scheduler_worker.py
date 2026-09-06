@@ -227,7 +227,7 @@ class PublishSocialPostTests(unittest.TestCase):
 
         self.assertEqual(outcome["status"], "failed")
         error = self._state(post_id)[1]["instagram"].error
-        self.assertIn("video file is missing", error)
+        self.assertIn("missing on the server", error)
         self.assertIn("Upload it again", error)
 
     def test_instagram_url_flow_is_still_used_when_direct_upload_is_off(self):
@@ -374,6 +374,46 @@ class PublishSocialPostTests(unittest.TestCase):
              patch.object(tasks.celery_app, "send_task"), patch("redis.from_url"):
             tasks.dispatch_due_social_posts()
         self.assertEqual(self._state(stuck)[0], "pending")
+
+    def test_feed_post_youtube_is_not_tagged_as_a_short(self):
+        post_id = self._post(["youtube"], content_kind="post")
+        self._connect("youtube", expires_in=3600)
+        yt = AsyncMock(return_value={"video_id": "vid1", "video_url": "https://www.youtube.com/watch?v=vid1"})
+        with patch("services.social.youtube.YouTubeService.upload_short", yt):
+            outcome = tasks.publish_post(post_id)
+        self.assertEqual(outcome["status"], "posted")
+        self.assertEqual(yt.call_args.kwargs.get("as_short"), False)
+
+    def test_image_posts_fail_on_youtube_and_tiktok(self):
+        post_id = self._post(["youtube", "tiktok"], content_kind="post", media_kind="image")
+        self._connect("youtube", expires_in=3600)
+        self._connect("tiktok", expires_in=3600)
+        with patch("services.social.youtube.YouTubeService.upload_short", AsyncMock(side_effect=AssertionError)), \
+             patch("services.social.tiktok.TikTokService.upload_video", AsyncMock(side_effect=AssertionError)):
+            outcome = tasks.publish_post(post_id)
+        self.assertEqual(outcome["status"], "failed")
+        _, results = self._state(post_id)
+        self.assertIn("does not support image-only posts", results["youtube"].error)
+        self.assertIn("does not support image-only posts", results["tiktok"].error)
+
+    def test_instagram_feed_video_uses_media_type_video(self):
+        post_id = self._post(["instagram"], content_kind="post")
+        self._connect("instagram", expires_in=3600, refresh=None)
+        ig = AsyncMock(return_value={"media_id": "m", "post_url": "https://www.instagram.com/p/m/"})
+        with patch("services.social.instagram.InstagramService.publish_reel", ig):
+            outcome = tasks.publish_post(post_id)
+        self.assertEqual(outcome["status"], "posted")
+        self.assertEqual(ig.call_args.kwargs.get("media_type"), "VIDEO")
+
+    def test_facebook_image_uses_upload_photo(self):
+        post_id = self._post(["facebook"], content_kind="post", media_kind="image")
+        self._connect("facebook", expires_in=3600, refresh=None)
+        fb = AsyncMock(return_value={"video_id": "ph1", "video_url": "https://www.facebook.com/ph1"})
+        with patch("services.social.facebook.FacebookService.upload_photo", fb), \
+             patch("services.social.facebook.FacebookService.upload_video", AsyncMock(side_effect=AssertionError)):
+            outcome = tasks.publish_post(post_id)
+        self.assertEqual(outcome["status"], "posted")
+        self.assertEqual(fb.call_args.kwargs["image_path"], self.video)
 
     def test_sync_url_rewrite_matches_the_other_task_modules(self):
         self.assertEqual(

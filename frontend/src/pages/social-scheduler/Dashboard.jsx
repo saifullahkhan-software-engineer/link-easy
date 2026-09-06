@@ -73,7 +73,7 @@ export default function SocialSchedulerDashboard() {
         description={
           stats?.next_post_at
             ? `Next post goes live ${formatRelative(stats.next_post_at)} — ${formatDateTime(stats.next_post_at)}.`
-            : 'Schedule one video to YouTube Shorts, Instagram Reels and TikTok at once.'
+            : 'Schedule Shorts or posts to YouTube, Facebook, Instagram and TikTok.'
         }
         action={
           <Link

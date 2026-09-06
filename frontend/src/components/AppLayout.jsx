@@ -1,4 +1,5 @@
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
 import { useAdminAccess } from '../hooks/useAdminAccess';
@@ -9,33 +10,9 @@ import HostedDemoBanner from './HostedDemoBanner';
 /**
  * App module shell — the customer-facing product.
  *
- * Its sidebar intentionally contains ONLY the app's own structure:
- *
- *   Workspace
- *     └─ Account
- *   LinkedIn
- *     ├─ Create Campaign
- *     ├─ Campaign Status
- *     ├─ Feed Scan
- *     ├─ LinkedIn Live Chat
- *     └─ Profile Scan (PDF)
- *   WhatsApp
- *     ├─ WhatsApp Group Scan
- *     └─ WhatsApp Live Chat
- *   Gmail
- *     ├─ Inbox
- *     └─ Compose
- *   Social Scheduler
- *     ├─ Overview
- *     ├─ Schedule Post
- *     ├─ Queue
- *     ├─ Calendar
- *     ├─ History
- *     └─ Settings
- *
- * The operations dashboard (/dashboard) and the admin dashboard (/admin) are
- * separate modules with their own sidebars. Admins still reach the admin area
- * through a small footer link so they are not trapped.
+ * Product groups (LinkedIn, WhatsApp, Gmail, Social Scheduler) are collapsible
+ * so the sidebar stays usable as items grow. The nav itself scrolls; the user
+ * block stays pinned. On small screens the sidebar is a drawer.
  */
 
 const accountItem = {
@@ -63,62 +40,25 @@ const linkedinGroup = {
     {
       to: '/app/campaigns/create',
       label: 'Create Campaign',
-      icon: (
-        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-        </svg>
-      ),
     },
     {
       to: '/app/campaigns',
       label: 'Campaign Status',
       end: true,
-      icon: (
-        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5 14.25 3l6.75 6.75-10.5 10.5H3.75v-6.75ZM12.75 6 18 11.25" />
-        </svg>
-      ),
     },
     {
       to: '/app/feed-scroll',
       label: 'Feed Scan',
-      icon: (
-        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 0 1-2.25 2.25M16.5 7.5V18a2.25 2.25 0 0 0 2.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 0 0 2.25 2.25h13.5M6 7.5h3v3H6v-3Z"
-          />
-        </svg>
-      ),
     },
     {
       to: '/app/linkedin-live',
       label: 'LinkedIn Live Chat',
       needsLinkedIn: true,
-      icon: (
-        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M21 12c0 4.97-4.03 9-9 9-1.34 0-2.62-.3-3.76-.84L3 21l.84-5.24A8.96 8.96 0 0 1 3 12c0-4.97 4.03-9 9-9s9 4.03 9 9Z"
-          />
-        </svg>
-      ),
     },
     {
       to: '/app/linkedin-profile',
       label: 'Profile Scan (PDF)',
       needsLinkedIn: true,
-      icon: (
-        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"
-          />
-        </svg>
-      ),
     },
   ],
 };
@@ -135,32 +75,8 @@ const whatsappGroup = {
     </svg>
   ),
   items: [
-    {
-      to: '/app/whatsapp-scanner',
-      label: 'WhatsApp Group Scan',
-      icon: (
-        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 0 0 2.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 0 0-1.123-.08m-5.801 0c-.065 0-.13 0-.195.002A48.43 48.43 0 0 0 5.25 5.912C4.085 6.006 3.25 6.969 3.25 8.108v8.142c0 .717.434 1.346 1.107 1.598l3.144 1.318a.75.75 0 0 1 .439.611v3.27a.75.75 0 0 0 .97.696l2.395-.96a.75.75 0 0 1 .556.05l3.61 2.034a2.25 2.25 0 0 0 1.886.05l3.27-1.31a2.25 2.25 0 0 0 1.336-1.95V8.108c0-1.135-.857-2.099-1.99-2.193a48.43 48.43 0 0 0-3.499-.058M18.75 12.75h.008v.007H18.75v-.007ZM18.75 12.75h.008M18.75 12a4.5 4.5 0 0 1-4.5 4.5M18.75 12a4.5 4.5 0 0 0-4.5-4.5"
-          />
-        </svg>
-      ),
-    },
-    {
-      to: '/app/whatsapp-live',
-      label: 'WhatsApp Live Chat',
-      icon: (
-        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM21 12c0 4.97-4.03 9-9 9-1.34 0-2.62-.3-3.76-.84L3 21l.84-5.24A8.96 8.96 0 0 1 3 12c0-4.97 4.03-9 9-9s9 4.03 9 9Z"
-          />
-        </svg>
-      ),
-    },
+    { to: '/app/whatsapp-scanner', label: 'WhatsApp Group Scan' },
+    { to: '/app/whatsapp-live', label: 'WhatsApp Live Chat' },
   ],
 };
 
@@ -172,13 +88,8 @@ const gmailGroup = {
     </svg>
   ),
   items: [
-    {
-      to: '/app/gmail',
-      label: 'Inbox',
-      end: true,
-      icon: null,
-    },
-    { to: '/app/gmail/compose', label: 'Compose', icon: null },
+    { to: '/app/gmail', label: 'Inbox', end: true },
+    { to: '/app/gmail/compose', label: 'Compose' },
   ],
 };
 
@@ -194,25 +105,137 @@ const socialGroup = {
     </svg>
   ),
   items: [
-    {
-      to: '/app/social-scheduler',
-      label: 'Overview',
-      end: true,
-      icon: null,
-    },
-    { to: '/app/social-scheduler/schedule', label: 'Upload Video', icon: null },
-    { to: '/app/social-scheduler/queue', label: 'Queue', icon: null },
-    { to: '/app/social-scheduler/calendar', label: 'Calendar', icon: null },
-    { to: '/app/social-scheduler/history', label: 'History', icon: null },
-    { to: '/app/social-scheduler/settings', label: 'Settings', icon: null },
+    { to: '/app/social-scheduler', label: 'Overview', end: true },
+    { to: '/app/social-scheduler/schedule', label: 'Upload Shorts' },
+    { to: '/app/social-scheduler/posts', label: 'Upload Posts' },
+    { to: '/app/social-scheduler/queue', label: 'Queue' },
+    { to: '/app/social-scheduler/calendar', label: 'Calendar' },
+    { to: '/app/social-scheduler/history', label: 'History' },
+    { to: '/app/social-scheduler/settings', label: 'Settings' },
   ],
 };
+
+const PRODUCT_GROUPS = [linkedinGroup, whatsappGroup, gmailGroup, socialGroup];
+
+function pathMatches(item, pathname) {
+  if (item.end) return pathname === item.to;
+  return pathname === item.to || pathname.startsWith(`${item.to}/`);
+}
+
+function groupContainsPath(group, pathname) {
+  return group.items.some((item) => pathMatches(item, pathname));
+}
+
+function Chevron({ open }) {
+  return (
+    <svg
+      className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-90' : ''}`}
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path
+        fillRule="evenodd"
+        d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z"
+        clipRule="evenodd"
+      />
+    </svg>
+  );
+}
+
+function NavGroup({ group, pathname, linkedinEnabled, onNavigate }) {
+  const active = groupContainsPath(group, pathname);
+  const [open, setOpen] = useState(active);
+
+  useEffect(() => {
+    if (active) setOpen(true);
+  }, [active]);
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider transition ${
+          active
+            ? 'bg-surface-800/80 text-zinc-200'
+            : 'text-zinc-500 hover:bg-surface-800 hover:text-zinc-300'
+        }`}
+      >
+        <span className={active ? 'text-zinc-300' : 'text-zinc-600'}>{group.icon}</span>
+        <span className="min-w-0 flex-1 truncate">{group.label}</span>
+        <Chevron open={open} />
+      </button>
+      {open && (
+        <div className="mt-1 space-y-0.5" role="group" aria-label={`${group.label} pages`}>
+          {group.items.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              onClick={onNavigate}
+              className={({ isActive }) =>
+                `flex items-center gap-2 rounded-lg py-2 pl-9 pr-3 text-sm transition ${
+                  isActive
+                    ? 'bg-accent-500/10 font-medium text-accent-300 ring-1 ring-inset ring-accent-500/20'
+                    : 'text-zinc-400 hover:bg-surface-800 hover:text-zinc-100'
+                }`
+              }
+            >
+              <span className="h-5 w-5 shrink-0 text-center text-zinc-600">•</span>
+              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              {item.needsLinkedIn && !linkedinEnabled && (
+                <span
+                  title="Paused — needs proxy setup"
+                  className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300"
+                >
+                  Paused
+                </span>
+              )}
+            </NavLink>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuIcon({ open }) {
+  return open ? (
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+    </svg>
+  ) : (
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
+    </svg>
+  );
+}
 
 export default function AppLayout() {
   const { email, name, logout } = useAuth();
   const { canSeeAdmin } = useAdminAccess();
   const { linkedinEnabled } = useFeatures();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileOpen) return undefined;
+    const onKey = (e) => e.key === 'Escape' && setMobileOpen(false);
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [mobileOpen]);
 
   function handleLogout() {
     logout();
@@ -220,140 +243,154 @@ export default function AppLayout() {
     navigate('/', { replace: true });
   }
 
-  return (
-    <div className="flex min-h-screen bg-surface-950">
-      {/* Sidebar — app module only (Account, LinkedIn, WhatsApp, Social Scheduler). */}
-      <aside className="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-surface-700 bg-surface-900">
-        <Link to="/" className="flex h-16 items-center gap-2.5 border-b border-surface-700 px-5 transition hover:bg-surface-800/50">
-          <img src="/favicon.svg" alt="" className="h-7 w-7" />
-          <span className="text-lg font-bold tracking-tight text-zinc-100">
-            Link<span className="text-accent-400">Easy</span>
-          </span>
-          <span className="rounded-md bg-accent-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent-300">
-            App
-          </span>
-        </Link>
+  const closeMobile = () => setMobileOpen(false);
 
-        <nav className="flex-1 space-y-3 p-3">
-          {/* Account — the only standalone workspace item. */}
-          <div>
-            <p className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Workspace
-            </p>
-            <NavLink
-              key={accountItem.to}
-              to={accountItem.to}
-              className={({ isActive }) =>
-                `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${
-                  isActive
-                    ? 'bg-accent-500/10 text-accent-300 ring-1 ring-inset ring-accent-500/20'
-                    : 'text-zinc-300 hover:bg-surface-800 hover:text-zinc-100'
-                }`
-              }
-            >
-              {accountItem.icon}
-              {accountItem.label}
-            </NavLink>
+  const sidebar = (
+    <>
+      <Link
+        to="/"
+        onClick={closeMobile}
+        className="flex h-14 shrink-0 items-center gap-2.5 border-b border-surface-700 px-4 transition hover:bg-surface-800/50 sm:h-16 sm:px-5"
+      >
+        <img src="/favicon.svg" alt="" className="h-7 w-7" />
+        <span className="text-lg font-bold tracking-tight text-zinc-100">
+          Link<span className="text-accent-400">Easy</span>
+        </span>
+        <span className="rounded-md bg-accent-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent-300">
+          App
+        </span>
+      </Link>
+
+      <nav className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 scrollbar-thin">
+        <div>
+          <p className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+            Workspace
+          </p>
+          <NavLink
+            to={accountItem.to}
+            onClick={closeMobile}
+            className={({ isActive }) =>
+              `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${
+                isActive
+                  ? 'bg-accent-500/10 text-accent-300 ring-1 ring-inset ring-accent-500/20'
+                  : 'text-zinc-300 hover:bg-surface-800 hover:text-zinc-100'
+              }`
+            }
+          >
+            {accountItem.icon}
+            {accountItem.label}
+          </NavLink>
+        </div>
+
+        {PRODUCT_GROUPS.map((group) => (
+          <NavGroup
+            key={group.label}
+            group={group}
+            pathname={pathname}
+            linkedinEnabled={linkedinEnabled}
+            onNavigate={closeMobile}
+          />
+        ))}
+      </nav>
+
+      <div className="shrink-0 space-y-3 border-t border-surface-700 p-3">
+        <div className="flex items-center gap-3 rounded-lg bg-surface-800/60 px-2.5 py-2.5">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-500/15 text-sm font-bold text-accent-300">
+            {(name || email || '?').slice(0, 1).toUpperCase()}
           </div>
-
-          {/* Per-product groups (LinkedIn, WhatsApp, Gmail, Social Scheduler). */}
-          {[linkedinGroup, whatsappGroup, gmailGroup, socialGroup].map((group) => (
-            <div key={group.label}>
-              <p className="flex items-center gap-2 px-3 pb-2 pt-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                <span className="text-zinc-600">{group.icon}</span>
-                {group.label}
-              </p>
-              <div className="space-y-1">
-                {group.items.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.end}
-                    className={({ isActive }) =>
-                      `flex items-center gap-3 rounded-lg pl-9 pr-3 py-2 text-sm transition ${
-                        isActive
-                          ? 'bg-accent-500/10 text-accent-300 ring-1 ring-inset ring-accent-500/20 font-medium'
-                          : 'text-zinc-400 hover:bg-surface-800 hover:text-zinc-100'
-                      }`
-                    }
-                  >
-                    <span className="h-5 w-5 shrink-0 text-zinc-600">•</span>
-                    <span className="flex-1">{item.label}</span>
-                    {/* LinkedIn-only tools stay clickable while the feature is
-                        paused — the page explains why — but are badged so the
-                        state is obvious from the sidebar. */}
-                    {item.needsLinkedIn && !linkedinEnabled && (
-                      <span
-                        title="Paused — needs proxy setup"
-                        className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300"
-                      >
-                        Paused
-                      </span>
-                    )}
-                  </NavLink>
-                ))}
-              </div>
-            </div>
-          ))}
-        </nav>
-
-        <div className="border-t border-surface-700 p-3 space-y-3">
-          {/* User block */}
-          <div className="flex items-center gap-3 rounded-lg bg-surface-800/60 px-2.5 py-2.5">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-500/15 text-sm font-bold text-accent-300">
-              {(name || email || '?').slice(0, 1).toUpperCase()}
-            </div>
-            <div className="min-w-0 flex-1">
-              {name && <p className="truncate text-sm font-medium text-zinc-200">{name}</p>}
-              <p className="truncate text-xs text-zinc-500">{email}</p>
-            </div>
+          <div className="min-w-0 flex-1">
+            {name && <p className="truncate text-sm font-medium text-zinc-200">{name}</p>}
+            <p className="truncate text-xs text-zinc-500">{email}</p>
           </div>
+        </div>
 
-          {/* Actions */}
-          <div className="space-y-2">
-            {canSeeAdmin && (
-              <Link
-                to="/admin"
-                className="flex w-full items-center gap-2.5 rounded-lg border border-surface-700 bg-surface-800 px-3 py-2.5 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 hover:text-zinc-100"
-              >
-                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 3.5l7 3v5c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9v-5l7-3z" />
-                </svg>
-                Admin dashboard
-              </Link>
-            )}
-
-            <button
-              onClick={() => navigate('/', { replace: false })}
+        <div className="space-y-2">
+          {canSeeAdmin && (
+            <Link
+              to="/admin"
+              onClick={closeMobile}
               className="flex w-full items-center gap-2.5 rounded-lg border border-surface-700 bg-surface-800 px-3 py-2.5 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 hover:text-zinc-100"
             >
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12 11.25 3 20.25 12m-1.5 1.5V21a.75.75 0 0 1-.75.75h-4.5A.75.75 0 0 1 12.75 21v-4.5a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 0-.75.75V21A.75.75 0 0 1 9 21.75h-4.5A.75.75 0 0 1 3.75 21v-7.5L2.25 12Z" />
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 3.5l7 3v5c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9v-5l7-3z" />
               </svg>
-              Back to Main Site
-            </button>
+              Admin dashboard
+            </Link>
+          )}
 
-            <button
-              onClick={handleLogout}
-              className="flex w-full items-center gap-2.5 rounded-lg bg-red-500/10 px-3 py-2.5 text-sm font-medium text-red-300 ring-1 ring-inset ring-red-500/15 transition hover:bg-red-500/15 hover:text-red-200"
-            >
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3-3-3-3m3 3-3-3m3 3H9" />
-              </svg>
-              Logout
-            </button>
-          </div>
+          <button
+            onClick={() => {
+              closeMobile();
+              navigate('/', { replace: false });
+            }}
+            className="flex w-full items-center gap-2.5 rounded-lg border border-surface-700 bg-surface-800 px-3 py-2.5 text-sm font-medium text-zinc-300 transition hover:bg-surface-700 hover:text-zinc-100"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12 11.25 3 20.25 12m-1.5 1.5V21a.75.75 0 0 1-.75.75h-4.5A.75.75 0 0 1 12.75 21v-4.5a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 0-.75.75V21A.75.75 0 0 1 9 21.75h-4.5A.75.75 0 0 1 3.75 21v-7.5L2.25 12Z" />
+            </svg>
+            Back to Main Site
+          </button>
 
-          <p className="px-1 text-[11px] text-zinc-500">LinkEasy App • v1.0</p>
+          <button
+            onClick={handleLogout}
+            className="flex w-full items-center gap-2.5 rounded-lg bg-red-500/10 px-3 py-2.5 text-sm font-medium text-red-300 ring-1 ring-inset ring-red-500/15 transition hover:bg-red-500/15 hover:text-red-200"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3-3-3-3m3 3-3-3m3 3H9" />
+            </svg>
+            Logout
+          </button>
         </div>
+
+        <p className="px-1 text-[11px] text-zinc-500">LinkEasy App • v1.0</p>
+      </div>
+    </>
+  );
+
+  return (
+    <div className="flex min-h-screen bg-surface-950">
+      {mobileOpen && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+          onClick={closeMobile}
+        />
+      )}
+
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-surface-700 bg-surface-900 transition-transform duration-200 ease-out lg:w-64 lg:translate-x-0 ${
+          mobileOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        {sidebar}
       </aside>
 
-      {/* Main content */}
-      <main className="ml-64 min-w-0 flex-1 p-8">
-        <HostedDemoBanner />
-        <BetaBanner />
-        <Outlet />
-      </main>
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col lg:ml-64">
+        <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-surface-700 bg-surface-900/95 px-4 backdrop-blur lg:hidden">
+          <button
+            type="button"
+            onClick={() => setMobileOpen((v) => !v)}
+            className="rounded-lg p-2 text-zinc-300 hover:bg-surface-800 hover:text-zinc-100"
+            aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
+            aria-expanded={mobileOpen}
+          >
+            <MenuIcon open={mobileOpen} />
+          </button>
+          <Link to="/" className="flex min-w-0 items-center gap-2">
+            <img src="/favicon.svg" alt="" className="h-6 w-6" />
+            <span className="truncate text-base font-bold tracking-tight text-zinc-100">
+              Link<span className="text-accent-400">Easy</span>
+            </span>
+          </Link>
+        </header>
+
+        <main className="min-w-0 flex-1 overflow-x-hidden p-4 sm:p-6 lg:p-8">
+          <HostedDemoBanner />
+          <BetaBanner />
+          <Outlet />
+        </main>
+      </div>
     </div>
   );
 }

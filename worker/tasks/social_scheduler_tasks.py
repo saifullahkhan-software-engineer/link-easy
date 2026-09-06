@@ -60,10 +60,10 @@ from worker.dispatch_lease import claim_dispatch_lease, release_dispatch_lease
 logger = get_logger(__name__)
 
 PLATFORM_LABELS = {
-    "youtube": "YouTube Shorts",
-    "instagram": "Instagram Reels",
+    "youtube": "YouTube",
+    "facebook": "Facebook",
+    "instagram": "Instagram",
     "tiktok": "TikTok",
-    "facebook": "Facebook Reels",
 }
 # A post stuck in "posting" longer than this (worker died mid-upload) is
 # handed back to the dispatcher on the next tick.
@@ -234,6 +234,9 @@ def publish_post(post_id: str) -> dict:
             "youtube_playlist_ids": list(post.youtube_playlist_ids or []),
             # Manual destinations — never posted, only reported as a note.
             "facebook_groups": list(post.facebook_groups or []),
+            # Missing on rows written before the columns existed → shorts video.
+            "content_kind": getattr(post, "content_kind", None) or "shorts",
+            "media_kind": getattr(post, "media_kind", None) or "video",
         }
         # One pending result row per platform up front, so the UI can show
         # per-platform progress while uploads run.
@@ -392,6 +395,9 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
             return _failure(f"{label} access expired and could not be renewed: {exc}")
 
     video_path = post["video_path"]
+    content_kind = (post.get("content_kind") or "shorts").lower()
+    media_kind = (post.get("media_kind") or "video").lower()
+    as_short = content_kind != "post"
     platform_copy = _platform_copy(post, platform)
     common_caption = _join_copy(post["caption"], post["hashtags"])
     structured_caption = _join_copy(
@@ -405,6 +411,11 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
     }.get(platform, "")
     platform_caption = structured_caption or legacy_caption or common_caption
     try:
+        if media_kind == "image" and platform in ("youtube", "tiktok"):
+            return _failure(
+                f"{label} does not support image-only posts. Upload a video, or unselect {label}."
+            )
+
         if platform == "youtube":
             result = await service.upload_short(
                 video_path=video_path,
@@ -413,6 +424,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
                 or common_caption,
                 access_token=tokens.access_token,
                 refresh_token=tokens.refresh_token,
+                as_short=as_short,
             )
             thumbnail_path = _thumbnail_path_for_video(video_path)
             thumbnail_note = await _set_youtube_thumbnail(
@@ -435,27 +447,41 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
             )
 
         if platform == "instagram":
-            # The video lives on this server (both "publish now" and scheduled
-            # posts store the file under UPLOAD_DIR), so the worker always hands
-            # the stored file over and lets the service decide: direct upload by
-            # default, URL flow as a fallback for a public instance. No public
-            # URL is required, and a non-public video_url is not an error here.
-            result = await service.publish_reel(
-                ig_user_id=account_id,
-                video_url=post["video_url"],
-                caption=platform_caption or post["instagram_caption"] or common_caption,
-                access_token=tokens.access_token,
-                video_path=video_path,
-                thumbnail_url=post.get("thumbnail") or None,
-            )
+            caption = platform_caption or post["instagram_caption"] or common_caption
+            if media_kind == "image":
+                result = await service.publish_image(
+                    ig_user_id=account_id,
+                    image_url=post["video_url"],
+                    caption=caption,
+                    access_token=tokens.access_token,
+                )
+            else:
+                # The video lives on this server; the service picks direct upload
+                # or the URL flow. No public URL is required for the default path.
+                result = await service.publish_reel(
+                    ig_user_id=account_id,
+                    video_url=post["video_url"],
+                    caption=caption,
+                    access_token=tokens.access_token,
+                    video_path=video_path,
+                    thumbnail_url=post.get("thumbnail") or None,
+                    media_type="VIDEO" if not as_short else "REELS",
+                )
             return _success(result["media_id"], result["post_url"])
 
         if platform == "facebook":
-            result = await service.upload_video(
-                video_path=video_path,
-                description=platform_caption,
-                access_token=tokens.access_token,
-            )
+            if media_kind == "image":
+                result = await service.upload_photo(
+                    image_path=video_path,
+                    description=platform_caption,
+                    access_token=tokens.access_token,
+                )
+            else:
+                result = await service.upload_video(
+                    video_path=video_path,
+                    description=platform_caption,
+                    access_token=tokens.access_token,
+                )
             return _success(result["video_id"], result["video_url"], note=_facebook_share_note(post))
 
         if platform == "tiktok":
@@ -468,7 +494,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
 
         return _failure(f"Unsupported platform: {platform}")
     except FileNotFoundError:
-        return _failure("The uploaded video file is missing on the server. Upload it again and reschedule.")
+        return _failure("The uploaded file is missing on the server. Upload it again and reschedule.")
     except Exception as exc:
         return _failure(str(exc) or exc.__class__.__name__)
 

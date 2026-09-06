@@ -46,10 +46,23 @@ from database import Base
 
 
 class SocialPlatform(str, enum.Enum):
+    # Display / picker order: YouTube, Facebook, Instagram, TikTok.
     YOUTUBE = "youtube"
+    FACEBOOK = "facebook"
     INSTAGRAM = "instagram"
     TIKTOK = "tiktok"
-    FACEBOOK = "facebook"
+
+
+class SocialContentKind(str, enum.Enum):
+    """What the user is publishing — a Short/Reel vs a regular feed post."""
+
+    SHORTS = "shorts"
+    POST = "post"
+
+
+class SocialMediaKind(str, enum.Enum):
+    VIDEO = "video"
+    IMAGE = "image"
 
 class SocialPostStatus(str, enum.Enum):
     PENDING = "pending"      # scheduled, waiting for scheduled_at
@@ -92,7 +105,22 @@ class SocialPost(Base):
     # Public URL of the same file; Instagram fetches the video from here.
     video_url = Column(String, nullable=False)
     thumbnail = Column(String, nullable=False, default="", server_default="")
-    platforms = Column(JSON, nullable=False)  # youtube | instagram | tiktok | facebook
+    platforms = Column(JSON, nullable=False)  # youtube | facebook | instagram | tiktok
+    # ``shorts`` (YouTube Shorts / Reels / TikTok) vs a regular feed ``post``.
+    # Existing rows predate the column and are treated as shorts.
+    content_kind = Column(
+        String,
+        nullable=False,
+        default=SocialContentKind.SHORTS.value,
+        server_default=SocialContentKind.SHORTS.value,
+    )
+    # The file stored at ``video_path`` — a clip, or a still image for posts.
+    media_kind = Column(
+        String,
+        nullable=False,
+        default=SocialMediaKind.VIDEO.value,
+        server_default=SocialMediaKind.VIDEO.value,
+    )
     scheduled_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(
         String,
