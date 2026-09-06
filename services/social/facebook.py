@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # (New Pages Experience).
 CREATE_CONTENT_TASKS = {"CREATE_CONTENT", "PROFILE_PLUS_CREATE_CONTENT", "MANAGE", "PROFILE_PLUS_FULL_CONTROL"}
 
-# User-facing messages. The OAuth callback redirects the user to the settings
+# User-facing messages. The OAuth callback redirects the user to the Accounts
 # page with ``error[:300]``, so each must stay under 300 characters.
 MISSING_PAGES_PERMISSION = (
     "The Facebook sign-in was granted without the 'See a list of your Pages' permission "
@@ -74,7 +74,7 @@ class FacebookService:
     # returned by /me/accounts is used for the actual publish request.
     SCOPES = (
         "pages_show_list,pages_read_engagement,pages_manage_posts,"
-        "pages_messaging,business_management"
+        "pages_messaging,pages_manage_metadata,business_management"
     )
 
     def __init__(self):

@@ -184,9 +184,9 @@ INSTAGRAM_DIRECT_UPLOAD=true
 UPLOAD_DIR=./uploads/social
 
 # Optional: where the browser lands after a successful OAuth callback
-# (the frontend settings page). Defaults to the first BACKEND_CORS_ORIGINS
-# origin + /app/social-scheduler/settings.
-SOCIAL_OAUTH_RETURN_URL=http://localhost:5173/app/social-scheduler/settings
+# (the frontend Accounts page). Defaults to the first BACKEND_CORS_ORIGINS
+# origin + /app/account.
+SOCIAL_OAUTH_RETURN_URL=http://localhost:5173/app/account
 ```
 
 ## Gmail
@@ -207,8 +207,8 @@ GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=http://localhost:8000/api/v1/gmail/callback
 
 # Optional: where the browser lands after the Gmail callback. Defaults to the
-# first BACKEND_CORS_ORIGINS origin + /app/gmail.
-GOOGLE_OAUTH_RETURN_URL=http://localhost:5173/app/gmail
+# first BACKEND_CORS_ORIGINS origin + /app/account/gmail.
+GOOGLE_OAUTH_RETURN_URL=http://localhost:5173/app/account/gmail
 ```
 
 With empty `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` nothing breaks — the

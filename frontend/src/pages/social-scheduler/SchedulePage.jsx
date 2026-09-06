@@ -660,7 +660,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
             <p className="mt-3 text-xs text-amber-300">
               {unconnectedSelected.map((id) => platformLabel(id, kind)).join(', ')}{' '}
               {unconnectedSelected.length === 1 ? 'is' : 'are'} not connected — connect{' '}
-              {unconnectedSelected.length === 1 ? 'it' : 'them'} in Settings before publishing or that platform will fail.
+              {unconnectedSelected.length === 1 ? 'it' : 'them'} in Accounts → Socials before publishing or that platform will fail.
             </p>
           )}
           {isImage && imageOnlyPlatforms.length > 0 && (
@@ -690,7 +690,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
 
             {!youtubeConnected && (
               <p className="mt-4 text-xs text-zinc-500">
-                Connect YouTube in Settings to list the channel&apos;s playlists. The {isPost ? 'video' : 'Short'} still
+                Connect YouTube in Accounts → Socials to list the channel&apos;s playlists. The {isPost ? 'video' : 'Short'} still
                 publishes without one.
               </p>
             )}

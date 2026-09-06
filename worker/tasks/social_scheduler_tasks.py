@@ -379,7 +379,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
             .one_or_none()
         )
         if conn is None:
-            return _failure(f"{label} is not connected. Open Settings and connect the account.")
+            return _failure(f"{label} is not connected. Open Accounts → Socials and connect the account.")
         conn_id = conn.id
         account_id = conn.account_id or ""
         try:

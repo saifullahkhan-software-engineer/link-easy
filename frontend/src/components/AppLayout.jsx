@@ -6,18 +6,19 @@ import { useAdminAccess } from '../hooks/useAdminAccess';
 import { useFeatures } from '../hooks/useFeatures';
 import BetaBanner from './BetaBanner';
 import HostedDemoBanner from './HostedDemoBanner';
+import { INBOX_CHANNELS } from '../constants/inbox';
 
 /**
  * App module shell — the customer-facing product.
  *
- * Product groups (LinkedIn, WhatsApp, Gmail, Social Scheduler) are collapsible
+ * Product groups (Social Scheduler, Gmail, Ultimate Inbox, LinkedIn, WhatsApp Scan) are collapsible
  * so the sidebar stays usable as items grow. The nav itself scrolls; the user
  * block stays pinned. On small screens the sidebar is a drawer.
  */
 
 const accountItem = {
   to: '/app/account',
-  label: 'Account',
+  label: 'Accounts',
   icon: (
     <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.25a7.5 7.5 0 0 1 15 0" />
@@ -63,8 +64,8 @@ const linkedinGroup = {
   ],
 };
 
-const whatsappGroup = {
-  label: 'WhatsApp',
+const whatsappScanGroup = {
+  label: 'WhatsApp Scan',
   icon: (
     <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
       <path
@@ -76,7 +77,6 @@ const whatsappGroup = {
   ),
   items: [
     { to: '/app/whatsapp-scanner', label: 'WhatsApp Group Scan' },
-    { to: '/app/whatsapp-live', label: 'WhatsApp Live Chat' },
   ],
 };
 
@@ -111,11 +111,20 @@ const socialGroup = {
     { to: '/app/social-scheduler/queue', label: 'Queue' },
     { to: '/app/social-scheduler/calendar', label: 'Calendar' },
     { to: '/app/social-scheduler/history', label: 'History' },
-    { to: '/app/social-scheduler/settings', label: 'Settings' },
   ],
 };
 
-const PRODUCT_GROUPS = [linkedinGroup, whatsappGroup, gmailGroup, socialGroup];
+const inboxGroup = {
+  label: 'Ultimate Inbox',
+  icon: (
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4h16l2 10v6H2v-6L4 4ZM2 14h6l2 3h4l2-3h6" />
+    </svg>
+  ),
+  items: INBOX_CHANNELS,
+};
+
+const PRODUCT_GROUPS = [socialGroup, gmailGroup, inboxGroup, linkedinGroup, whatsappScanGroup];
 
 function pathMatches(item, pathname) {
   if (item.end) return pathname === item.to;
@@ -146,6 +155,7 @@ function Chevron({ open }) {
 function NavGroup({ group, pathname, linkedinEnabled, onNavigate }) {
   const active = groupContainsPath(group, pathname);
   const [open, setOpen] = useState(active);
+  const groupId = `nav-${group.label.toLowerCase().replaceAll(' ', '-')}`;
 
   useEffect(() => {
     if (active) setOpen(true);
@@ -157,6 +167,7 @@ function NavGroup({ group, pathname, linkedinEnabled, onNavigate }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        aria-controls={groupId}
         className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider transition ${
           active
             ? 'bg-surface-800/80 text-zinc-200'
@@ -168,23 +179,27 @@ function NavGroup({ group, pathname, linkedinEnabled, onNavigate }) {
         <Chevron open={open} />
       </button>
       {open && (
-        <div className="mt-1 space-y-0.5" role="group" aria-label={`${group.label} pages`}>
+        <div id={groupId} className="mt-1 space-y-0.5" role="group" aria-label={`${group.label} pages`}>
           {group.items.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.end}
+              title={item.comingSoon ? `${item.label} — Coming soon` : item.label}
               onClick={onNavigate}
               className={({ isActive }) =>
-                `flex items-center gap-2 rounded-lg py-2 pl-9 pr-3 text-sm transition ${
+                `flex items-center gap-2 rounded-lg py-2 pl-6 pr-3 text-sm transition ${
                   isActive
                     ? 'bg-accent-500/10 font-medium text-accent-300 ring-1 ring-inset ring-accent-500/20'
                     : 'text-zinc-400 hover:bg-surface-800 hover:text-zinc-100'
                 }`
               }
             >
-              <span className="h-5 w-5 shrink-0 text-center text-zinc-600">•</span>
-              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              <span className="shrink-0 text-zinc-600" aria-hidden="true">•</span>
+              <span className="min-w-0 flex-1 leading-5">{item.label}</span>
+              {item.comingSoon && (
+                <span className="shrink-0 rounded bg-surface-700 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-zinc-400">Soon</span>
+              )}
               {item.needsLinkedIn && !linkedinEnabled && (
                 <span
                   title="Paused — needs proxy setup"
@@ -261,7 +276,7 @@ export default function AppLayout() {
         </span>
       </Link>
 
-      <nav className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 scrollbar-thin">
+      <nav aria-label="Workspace navigation" className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 scrollbar-thin">
         <div>
           <p className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
             Workspace

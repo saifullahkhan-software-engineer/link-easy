@@ -42,10 +42,18 @@ For production, serve `dist/` behind a reverse proxy that also forwards
 | `/dashboard` | Operations dashboard with automation health and service status (separate module + sidebar) |
 | `/dashboard/redis-queues` | Redis, Celery queues, locks, and database job management |
 | `/login` `/signup` `/verify-email` `/forgot-password` `/reset-password` | Full JWT auth lifecycle; live password-rule checklist mirrors the backend |
-| `/app/*` | **App module** — sidebar contains only Account → LinkedIn → WhatsApp. Landing: `/app/account` |
-| `/app/account` | Accounts hub — one card per connection (LinkedIn + WhatsApp) showing only the account and its status |
+| `/app/*` | **App module** — sidebar order: Accounts → Social Scheduler → Gmail → Ultimate Inbox → LinkedIn → WhatsApp Scan. Landing: `/app/account` |
+| `/app/account` | Connection hub — Main accounts (WhatsApp, LinkedIn, Gmail) and Socials (YouTube, Facebook, Instagram, TikTok, future WhatsApp Business) |
 | `/app/account/linkedin` | Manage LinkedIn (Playwright login), 2FA code modal, session refresh, edit, disconnect + Scan / Live Chat shortcuts |
 | `/app/account/whatsapp` | Manage WhatsApp — QR connect flow; connected card shows Added / Last updated + WhatsApp Scan / Live Chat shortcuts |
+| `/app/account/gmail` | Manage Gmail — Google OAuth connect/reconnect, status and disconnect |
+| `/app/account#socials` | Social connect/reconnect/disconnect, admin OAuth credentials and saved manual-share groups |
+| `/app/social-scheduler/*` | Publishing workspace — connection management now lives in Accounts, not Settings |
+| `/app/gmail` | Gmail inbox; connection controls live under Accounts |
+| `/app/inbox/whatsapp` | Existing WhatsApp chat, moved into Ultimate Inbox; old `/app/whatsapp-live` links redirect here |
+| `/app/inbox/instagram` | Text inbox for the connected professional Instagram account |
+| `/app/inbox/messenger` | Text inbox for the connected Facebook Page |
+| `/app/inbox/whatsapp-business` | Coming-soon information; no active business connection or messaging |
 | `/admin/*` | **Admin module** — own sidebar: Accounts → Users → LinkedIn (jobs & campaign parameters) → WhatsApp (jobs & parameters) |
 | `/admin/accounts` | Every LinkedIn account and WhatsApp session, with status tables |
 | `/admin/users` | Users and roles |
@@ -61,3 +69,5 @@ For production, serve `dist/` behind a reverse proxy that also forwards
   `{ message, errors: [...] }` is rendered as a scrollable per-row error list.
 - Token refresh is single-flight: concurrent 401s share one
   `POST /auth/refresh` call and then replay their original requests.
+
+See [Accounts and Ultimate Inbox](../docs/ultimate_inbox.md) for OAuth compatibility, Meta setup and tests.

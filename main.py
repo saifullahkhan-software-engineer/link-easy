@@ -35,6 +35,7 @@ from api.v1.system_queues import router as system_queues_router
 from api.v1.admin import router as admin_router
 from api.v1.social_scheduler import router as social_scheduler_router, UPLOADS_URL_PREFIX
 from api.v1.gmail import router as gmail_router
+from api.v1.inbox import router as inbox_router
 from api.v1.user_data import router as user_data_router
 from core.config import settings
 from core.logging_config import get_logger
@@ -284,6 +285,7 @@ app.include_router(system_queues_router)
 app.include_router(admin_router)
 app.include_router(social_scheduler_router)
 app.include_router(gmail_router)
+app.include_router(inbox_router)
 # Public account-deletion endpoints (Meta User Data Deletion requirement):
 # email-confirmed, rate-limited, no account enumeration. Registered last so
 # every /api/v1/user-data/* path is served exactly by this router.

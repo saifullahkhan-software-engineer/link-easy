@@ -10,7 +10,7 @@ Ported from the standalone social_scheduler/main.py into the main app:
 * video uploads are stored under a server-generated name and referenced by
   ``upload_id``; the client never supplies a filesystem path;
 * OAuth is complete: ``/platforms/{platform}/auth-url`` → provider →
-  ``/platforms/{platform}/callback`` → frontend settings page. The callback
+  ``/platforms/{platform}/callback`` → frontend Accounts page. The callback
   is a bare browser redirect (no Authorization header), so the caller's
   identity travels in a short-lived signed ``state`` JWT minted by the
   auth-url route — that same token is the CSRF check. For YouTube the state
@@ -970,7 +970,7 @@ async def platform_oauth_callback(
 ):
     """Provider redirect target. Unauthenticated by necessity — identity is
     taken from the signed ``state`` minted by ``platform_auth_url``. Always
-    ends in a redirect to the frontend settings page so the user is never
+    ends in a redirect to the frontend Accounts page so the user is never
     left on a JSON page."""
     try:
         platform = _platform_or_404(platform)
@@ -1158,7 +1158,7 @@ async def list_youtube_playlists(
     if conn is None:
         raise HTTPException(
             status_code=409,
-            detail="YouTube is not connected. Connect it in Settings, then pick playlists.",
+            detail="YouTube is not connected. Connect it in Accounts → Socials, then pick playlists.",
         )
     try:
         tokens = read_tokens(conn)
@@ -1266,7 +1266,7 @@ async def put_platform_credentials(
             ),
         )
     await upsert_credentials(db, platform, identifier, secret)
-    logger.info("%s app credentials saved via the settings page", platform)
+    logger.info("%s app credentials saved via Accounts → Socials", platform)
     return PlatformCredentialsMessageResponse(
         message=f"{PLATFORM_LABELS[platform]} app credentials saved",
         platform=platform,
@@ -1289,7 +1289,7 @@ async def delete_platform_credentials(
             status_code=404,
             detail=f"{PLATFORM_LABELS[platform]} has no app credentials saved in the database",
         )
-    logger.info("%s app credentials removed via the settings page", platform)
+    logger.info("%s app credentials removed via Accounts → Socials", platform)
     return PlatformCredentialsMessageResponse(
         message=f"{PLATFORM_LABELS[platform]} app credentials removed — environment values (if any) apply again",
         platform=platform,

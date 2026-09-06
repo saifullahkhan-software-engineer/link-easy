@@ -5,6 +5,7 @@
  * Run: node smoke-test.mjs   (requires `npm run build` first)
  */
 import { JSDOM } from 'jsdom';
+import { inboxSmokeCases } from './inbox-smoke-cases.mjs';
 import { readdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join, dirname } from 'node:path';
@@ -255,7 +256,7 @@ const SOCIAL_POSTS = [
     video_url: 'http://x/uploads/social/c.mp4', thumbnail: '', platforms: ['tiktok'],
     scheduled_at: socialPast, status: 'failed', youtube_title: '', instagram_caption: '', tiktok_caption: '',
     created_at: socialPast, updated_at: socialPast,
-    results: [{ id: 'r-2', platform: 'tiktok', status: 'failed', platform_id: '', platform_url: '', error: 'TikTok is not connected. Open Settings and connect the account.', posted_at: null, updated_at: socialPast }],
+    results: [{ id: 'r-2', platform: 'tiktok', status: 'failed', platform_id: '', platform_url: '', error: 'TikTok is not connected. Open Accounts → Socials and connect the account.', posted_at: null, updated_at: socialPast }],
   },
   // YouTube published the Short but one playlist was gone: the post is marked
   // failed by the other platform, and the YouTube row still has to show what
@@ -371,6 +372,7 @@ const SOCIAL_API_STUBS = {
 };
 
 const CASES = [
+  ...inboxSmokeCases({ AUTH_TOKENS, SOCIAL_API_STUBS, ACTIVE_ACCOUNT, json }),
   {
     path: '/',
     mustContain: ['Connect your tools.', 'Automate your day.', 'Connect your social tools', 'Build campaigns in minutes'],
@@ -392,7 +394,7 @@ const CASES = [
   },
   {
     name: 'admin accounts — every LinkedIn account and WhatsApp session renders',
-    path: '/admin',
+    path: '/admin/accounts',
     storage: ADMIN_TOKENS,
     api: ADMIN_API_STUBS,
     mustContain: [
@@ -510,7 +512,7 @@ const CASES = [
     mustNotContain: ['Connect LinkedIn account'],
   },
   {
-    name: 'accounts hub — two cards (LinkedIn + WhatsApp) with connect actions',
+    name: 'accounts hub — main account cards with connect actions',
     path: '/app/account',
     storage: AUTH_TOKENS,
     api: {
@@ -655,7 +657,7 @@ const CASES = [
         });
       },
     },
-    mustContain: ['WhatsApp Live Chat', 'Browsing chats', '10 most recent chats', 'Customer Support', 'Ava Patel', 'Pick a chat to start'],
+    mustContain: ['Ultimate Inbox', 'WhatsApp Chat', 'Browsing chats', '10 most recent chats', 'Customer Support', 'Ava Patel', 'Pick a chat to start'],
   },
   {
     name: 'linkedin live chat — running session renders stable conversation rows',
@@ -1399,8 +1401,8 @@ const CASES = [
     mustContain: ['Calendar', 'Mon', 'Sun', 'calendar-day', 'Launch teaser', 'this month'],
   },
   {
-    name: 'social scheduler — settings manages the saved Facebook groups',
-    path: '/app/social-scheduler/settings',
+    name: 'accounts socials — manages the saved Facebook groups',
+    path: '/app/account#socials',
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
     interact: async (window) => {
@@ -1430,12 +1432,12 @@ const CASES = [
     mustContain: ['Facebook groups for manual sharing', 'Video Editors PK', 'Save group'],
   },
   {
-    name: 'social scheduler — settings shows connect / disconnect state per platform',
+    name: 'accounts socials — legacy settings redirect shows connect / disconnect state',
     path: '/app/social-scheduler/settings?platform=tiktok&connected=1',
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
     mustContain: [
-      'Settings', 'Connected platforms: 1 of 4', 'My Channel', 'Disconnect', 'Reconnect', 'Connect TikTok',
+      'Main accounts', 'Socials', 'Connected platforms: 1 of 4', 'My Channel', 'Disconnect', 'Reconnect', 'Connect TikTok',
       'Connect Facebook', 'Not available on this instance', 'platform-card-instagram',
     ],
   },

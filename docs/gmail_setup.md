@@ -106,7 +106,7 @@ http://localhost:8000/api/v1/gmail/callback
 | Variable | Default when empty |
 | --- | --- |
 | `GOOGLE_REDIRECT_URI` | `<PUBLIC_API_URL or request origin>/api/v1/gmail/callback` |
-| `GOOGLE_OAUTH_RETURN_URL` | first `BACKEND_CORS_ORIGINS` origin + `/app/gmail` |
+| `GOOGLE_OAUTH_RETURN_URL` | first `BACKEND_CORS_ORIGINS` origin + `/app/account/gmail` |
 
 The callback itself always ends by redirecting the browser to
 `GOOGLE_OAUTH_RETURN_URL` with `?connected=1` or `?error=…`.
@@ -124,7 +124,7 @@ GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=https://api.example.com/api/v1/gmail/callback
 
 # Optional — where the browser lands after connect:
-GOOGLE_OAUTH_RETURN_URL=https://app.example.com/app/gmail
+GOOGLE_OAUTH_RETURN_URL=https://app.example.com/app/account/gmail
 ```
 
 These are read by the API process only. The Celery worker does not talk to

@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Analytics } from '@vercel/analytics/react';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './context/AuthContext';
@@ -17,6 +17,9 @@ import ResetPassword from './pages/ResetPassword';
 import AccountsPage from './pages/AccountsPage';
 import LinkedInAccountPage from './pages/LinkedInAccountPage';
 import WhatsAppConnectPage from './pages/WhatsAppConnectPage';
+import GmailAccountPage from './pages/GmailAccountPage';
+import MetaChatPage from './pages/inbox/MetaChatPage';
+import WhatsAppBusinessChatPage from './pages/inbox/WhatsAppBusinessChatPage';
 import CampaignCreatePage from './pages/CampaignCreatePage';
 import CampaignStatusPage from './pages/CampaignStatusPage';
 import FeedScrollJobsPage from './pages/FeedScrollJobsPage';
@@ -44,12 +47,17 @@ import SocialSchedulePage from './pages/social-scheduler/SchedulePage';
 import SocialQueuePage from './pages/social-scheduler/QueuePage';
 import SocialHistoryPage from './pages/social-scheduler/HistoryPage';
 import SocialCalendarPage from './pages/social-scheduler/CalendarPage';
-import SocialSettingsPage from './pages/social-scheduler/SettingsPage';
 import FacebookGroupsPage from './pages/social-scheduler/FacebookGroupsPage';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
 import DataDeletion from './pages/DataDeletion';
 import DeleteConfirm from './pages/DeleteConfirm';
+
+// Preserve OAuth results and old bookmarks when moving pages between modules.
+function LegacyPageRedirect({ to, hash }) {
+  const location = useLocation();
+  return <Navigate to={{ pathname: to, search: location.search, hash: hash ?? location.hash }} replace />;
+}
 
 export default function App() {
   return (
@@ -115,7 +123,7 @@ export default function App() {
             <Route path="whatsapp" element={<AdminWhatsAppPage />} />
           </Route>
 
-          {/* app shell — app module: Account, LinkedIn, WhatsApp, Gmail */}
+          {/* app shell — Accounts, Social Scheduler, Gmail, Ultimate Inbox, LinkedIn, WhatsApp Scan */}
           <Route
             path="/app"
             element={
@@ -128,6 +136,7 @@ export default function App() {
             <Route path="account" element={<AccountsPage />} />
             <Route path="account/linkedin" element={<LinkedInAccountPage />} />
             <Route path="account/whatsapp" element={<WhatsAppConnectPage />} />
+            <Route path="account/gmail" element={<GmailAccountPage />} />
             <Route path="campaigns" element={<CampaignStatusPage />} />
             <Route path="campaigns/create" element={<CampaignCreatePage />} />
             <Route path="feed-scroll" element={<FeedScrollJobsPage />} />
@@ -140,7 +149,13 @@ export default function App() {
             <Route path="whatsapp-scanner/create" element={<WhatsAppFilterCreatePage />} />
             <Route path="whatsapp-scanner/jobs/:filterId" element={<WhatsAppScannerPage />} />
             <Route path="whatsapp-scanner/jobs/:filterId/edit" element={<WhatsAppFilterEditPage />} />
-            <Route path="whatsapp-live" element={<WhatsAppLiveChatPage />} />
+            {/* Ultimate Inbox — WhatsApp plus connected Meta messaging channels. */}
+            <Route path="inbox" element={<Navigate to="/app/inbox/whatsapp" replace />} />
+            <Route path="inbox/whatsapp" element={<WhatsAppLiveChatPage />} />
+            <Route path="inbox/instagram" element={<MetaChatPage key="instagram" channel="instagram" />} />
+            <Route path="inbox/messenger" element={<MetaChatPage key="messenger" channel="messenger" />} />
+            <Route path="inbox/whatsapp-business" element={<WhatsAppBusinessChatPage />} />
+            <Route path="whatsapp-live" element={<LegacyPageRedirect to="/app/inbox/whatsapp" />} />
             {/* Gmail — read/check the inbox, manage labels, send */}
             <Route path="gmail" element={<GmailPage />} />
             <Route path="gmail/compose" element={<GmailComposePage />} />
@@ -151,7 +166,7 @@ export default function App() {
             <Route path="social-scheduler/queue" element={<SocialQueuePage />} />
             <Route path="social-scheduler/history" element={<SocialHistoryPage />} />
             <Route path="social-scheduler/calendar" element={<SocialCalendarPage />} />
-            <Route path="social-scheduler/settings" element={<SocialSettingsPage />} />
+            <Route path="social-scheduler/settings" element={<LegacyPageRedirect to="/app/account" hash="#socials" />} />
             <Route path="social-scheduler/facebook-groups" element={<FacebookGroupsPage />} />
             <Route
               path="linkedin-live"

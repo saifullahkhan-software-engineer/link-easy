@@ -327,14 +327,14 @@ class Settings(BaseSettings):
         """Frontend page the browser lands on after a platform OAuth callback.
 
         Explicit SOCIAL_OAUTH_RETURN_URL wins; otherwise the first CORS origin
-        (the frontend) + the settings page path. Falls back to a relative path
+        (the frontend) + the Accounts page path. Falls back to a relative path
         so a same-origin dev proxy setup still works.
         """
         if self.SOCIAL_OAUTH_RETURN_URL:
             return self.SOCIAL_OAUTH_RETURN_URL.rstrip("/")
         origins = self.cors_origins
         base = origins[0].rstrip("/") if origins else ""
-        return f"{base}/app/social-scheduler/settings"
+        return f"{base}/app/account"
 
     @property
     def gmail_configured(self) -> bool:
@@ -353,14 +353,14 @@ class Settings(BaseSettings):
         """Frontend page the browser lands on after the Gmail OAuth callback.
 
         Explicit GOOGLE_OAUTH_RETURN_URL wins; otherwise the first CORS origin
-        (the frontend) + the app's Gmail inbox page. Falls back to a relative
-        path so a same-origin dev proxy setup still works.
+        (the frontend) + the Gmail connection page under Accounts. Falls back to
+        a relative path so a same-origin dev proxy setup still works.
         """
         if self.GOOGLE_OAUTH_RETURN_URL:
             return self.GOOGLE_OAUTH_RETURN_URL.rstrip("/")
         origins = self.cors_origins
         base = origins[0].rstrip("/") if origins else ""
-        return f"{base}/app/gmail"
+        return f"{base}/app/account/gmail"
 
     def social_platform_configured(self, platform: str) -> bool:
         """True when the OAuth app credentials for ``platform`` are set."""

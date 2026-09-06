@@ -28,6 +28,7 @@ import toast from 'react-hot-toast';
 import { whatsappLiveApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
+import { InboxPageHeader } from '../components/inbox/InboxBits';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const STATUS_POLL_MS = 5_000;
@@ -386,17 +387,12 @@ export default function WhatsAppLiveChatPage() {
   const sendDisabled = !isRunning || !activeChatId || sending || !draft.trim();
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-7rem)] w-full max-w-7xl flex-col gap-4 px-4 py-6 lg:px-8">
+    <div className="mx-auto flex min-h-[36rem] h-[calc(100dvh-8rem)] w-full max-w-7xl flex-col gap-4">
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-zinc-100">WhatsApp Live Chat</h1>
-          <p className="mt-0.5 text-sm text-zinc-400">
-            Click a chat, read messages, and reply in the box below. While live, the
-            scheduled scanner is paused.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
+      <InboxPageHeader
+        channel="whatsapp"
+        description="Click a chat, read messages, and reply below. While live, the scheduled scanner is paused."
+        action={<>
           <StatusBadge status={statusInfo} />
           {!isRunning ? (
             <button
@@ -421,13 +417,13 @@ export default function WhatsAppLiveChatPage() {
               {isStopping ? 'Closing…' : 'Stop live chat'}
             </button>
           )}
-        </div>
-      </div>
+        </>}
+      />
 
       {/* Two-pane body */}
       <div className="card flex min-h-0 flex-1 overflow-hidden p-0">
         {/* Sidebar */}
-        <aside className="flex w-80 shrink-0 flex-col border-r border-surface-700 bg-surface-850">
+        <aside className={`${activeChatId ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-surface-700 bg-surface-850 md:w-72`}>
           <div className="border-b border-surface-700 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <p className="text-xs font-medium text-zinc-300">10 most recent chats</p>
@@ -502,7 +498,7 @@ export default function WhatsAppLiveChatPage() {
         </aside>
 
         {/* Active chat pane */}
-        <section className="flex min-w-0 flex-1 flex-col bg-surface-900">
+        <section className={`${activeChatId ? 'flex' : 'hidden md:flex'} min-w-0 flex-1 flex-col bg-surface-900`}>
           {!isRunning ? (
             <ActiveChatIdle
               title="Live chat is not running"
