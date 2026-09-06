@@ -289,7 +289,7 @@ export default function SocialSettingsPage() {
           const busy = pending === p.id;
           const operatorManaged = Boolean(cred?.source === 'database');
           return (
-            <div key={p.id} className="card flex flex-col p-6" data-testid={`platform-card-${p.id}`}>
+            <div key={p.id} className="card flex h-full min-h-[258px] flex-col p-6" data-testid={`platform-card-${p.id}`}>
               <div className="flex items-start justify-between gap-3">
                 <PlatformIcon
                   platform={p.id}
@@ -322,11 +322,11 @@ export default function SocialSettingsPage() {
                 <p className="mt-1 text-sm text-zinc-400">{REQUIREMENTS[p.id]}</p>
               )}
 
-              <div className="mt-auto pt-5">
+              <div className="mt-auto flex min-h-[76px] flex-col justify-end pt-5">
                 {!conn.configured ? (
                   isAdmin ? (
                     <div>
-                      <button className="btn-secondary w-full" onClick={() => openCredentialsModal(p.id)}>
+                      <button className="btn-secondary min-h-11 w-full" onClick={() => openCredentialsModal(p.id)}>
                         Set up app credentials
                       </button>
                       <p className="mt-2 text-xs text-zinc-500">
@@ -335,7 +335,7 @@ export default function SocialSettingsPage() {
                     </div>
                   ) : (
                     <div>
-                      <button className="btn-secondary w-full" disabled title="Not configured on this instance">
+                      <button className="btn-secondary min-h-11 w-full" disabled title="Not configured on this instance">
                         Connect
                       </button>
                       <p className="mt-2 text-xs text-zinc-500">
@@ -344,13 +344,13 @@ export default function SocialSettingsPage() {
                     </div>
                   )
                 ) : conn.connected ? (
-                  <div className="flex gap-2">
-                    <button className="btn-secondary flex-1" onClick={() => connect(p.id)} disabled={Boolean(pending)}>
+                  <div className="flex items-stretch gap-2">
+                    <button className="btn-secondary min-h-11 flex-1" onClick={() => connect(p.id)} disabled={Boolean(pending)}>
                       {busy && <Spinner />}
                       Reconnect
                     </button>
                     <button
-                      className="btn-danger flex-1"
+                      className="btn-danger min-h-11 flex-1"
                       onClick={() => setConfirmDisconnect(p.id)}
                       disabled={Boolean(pending)}
                     >
@@ -358,7 +358,7 @@ export default function SocialSettingsPage() {
                     </button>
                   </div>
                 ) : (
-                  <button className="btn-primary w-full" onClick={() => connect(p.id)} disabled={Boolean(pending)}>
+                  <button className="btn-primary min-h-11 w-full" onClick={() => connect(p.id)} disabled={Boolean(pending)}>
                     {busy && <Spinner />}
                     Connect {p.label.split(' ')[0]}
                   </button>
