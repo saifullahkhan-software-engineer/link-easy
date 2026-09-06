@@ -434,6 +434,14 @@ async def create_post(
         raise HTTPException(status_code=400, detail="Upload not found — upload the file again")
 
     media_kind = _media_kind_for(payload.upload_id)
+    if payload.media_kind != media_kind:
+        logger.warning(
+            "Post media mismatch for %s: UI selected %s but upload %s is %s",
+            current_user.email,
+            payload.media_kind,
+            payload.upload_id,
+            media_kind,
+        )
     if payload.content_kind == SocialContentKind.SHORTS.value and media_kind == SocialMediaKind.IMAGE.value:
         raise HTTPException(
             status_code=400,

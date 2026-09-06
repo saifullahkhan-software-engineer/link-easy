@@ -324,7 +324,7 @@ def _thumbnail_path_for_video(video_path: str) -> str:
 
 
 def _cleanup_completed_upload(video_path: str) -> None:
-    """Remove a video and thumbnail after every selected platform succeeds."""
+    """Remove the uploaded video/photo and thumbnail after all targets succeed."""
     # Retain files when a platform fails so the post can be retried and
     # diagnosed. Cleanup itself is best-effort and must not change a POSTED
     # result into a failure.
@@ -396,7 +396,21 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
 
     video_path = post["video_path"]
     content_kind = (post.get("content_kind") or "shorts").lower()
+    # The API derives this from the upload extension, but keep the worker
+    # defensive: old rows, stale workers, or a partially migrated database
+    # must never send a JPG/PNG through the Reel/video branch.  The server-side
+    # file extension is authoritative because the client cannot choose the
+    # stored path.
+    stored_extension = os.path.splitext(video_path)[1].lower()
     media_kind = (post.get("media_kind") or "video").lower()
+    if stored_extension in {".jpg", ".jpeg", ".png", ".webp"}:
+        media_kind = "image"
+    elif stored_extension in {".mp4", ".mov", ".m4v", ".webm"}:
+        media_kind = "video"
+    logger.info(
+        "[%s] %s media routing: kind=%s extension=%s content_kind=%s",
+        post.get("id", "?"), label, media_kind, stored_extension or "(none)", content_kind,
+    )
     as_short = content_kind != "post"
     platform_copy = _platform_copy(post, platform)
     common_caption = _join_copy(post["caption"], post["hashtags"])
@@ -449,6 +463,11 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
         if platform == "instagram":
             caption = platform_caption or post["instagram_caption"] or common_caption
             if media_kind == "image":
+                logger.info(
+                    "[%s] Instagram photo publish URL: %s",
+                    post.get("id", "?"),
+                    post.get("video_url") or "(unset)",
+                )
                 result = await service.publish_image(
                     ig_user_id=account_id,
                     image_url=post["video_url"],

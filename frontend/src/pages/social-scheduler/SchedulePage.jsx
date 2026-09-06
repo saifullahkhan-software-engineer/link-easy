@@ -203,7 +203,11 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
         setConnections(data);
         setForm((f) => ({
           ...f,
-          platforms: f.platforms.length ? f.platforms : data.filter((p) => p.connected).map((p) => p.platform),
+          platforms: f.platforms.length
+            ? f.platforms.filter((platform) => !(isImage && platform === 'youtube'))
+            : data
+                .filter((p) => p.connected && !(isImage && p.platform === 'youtube'))
+                .map((p) => p.platform),
         }));
       })
       .catch(() => setConnections([]));
@@ -454,6 +458,10 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
         scheduled_at: when,
         publish_now: mode === 'direct',
         content_kind: kind,
+        // The API still derives the authoritative value from the upload
+        // extension, but sending the UI choice makes stale-client/mismatched
+        // requests diagnosable instead of silently looking like a Reel.
+        media_kind: mediaType,
         youtube_title: form.youtube_title,
         instagram_caption: form.instagram_caption,
         tiktok_caption: form.tiktok_caption,
@@ -483,6 +491,15 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
   const switchMedia = (next) => {
     if (next === mediaType) return;
     setMediaType(next);
+    if (next === 'image') {
+      // YouTube has no standalone photo-post API. Do not leave a hidden
+      // YouTube target selected when switching the regular composer to Photo.
+      setForm((f) => ({
+        ...f,
+        platforms: f.platforms.filter((platform) => platform !== 'youtube'),
+        youtube_playlist_ids: [],
+      }));
+    }
     setFile(null);
     setUpload(null);
     setThumbnail('');
@@ -613,7 +630,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
             <span className="text-xs text-zinc-500">{form.platforms.length} selected</span>
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            {PLATFORMS.map((p) => {
+            {(isImage ? PLATFORMS.filter(({ id }) => id !== 'youtube') : PLATFORMS).map((p) => {
               const conn = connectionFor(p.id);
               const selected = form.platforms.includes(p.id);
               return (

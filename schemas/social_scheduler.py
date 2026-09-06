@@ -165,11 +165,22 @@ class PostCreate(BaseModel):
     # ``shorts`` (default, existing behaviour) vs a regular feed ``post``.
     # The server still infers ``media_kind`` from the uploaded file.
     content_kind: str = Field(SocialContentKind.SHORTS.value, max_length=20)
+    # UI selection, used for diagnostics only. The API never trusts this over
+    # the server-generated upload extension.
+    media_kind: str = Field(SocialMediaKind.VIDEO.value, max_length=20)
 
     @field_validator("platforms")
     @classmethod
     def _platforms(cls, v):
         return _validate_platforms(v)
+
+    @field_validator("media_kind")
+    @classmethod
+    def _media_kind(cls, v):
+        value = str(v).strip().lower()
+        if value not in MEDIA_KIND_VALUES:
+            raise ValueError(f"Unknown media kind '{v}'. Choose from: {', '.join(MEDIA_KIND_VALUES)}")
+        return value
 
     @field_validator("youtube_playlist_ids")
     @classmethod

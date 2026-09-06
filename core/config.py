@@ -384,6 +384,7 @@ class Settings(BaseSettings):
         "FROM_EMAIL": "no transactional email is sent (sender address missing)",
         "GOOGLE_CLIENT_ID": "users cannot connect Gmail (no Google OAuth client id)",
         "GOOGLE_CLIENT_SECRET": "users cannot connect Gmail (no Google OAuth client secret)",
+        "PUBLIC_API_URL": "Instagram photo posts cannot be fetched by Meta without a public upload URL",
     }
 
     def missing_optional_settings(self) -> dict[str, str]:

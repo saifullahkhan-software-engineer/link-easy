@@ -181,7 +181,14 @@ class InstagramService:
     # Page integrations always speak the same (currently supported) Graph API
     # version — this was pinned to v18.0, which Meta retired in Jan 2026.
     GRAPH_API = GRAPH_API_BASE
-    SCOPES = "instagram_basic,instagram_content_publish"
+    # Publishing plus the Page/business permissions needed to discover the
+    # linked professional account and manage its Instagram inbox. Meta only
+    # grants newly added permissions during a fresh authorization, so existing
+    # connections must reconnect after this list changes.
+    SCOPES = (
+        "instagram_basic,instagram_content_publish,instagram_manage_messages,"
+        "pages_read_engagement,pages_show_list,business_management"
+    )
 
     def __init__(self):
         self.app_id = settings.INSTAGRAM_APP_ID
@@ -648,7 +655,8 @@ class InstagramService:
         if not is_public_video_url(image_url):
             raise Exception(
                 "Instagram photo posts need a publicly reachable image URL. "
-                "Set PUBLIC_API_URL on this instance, or upload a video instead."
+                f"The URL generated was {image_url or '(empty)'}. "
+                "Set PUBLIC_API_URL on the API service, or upload a video instead."
             )
         payload = {
             "image_url": image_url,
