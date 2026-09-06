@@ -68,7 +68,10 @@ class FacebookService:
     # Shared with the Instagram service (see services/social/meta_graph.py):
     # one Graph API version for the whole Meta platform, bumped in one place.
     GRAPH_API = GRAPH_API_BASE
-    SCOPES = "pages_show_list,pages_manage_posts,business_management"
+    # Meta's Page video publishing requirements include pages_read_engagement
+    # alongside pages_show_list and pages_manage_posts. The Page access token
+    # returned by /me/accounts is used for the actual publish request.
+    SCOPES = "pages_show_list,pages_read_engagement,pages_manage_posts,business_management"
 
     def __init__(self):
         self.app_id = settings.FACEBOOK_APP_ID

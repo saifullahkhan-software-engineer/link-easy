@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_USER: linkeflow
       POSTGRES_PASSWORD: linkeflow_password
-      POSTGRES_DB: linkeflow
+      POSTGRES_DB: linkeasy
     ports:
       - "5432:5432"
     volumes:
@@ -40,13 +40,13 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeflow
+      - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeasy
       - REDIS_URL=redis://redis:6379/0
       # Canonical names (code reads these). Legacy aliases still work but prefer these.
-      - JWT_SECRET=your_jwt_secret_key_here
-      - CREDENTIAL_ENCRYPTION_KEY=your_64_char_hex_key_here
-      - JWT_SECRET_KEY=your_jwt_secret_key_here
-      - ENCRYPTION_KEY=your_64_char_hex_key_here
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}
+      - JWT_SECRET_KEY=${JWT_SECRET}
+      - ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
       - JWT_ALGORITHM=HS256
       - RESEND_API_KEY=your_resend_api_key_here
       - PASSWORD_RESET_URL=http://localhost:5173/reset-password
@@ -107,12 +107,12 @@ services:
     build: .
     container_name: linkeflow-worker
     environment: &celery_environment
-      - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeflow
+      - DATABASE_URL=postgresql+asyncpg://linkeflow:linkeflow_password@postgres:5432/linkeasy
       - REDIS_URL=redis://redis:6379/0
-      - JWT_SECRET=your_jwt_secret_key_here
-      - CREDENTIAL_ENCRYPTION_KEY=your_64_char_hex_key_here
-      - JWT_SECRET_KEY=your_jwt_secret_key_here
-      - ENCRYPTION_KEY=your_64_char_hex_key_here
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}
+      - JWT_SECRET_KEY=${JWT_SECRET}
+      - ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
       - JWT_ALGORITHM=HS256
       - RESEND_API_KEY=your_resend_api_key_here
       - PASSWORD_RESET_URL=http://localhost:5173/reset-password
@@ -160,6 +160,19 @@ services:
     depends_on: *celery_dependencies
     volumes: *application_volume
     command: celery -A worker.celery_app beat --loglevel=info --schedule=/tmp/linkeasy-celerybeat-schedule
+
+  # Production Vite build served by Nginx. API and upload requests are
+  # reverse-proxied to the internal FastAPI service by frontend/nginx.conf.
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: /api/v1
+    container_name: linkeflow-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
 
 volumes:
   postgres_data:

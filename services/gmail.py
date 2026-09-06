@@ -28,6 +28,7 @@ import json
 import logging
 import re
 import time
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header
@@ -63,6 +64,7 @@ GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1"
 EXPIRY_SKEW = timedelta(minutes=5)
 DEFAULT_TIMEOUT = 30.0
 SEND_TIMEOUT = 60.0
+TRANSPORT_RETRIES = 2
 
 
 class GmailApiError(Exception):
@@ -449,15 +451,26 @@ class GmailService:
             logger.warning("Google token revocation failed: %s", exc)
 
     async def _token_post(self, params: dict, prefix: str) -> dict:
-        try:
-            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-                response = await client.post(
-                    GOOGLE_TOKEN_URL,
-                    data=params,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                )
-        except httpx.HTTPError as exc:
-            raise GmailApiError(f"{prefix}: {exc}") from exc
+        response = None
+        last_exc = None
+        for attempt in range(TRANSPORT_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, trust_env=False) as client:
+                    response = await client.post(
+                        GOOGLE_TOKEN_URL,
+                        data=params,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    )
+                break
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt < TRANSPORT_RETRIES:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        if response is None:
+            detail = str(last_exc).strip() if last_exc else "<empty transport error>"
+            raise GmailApiError(
+                f"{prefix}: {type(last_exc).__name__ if last_exc else 'HTTPError'}: {detail}"
+            ) from last_exc
         try:
             data = response.json()
         except json.JSONDecodeError:
@@ -596,17 +609,30 @@ class GmailService:
     ) -> dict:
         url = f"{GMAIL_API_BASE}{path}"
         headers = {"Authorization": f"Bearer {access_token}"}
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.request(
-                    method,
-                    url,
-                    params=params,
-                    headers=headers,
-                    json=json_body if json_body is not None else None,
-                )
-        except httpx.HTTPError as exc:
-            raise GmailApiError(f"Gmail API request failed: {exc}", category="upstream") from exc
+        response = None
+        last_exc = None
+        for attempt in range(TRANSPORT_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                    response = await client.request(
+                        method,
+                        url,
+                        params=params,
+                        headers=headers,
+                        json=json_body if json_body is not None else None,
+                    )
+                break
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt < TRANSPORT_RETRIES:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        if response is None:
+            detail = str(last_exc).strip() if last_exc else "<empty transport error>"
+            raise GmailApiError(
+                f"Gmail API request failed ({type(last_exc).__name__ if last_exc else 'HTTPError'}): "
+                f"{detail} [method={method} url={url}]",
+                category="upstream",
+            ) from last_exc
 
         if response.status_code == 204:
             return {}
