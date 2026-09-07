@@ -11,9 +11,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
-import { linkedinLiveApi } from '../api/endpoints';
+import { linkedinApi, linkedinLiveApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
+import AccountPicker from '../components/accounts/AccountPicker';
+import { useStoredAccountId } from '../hooks/useStoredAccountId';
 
 const STATUS_POLL_MS   = 5_000;
 const CHATS_POLL_MS    = 8_000;
@@ -37,6 +39,25 @@ export default function LinkedInLiveChatPage() {
   const [status, setStatus] = useState(null);
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
+
+  // Multi-profile: pick which LinkedIn profile live chat runs from.
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAccountId, setSelectedAccountId] = useStoredAccountId('linkedin-live:active-account');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await linkedinApi.listAccounts();
+        if (!cancelled) setAccounts(Array.isArray(data) ? data : []);
+      } catch {
+        if (!cancelled) setAccounts([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [chats, setChats] = useState([]);
   const [filter, setFilter] = useState('');
@@ -182,7 +203,7 @@ export default function LinkedInLiveChatPage() {
     freezeStatusRef.current = true;
     statusRequestRef.current += 1;
     try {
-      const { data } = await linkedinLiveApi.start();
+      const { data } = await linkedinLiveApi.start(selectedAccountId || null);
       setStatus(data);
       const serverChatId = data.active_chat_id || null;
       activeChatRef.current = serverChatId;
@@ -306,6 +327,18 @@ export default function LinkedInLiveChatPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {accounts.length > 1 && (
+            <AccountPicker
+              id="linkedin-live-account"
+              hideLabel
+              accounts={accounts}
+              value={selectedAccountId}
+              onChange={setSelectedAccountId}
+              getKey={(a) => a.id}
+              getLabel={(a) => a.label || a.linkedin_email}
+              placeholder="Profile"
+            />
+          )}
           <StatusBadge status={statusInfo} />
           {!isRunning ? (
             <button

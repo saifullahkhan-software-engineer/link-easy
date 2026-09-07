@@ -4,17 +4,23 @@ import toast from 'react-hot-toast';
 import { gmailApi } from '../../api/gmail';
 import { getErrorMessage } from '../../api/client';
 import { Spinner } from '../../components/Spinner';
+import AccountPicker from '../../components/accounts/AccountPicker';
+import { useStoredAccountId } from '../../hooks/useStoredAccountId';
 import ComposeForm from '../../components/gmail/ComposeForm';
 import { GmailMark } from '../../components/gmail/GmailBits';
 
 /**
  * Standalone compose page (/app/gmail/compose). Replying inside a
  * conversation uses the same ComposeForm in a modal on the inbox page.
+ *
+ * Sending mailbox is chosen here when the user has connected several — the
+ * picker mirrors the inbox's account selector.
  */
 export default function GmailComposePage() {
   const navigate = useNavigate();
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [accountId, setAccountId] = useStoredAccountId('gmail:active-account');
 
   useEffect(() => {
     let active = true;
@@ -59,6 +65,10 @@ export default function GmailComposePage() {
     );
   }
 
+  const mailboxes = Array.isArray(status.accounts) ? status.accounts : [];
+  const activeEmail =
+    (accountId && mailboxes.find((m) => m.id === accountId)?.account_email) || status.account_email;
+
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-4 flex items-center gap-3">
@@ -68,13 +78,28 @@ export default function GmailComposePage() {
         <div>
           <h1 className="text-2xl font-bold text-zinc-50">Compose</h1>
           <p className="text-sm text-zinc-400">
-            Sending as <span className="text-zinc-200">{status.account_email}</span>
+            Sending as <span className="text-zinc-200">{activeEmail}</span>
           </p>
         </div>
       </div>
 
+      {mailboxes.length > 1 && (
+        <div className="mb-4 w-72">
+          <AccountPicker
+            id="gmail-compose-account"
+            accounts={mailboxes}
+            value={accountId}
+            onChange={setAccountId}
+            getKey={(a) => a.id}
+            getLabel={(a) => a.account_email}
+            placeholder="Choose mailbox"
+          />
+        </div>
+      )}
+
       <div className="card p-6">
         <ComposeForm
+          accountId={accountId || null}
           onSent={() => navigate('/app/gmail')}
           onCancel={() => navigate('/app/gmail')}
         />

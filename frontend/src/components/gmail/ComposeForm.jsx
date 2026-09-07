@@ -13,7 +13,7 @@ const MAX_BODY = 100_000;
  * Only To is required; From is always the connected mailbox (the backend
  * refuses anything else — Gmail only sends as the authenticated user).
  */
-export default function ComposeForm({ initial = {}, onSent, onCancel, submitLabel = 'Send' }) {
+export default function ComposeForm({ initial = {}, onSent, onCancel, submitLabel = 'Send', accountId = null }) {
   const [fields, setFields] = useState({
     to: initial.to || '',
     cc: initial.cc || '',
@@ -39,13 +39,16 @@ export default function ComposeForm({ initial = {}, onSent, onCancel, submitLabe
     }
     setSending(true);
     try {
-      const { data } = await gmailApi.send({
-        to: fields.to.trim(),
-        cc: fields.cc.trim(),
-        bcc: fields.bcc.trim(),
-        subject: fields.subject.trim(),
-        body: fields.body,
-      });
+      const { data } = await gmailApi.send(
+        {
+          to: fields.to.trim(),
+          cc: fields.cc.trim(),
+          bcc: fields.bcc.trim(),
+          subject: fields.subject.trim(),
+          body: fields.body,
+        },
+        accountId,
+      );
       toast.success(`Message sent to ${data.to || 'recipient'}`);
       onSent?.(data);
     } catch (err) {

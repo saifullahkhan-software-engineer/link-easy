@@ -110,14 +110,22 @@ export const socialSchedulerApi = {
 
   // Platform connections (OAuth)
   listPlatforms: () => api.get(`${BASE}/platforms`),
-  // Playlists owned by the connected YouTube channel, for the upload editor's
-  // "add this Short to…" picker. 409 = YouTube not connected, 502 = Google
-  // refused the call (an expired token that could not be renewed, or a
-  // connection made before the playlist permission was requested) — both are
-  // shown inline; scheduling still works without them.
-  listYouTubePlaylists: () => api.get(`${BASE}/platforms/youtube/playlists`),
+  // Playlists owned by a YouTube channel, for the upload editor's
+  // "add this Short to…" picker. With several channels connected, pass the
+  // connection id of the channel the Short will be published to; without it
+  // the first-connected channel is used. 409 = YouTube not connected, 502 =
+  // Google refused the call — both are shown inline; scheduling works without.
+  listYouTubePlaylists: (connectionId = null) =>
+    api.get(`${BASE}/platforms/youtube/playlists`, {
+      params: connectionId ? { connection_id: connectionId } : {},
+    }),
   getAuthUrl: (platform) => api.get(`${BASE}/platforms/${platform}/auth-url`),
-  disconnectPlatform: (platform) => api.delete(`${BASE}/platforms/${platform}`),
+  // Disconnect one account of a platform (pass its connection id) or the whole
+  // platform when no id is given.
+  disconnectPlatform: (platform, connectionId = null) =>
+    api.delete(`${BASE}/platforms/${platform}`, {
+      params: connectionId ? { connection_id: connectionId } : {},
+    }),
 
   // Platform app credentials — operator-set DB overrides of the environment
   // pair (admin-gated on the backend; secrets are write-only).

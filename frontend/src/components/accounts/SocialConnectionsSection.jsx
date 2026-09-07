@@ -190,11 +190,12 @@ export default function SocialConnectionsSection() {
   };
 
   const disconnect = async () => {
-    const platform = confirmDisconnect;
-    if (!platform) return;
+    const target = confirmDisconnect;
+    if (!target?.platform) return;
+    const { platform, accountId } = target;
     setPending(platform);
     try {
-      const { data } = await socialSchedulerApi.disconnectPlatform(platform);
+      const { data } = await socialSchedulerApi.disconnectPlatform(platform, accountId);
       toast.success(data?.message || 'Disconnected');
       setConfirmDisconnect(null);
       await load();
@@ -314,24 +315,46 @@ export default function SocialConnectionsSection() {
               {p.id === 'facebook' && <p className="mt-1 text-xs text-zinc-500">Publishing & Messenger Chat</p>}
               {p.id === 'instagram' && <p className="mt-1 text-xs text-zinc-500">Publishing & Instagram Chat</p>}
               {conn.connected ? (
-                <div className="mt-1 space-y-0.5 text-sm">
-                  <p className="truncate text-zinc-300">{conn.account_name || conn.account_id || 'Connected account'}</p>
-                  <p className="text-xs text-zinc-500">
-                    Connected {formatDateTime(conn.connected_at)}
-                    {conn.expires_at && (
-                      <>
-                        {' · '}
-                        {new Date(conn.expires_at) < new Date() ? 'expired' : 'token valid until'}{' '}
-                        {formatDateTime(conn.expires_at)}
-                      </>
-                    )}
+                <div className="mt-1 space-y-2">
+                  <p className="text-xs font-medium text-zinc-400">
+                    {conn.accounts.length} {conn.accounts.length === 1 ? 'account' : 'accounts'} connected
                   </p>
-                  {conn.reconnect_required && (
-                    <p className="text-xs text-amber-300">
-                      The access token has expired and cannot be renewed automatically. Reconnect before your next
-                      scheduled post.
-                    </p>
-                  )}
+                  <ul className="max-h-40 space-y-1.5 overflow-y-auto pr-1">
+                    {conn.accounts.map((acc) => (
+                      <li
+                        key={acc.id}
+                        className="flex items-center justify-between gap-2 rounded-lg border border-surface-700 bg-surface-800/60 px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate text-sm text-zinc-100">
+                            {acc.account_name || acc.account_id || 'Account'}
+                          </p>
+                          {acc.reconnect_required ? (
+                            <p className="text-[11px] text-amber-300">Reconnect needed</p>
+                          ) : (
+                            <p className="text-[11px] text-zinc-500">
+                              Connected {formatDateTime(acc.connected_at)}
+                            </p>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setConfirmDisconnect({
+                              platform: p.id,
+                              accountId: acc.id,
+                              name: acc.account_name || acc.account_id || 'this account',
+                            })
+                          }
+                          disabled={Boolean(pending)}
+                          data-testid={`disconnect-account-${acc.id}`}
+                          className="shrink-0 rounded-md border border-surface-600 px-2 py-1 text-[11px] text-zinc-300 transition hover:border-red-500/50 hover:text-red-200 disabled:opacity-50"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               ) : (
                 <p className="mt-1 text-sm text-zinc-400">{REQUIREMENTS[p.id]}</p>
@@ -362,14 +385,15 @@ export default function SocialConnectionsSection() {
                   <div className="flex items-stretch gap-2">
                     <button className="btn-secondary min-h-11 flex-1" onClick={() => connect(p.id)} disabled={Boolean(pending)}>
                       {busy && <Spinner />}
-                      Reconnect
+                      Connect another account
                     </button>
                     <button
                       className="btn-danger min-h-11 flex-1"
-                      onClick={() => setConfirmDisconnect(p.id)}
+                      onClick={() => setConfirmDisconnect({ platform: p.id, accountId: null, name: p.label })}
                       disabled={Boolean(pending)}
+                      data-testid={`disconnect-platform-${p.id}`}
                     >
-                      Disconnect
+                      {conn.accounts.length > 1 ? 'Disconnect all' : 'Disconnect'}
                     </button>
                   </div>
                 ) : (
@@ -576,11 +600,25 @@ export default function SocialConnectionsSection() {
       <Modal
         open={Boolean(confirmDisconnect)}
         onClose={() => setConfirmDisconnect(null)}
-        title={`Disconnect ${PLATFORMS.find((p) => p.id === confirmDisconnect)?.label || ''}?`}
+        title={
+          confirmDisconnect?.accountId
+            ? `Remove ${confirmDisconnect.name}?`
+            : `Disconnect ${PLATFORMS.find((p) => p.id === confirmDisconnect?.platform)?.label || ''}?`
+        }
       >
         <p className="text-sm text-zinc-300">
-          The stored tokens are deleted right away. Posts already scheduled for this platform will fail until you
-          connect it again. Its inbox will also be unavailable until you reconnect.
+          {confirmDisconnect?.accountId ? (
+            <>
+              This account&apos;s stored tokens are deleted right away. Scheduled posts and the inbox that use it stop
+              working until you reconnect it. Your other {PLATFORMS.find((p) => p.id === confirmDisconnect?.platform)?.label || 'account'} connections are
+              untouched.
+            </>
+          ) : (
+            <>
+              The stored tokens are deleted right away. Posts already scheduled for this platform will fail until you
+              connect it again. Its inbox will also be unavailable until you reconnect.
+            </>
+          )}
         </p>
         <div className="mt-6 flex justify-end gap-3">
           <button className="btn-secondary" onClick={() => setConfirmDisconnect(null)} disabled={Boolean(pending)}>
@@ -588,7 +626,7 @@ export default function SocialConnectionsSection() {
           </button>
           <button className="btn-danger" onClick={disconnect} disabled={Boolean(pending)}>
             {pending && <Spinner />}
-            Disconnect
+            {confirmDisconnect?.accountId ? 'Remove account' : 'Disconnect'}
           </button>
         </div>
       </Modal>

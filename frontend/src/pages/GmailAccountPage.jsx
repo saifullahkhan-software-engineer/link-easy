@@ -55,10 +55,12 @@ export default function GmailAccountPage() {
   };
 
   const disconnect = async () => {
+    const target = confirmDisconnect;
+    if (!target) return;
     setBusy(true);
     try {
-      await gmailApi.disconnect();
-      setConfirmDisconnect(false);
+      await gmailApi.disconnect(target.accountId || null);
+      setConfirmDisconnect(null);
       toast.success('Gmail disconnected');
       await load();
     } catch (err) {
@@ -95,12 +97,35 @@ export default function GmailAccountPage() {
             </div>
             {status?.connected ? (
               <>
-                <p className="mt-3 text-sm text-zinc-400">Your mailbox is connected. Open Gmail to read messages, check for new mail and send replies.</p>
-                {status.reconnect_required && <p className="mt-3 text-sm text-amber-300">Google access needs to be renewed. Reconnect before using your inbox.</p>}
+                <p className="mt-3 text-sm text-zinc-400">
+                  Your mailbox{status.accounts?.length > 1 ? 'es are' : ' is'} connected. Open Gmail to read messages, check for new mail and send replies.
+                </p>
+                {(status.accounts || []).some((m) => m.reconnect_required) && (
+                  <p className="mt-3 text-sm text-amber-300">
+                    One or more mailboxes need Google access renewed. Connect them again to keep the inbox working.
+                  </p>
+                )}
+                <ul className="mt-4 divide-y divide-surface-700 rounded-lg border border-surface-700">
+                  {(status.accounts && status.accounts.length ? status.accounts : [{ account_email: status.account_email, id: null }]).map((mb) => (
+                    <li key={mb.id || mb.account_email} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                      <span className="min-w-0">
+                        <span className="block break-all text-sm text-zinc-100">{mb.account_email}</span>
+                        {mb.reconnect_required && <span className="text-[11px] text-amber-300">Reconnect needed</span>}
+                      </span>
+                      <button
+                        type="button"
+                        className="shrink-0 rounded-md border border-surface-600 px-2.5 py-1 text-xs text-zinc-300 transition hover:border-red-500/50 hover:text-red-200 disabled:opacity-50"
+                        onClick={() => setConfirmDisconnect({ accountId: mb.id || null, email: mb.account_email })}
+                        disabled={busy}
+                      >
+                        Disconnect
+                      </button>
+                    </li>
+                  ))}
+                </ul>
                 <div className="mt-6 flex flex-wrap gap-3 border-t border-surface-700 pt-5">
                   <Link to="/app/gmail" className="btn-primary">Open Gmail inbox</Link>
-                  <button type="button" className="btn-secondary" onClick={connect} disabled={busy || !status.configured}>{busy && <Spinner />}Reconnect Gmail</button>
-                  <button type="button" className="btn-danger" onClick={() => setConfirmDisconnect(true)} disabled={busy}>Disconnect</button>
+                  <button type="button" className="btn-secondary" onClick={connect} disabled={busy || !status.configured}>{busy && <Spinner />}Connect another mailbox</button>
                 </div>
               </>
             ) : status?.configured ? (
@@ -122,10 +147,18 @@ export default function GmailAccountPage() {
           </>
         )}
       </section>
-      <Modal open={confirmDisconnect} title="Disconnect Gmail?" onClose={() => !busy && setConfirmDisconnect(false)}>
-        <p className="text-sm text-zinc-400">LinkEasy will stop accessing this mailbox and remove the stored connection. Messages stay in Gmail untouched.</p>
+      <Modal open={Boolean(confirmDisconnect)} title={confirmDisconnect?.email ? `Disconnect ${confirmDisconnect.email}?` : 'Disconnect Gmail?'} onClose={() => !busy && setConfirmDisconnect(null)}>
+        <p className="text-sm text-zinc-400">
+          LinkEasy will stop accessing{' '}
+          {confirmDisconnect?.email ? (
+            <span className="font-medium text-zinc-200">{confirmDisconnect.email}</span>
+          ) : (
+            'this mailbox'
+          )}{' '}
+          and remove the stored connection. Messages stay in Gmail untouched. Your other connected mailboxes are unaffected.
+        </p>
         <div className="mt-5 flex justify-end gap-3">
-          <button type="button" className="btn-secondary" onClick={() => setConfirmDisconnect(false)} disabled={busy}>Keep connected</button>
+          <button type="button" className="btn-secondary" onClick={() => setConfirmDisconnect(null)} disabled={busy}>Keep connected</button>
           <button type="button" className="btn-danger" onClick={disconnect} disabled={busy}>{busy && <Spinner />}Disconnect</button>
         </div>
       </Modal>
