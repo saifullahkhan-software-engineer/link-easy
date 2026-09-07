@@ -131,6 +131,9 @@ class SocialPost(Base):
         server_default=SocialMediaKind.VIDEO.value,
     )
     scheduled_at = Column(DateTime(timezone=True), nullable=False)
+    # native = provider schedules it after immediate setup; linkeasy = the
+    # Celery/Redis worker publishes at scheduled_at.
+    scheduling_method = Column(String, nullable=False, default="linkeasy", server_default="linkeasy")
     status = Column(
         String,
         nullable=False,
@@ -157,6 +160,10 @@ class SocialPost(Base):
     # anywhere. YouTube-only for now: the other three platforms have no
     # equivalent collection a video can be filed into through their APIs.
     youtube_playlist_ids = Column(JSON, nullable=False, default=list, server_default="[]")
+    # Playlist IDs grouped by the selected YouTube connection ID. This keeps
+    # playlists from channel A from being sent to channel B when a post targets
+    # multiple channels.
+    youtube_playlists_by_account = Column(JSON, nullable=False, default=dict, server_default="{}")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

@@ -165,6 +165,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
   const [submitting, setSubmitting] = useState(false);
   const [showPerPlatform, setShowPerPlatform] = useState(false);
   const [mode, setMode] = useState('schedule');
+  const [schedulingMethod, setSchedulingMethod] = useState('native');
   const [sourceText, setSourceText] = useState('');
   const [aiExtracting, setAiExtracting] = useState(false);
   const [form, setForm] = useState({
@@ -180,6 +181,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
     // YouTube playlists the Short is filed into once the upload succeeds.
     // Ignored (and sent empty) unless YouTube is one of the targets.
     youtube_playlist_ids: [],
+    youtube_playlists_by_account: {},
     // Facebook Groups to share the Reel to by hand. Meta removed the Groups
     // API, so these are a post-publish checklist, never an upload target.
     facebook_groups: [],
@@ -220,7 +222,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
         const defaults = {};
         for (const p of data || []) {
           if (p.connected && Array.isArray(p.accounts) && p.accounts.length) {
-            defaults[p.platform] = p.accounts[0].id;
+            defaults[p.platform] = p.platform === 'youtube' ? [p.accounts[0].id] : p.accounts[0].id;
           }
         }
         setSelectedAccounts((prev) => ({ ...defaults, ...prev }));
@@ -228,8 +230,18 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
       .catch(() => setConnections([]));
   }, []);
 
+  const isImage = isPost && mediaType === 'image';
   const youtubeSelected = form.platforms.includes('youtube');
-  const youtubeConnected = Boolean(connections?.find((c) => c.platform === 'youtube')?.connected);
+  const nativeSchedulingAvailable = !isImage && form.platforms.length === 1 && youtubeSelected;
+  const youtubeConnection = connections?.find((c) => c.platform === 'youtube');
+  const youtubeConnected = Boolean(youtubeConnection?.connected);
+  const selectedYoutubeAccountIds = Array.isArray(selectedAccounts.youtube)
+    ? selectedAccounts.youtube
+    : selectedAccounts.youtube ? [selectedAccounts.youtube] : [];
+
+  useEffect(() => {
+    if (!nativeSchedulingAvailable && schedulingMethod === 'native') setSchedulingMethod('linkeasy');
+  }, [nativeSchedulingAvailable, schedulingMethod]);
   // Playlists are fetched only once YouTube is actually a target, so an
   // Instagram-only upload never pays for the round trip and never sees the
   // picker. One fetch per mount unless the retry button asks for another.
@@ -238,11 +250,18 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
     if (!youtubeSelected || !youtubeConnected || playlistFetchStarted.current) return;
     playlistFetchStarted.current = true;
     setPlaylistState({ status: 'loading', items: null, error: '' });
-    socialSchedulerApi
-      .listYouTubePlaylists(selectedAccounts.youtube || null)
-      .then(({ data }) => {
-        setPlaylistState({ status: 'ready', items: data?.playlists || [], error: '' });
-      })
+    const accounts = (youtubeConnection?.accounts || []).filter((account) =>
+      selectedYoutubeAccountIds.includes(account.id),
+    );
+    Promise.all(accounts.map(async (account) => {
+      const { data } = await socialSchedulerApi.listYouTubePlaylists(account.id);
+      return {
+        accountId: account.id,
+        accountName: account.account_name || account.account_id || 'YouTube channel',
+        playlists: data?.playlists || [],
+      };
+    }))
+      .then((items) => setPlaylistState({ status: 'ready', items, error: '' }))
       .catch((err) => {
         // Shown inline, never as a toast: publishing without playlists is a
         // perfectly normal outcome, so this must not look like a failed upload.
@@ -252,7 +271,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
           error: getErrorMessage(err, 'Could not load your YouTube playlists'),
         });
       });
-  }, [youtubeSelected, youtubeConnected, playlistReload, selectedAccounts.youtube]);
+  }, [youtubeSelected, youtubeConnected, playlistReload, selectedAccounts.youtube, connections]);
 
   const reloadPlaylists = () => {
     playlistFetchStarted.current = false;
@@ -260,13 +279,19 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
     setPlaylistReload((count) => count + 1);
   };
 
-  const togglePlaylist = (playlistId) =>
-    setForm((f) => ({
-      ...f,
-      youtube_playlist_ids: f.youtube_playlist_ids.includes(playlistId)
-        ? f.youtube_playlist_ids.filter((id) => id !== playlistId)
-        : [...f.youtube_playlist_ids, playlistId],
-    }));
+  const togglePlaylist = (accountId, playlistId) =>
+    setForm((f) => {
+      const current = f.youtube_playlists_by_account[accountId] || [];
+      const next = current.includes(playlistId)
+        ? current.filter((id) => id !== playlistId)
+        : [...current, playlistId];
+      const byAccount = { ...f.youtube_playlists_by_account, [accountId]: next };
+      return {
+        ...f,
+        youtube_playlists_by_account: byAccount,
+        youtube_playlist_ids: [...new Set(Object.values(byAccount).flat())],
+      };
+    });
 
   // Saved groups load as soon as the page mounts: the picker is shown on every
   // upload, because sharing a published video to groups is a manual checklist
@@ -473,6 +498,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
         platforms: form.platforms,
         scheduled_at: when,
         publish_now: mode === 'direct',
+        scheduling_method: mode === 'schedule' ? schedulingMethod : 'linkeasy',
         content_kind: kind,
         // The API still derives the authoritative value from the upload
         // extension, but sending the UI choice makes stale-client/mismatched
@@ -490,6 +516,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
           form.platforms.filter((p) => selectedAccounts[p]).map((p) => [p, selectedAccounts[p]]),
         ),
         youtube_playlist_ids: youtubeSelected ? form.youtube_playlist_ids : [],
+        youtube_playlists_by_account: youtubeSelected ? form.youtube_playlists_by_account : {},
         // Groups are a manual share checklist, valid for any upload — even
         // when Facebook is not one of the publish targets.
         facebook_groups: form.facebook_groups,
@@ -505,7 +532,6 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
 
   const connectionFor = (id) => connections?.find((c) => c.platform === id);
   const unconnectedSelected = form.platforms.filter((id) => connections && !connectionFor(id)?.connected);
-  const isImage = isPost && mediaType === 'image';
   const accept = isImage ? ACCEPT_IMAGE : ACCEPT_VIDEO;
   const imageOnlyPlatforms = form.platforms.filter((id) => id === 'youtube' || id === 'tiktok');
   const copyMeta = COPY_META[isPost ? 'post' : 'shorts'];
@@ -672,7 +698,9 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
                   <span className="min-w-0">
                     <span className="block text-sm font-medium text-zinc-100">{platformLabel(p.id, kind)}</span>
                     <span className={`block text-xs ${conn?.connected ? 'text-emerald-400' : 'text-zinc-500'}`}>
-                      {connections === null ? '…' : conn?.connected ? conn.account_name || 'Connected' : 'Not connected'}
+                      {connections === null ? '…' : conn?.connected
+                        ? (conn.accounts || []).map((account) => account.account_name || account.account_id).filter(Boolean).join(', ') || 'Connected'
+                        : 'Not connected'}
                     </span>
                   </span>
                 </button>
@@ -690,6 +718,39 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
                 const conn = connectionFor(id);
                 const accounts = conn?.accounts || [];
                 if (accounts.length <= 1) return null;
+                if (id === 'youtube') {
+                  return (
+                    <div key={id} className="flex flex-wrap items-start gap-3">
+                      <PlatformIcon platform={id} className="h-5 w-5 text-zinc-300" />
+                      <div className="min-w-[9rem] flex-1">
+                        <p className="text-sm text-zinc-300">YouTube channels</p>
+                        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                          {accounts.map((account) => {
+                            const checked = selectedYoutubeAccountIds.includes(account.id);
+                            return (
+                              <label key={account.id} className="flex cursor-pointer items-center gap-2 rounded-md border border-surface-600 px-3 py-2 text-sm text-zinc-200">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => {
+                                    const next = checked
+                                      ? selectedYoutubeAccountIds.filter((value) => value !== account.id)
+                                      : [...selectedYoutubeAccountIds, account.id];
+                                    playlistFetchStarted.current = false;
+                                    setPlaylistState({ status: 'idle', items: null, error: '' });
+                                    setSelectedAccounts((prev) => ({ ...prev, youtube: next }));
+                                  }}
+                                  className="h-4 w-4 rounded border-surface-500 bg-surface-700 text-accent-500"
+                                />
+                                <span className="truncate">{account.account_name || account.account_id || 'YouTube channel'}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
                 return (
                   <div key={id} className="flex flex-wrap items-center gap-3">
                     <PlatformIcon platform={id} className="h-5 w-5 text-zinc-300" />
@@ -772,34 +833,23 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
             )}
             {youtubeConnected && playlistState.status === 'ready' && playlistState.items?.length > 0 && (
               <div className="mt-4 max-h-64 space-y-2 overflow-y-auto pr-1">
-                {playlistState.items.map((playlist) => {
-                  const checked = form.youtube_playlist_ids.includes(playlist.id);
-                  return (
-                    <label
-                      key={playlist.id}
-                      className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 transition ${
-                        checked
-                          ? 'border-accent-500/60 bg-accent-500/10'
-                          : 'border-surface-600 bg-surface-800 hover:border-surface-500'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => togglePlaylist(playlist.id)}
-                        data-testid={`playlist-${playlist.id}`}
-                        className="h-4 w-4 rounded border-surface-500 bg-surface-700 text-accent-500 focus:ring-accent-500/40"
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm text-zinc-100">{playlist.title}</span>
-                        <span className="block truncate text-xs text-zinc-500">
-                          {playlist.item_count} {playlist.item_count === 1 ? 'video' : 'videos'}
-                          {playlist.privacy && playlist.privacy !== 'public' ? ` · ${playlist.privacy}` : ''}
-                        </span>
-                      </span>
-                    </label>
-                  );
-                })}
+                {playlistState.items.map((account) => (
+                  <div key={account.accountId} className="space-y-2">
+                    <p className="text-xs font-semibold text-accent-300">{account.accountName}</p>
+                    {account.playlists.map((playlist) => {
+                      const checked = (form.youtube_playlists_by_account[account.accountId] || []).includes(playlist.id);
+                      return (
+                        <label key={`${account.accountId}-${playlist.id}`} className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 transition ${checked ? 'border-accent-500/60 bg-accent-500/10' : 'border-surface-600 bg-surface-800 hover:border-surface-500'}`}>
+                          <input type="checkbox" checked={checked} onChange={() => togglePlaylist(account.accountId, playlist.id)} data-testid={`playlist-${account.accountId}-${playlist.id}`} className="h-4 w-4 rounded border-surface-500 bg-surface-700 text-accent-500 focus:ring-accent-500/40" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm text-zinc-100">{playlist.title}</span>
+                            <span className="block truncate text-xs text-zinc-500">{playlist.item_count} {playlist.item_count === 1 ? 'video' : 'videos'}{playlist.privacy && playlist.privacy !== 'public' ? ` · ${playlist.privacy}` : ''}</span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                ))}
               </div>
             )}
             </section>
@@ -1066,11 +1116,39 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
             </button>
           </div>
           {mode === 'schedule' && (
+            <>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2" role="group" aria-label="Scheduling method">
+              <button
+                type="button"
+                disabled={isImage || form.platforms.length !== 1 || !youtubeSelected}
+                onClick={() => setSchedulingMethod('native')}
+                aria-pressed={schedulingMethod === 'native'}
+                className={`rounded-xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${schedulingMethod === 'native' ? 'border-accent-500/60 bg-accent-500/10 ring-1 ring-inset ring-accent-500/30' : 'border-surface-600 bg-surface-800 hover:border-surface-500'}`}
+              >
+                <span className="block text-sm font-semibold text-zinc-100">Native (recommended)</span>
+                <span className="mt-1 block text-xs leading-5 text-zinc-500">YouTube stores the scheduled publication. LinkEasy uploads the video now as private.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSchedulingMethod('linkeasy')}
+                aria-pressed={schedulingMethod === 'linkeasy'}
+                className={`rounded-xl border p-4 text-left transition ${schedulingMethod === 'linkeasy' ? 'border-accent-500/60 bg-accent-500/10 ring-1 ring-inset ring-accent-500/30' : 'border-surface-600 bg-surface-800 hover:border-surface-500'}`}
+              >
+                <span className="block text-sm font-semibold text-zinc-100">LinkEasy Scheduler</span>
+                <span className="mt-1 block text-xs leading-5 text-zinc-500">Keep the media temporarily and let the worker publish at the scheduled time.</span>
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-zinc-500">
+              {form.platforms.length === 1 && youtubeSelected && !isImage
+                ? 'Native scheduling is available for YouTube-only uploads.'
+                : 'Native scheduling is available only when YouTube is the sole selected platform; this upload will use LinkEasy Scheduler.'}
+            </p>
             <div className="mt-4 max-w-xs">
               <label className="mb-1.5 block text-sm font-medium text-zinc-300" htmlFor="sp-when">Publish at</label>
               <input id="sp-when" type="datetime-local" className="input-field" value={form.scheduled_at} onChange={update('scheduled_at')} required />
               <p className="mt-1 text-xs text-zinc-500">Your local time ({Intl.DateTimeFormat().resolvedOptions().timeZone}). The worker checks every minute.</p>
             </div>
+            </>
           )}
         </section>
 

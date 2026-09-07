@@ -85,12 +85,22 @@ class YouTubeService:
             }
         }
 
-    def _flow(self, code_verifier: Optional[str] = None):
+    def _flow(
+        self,
+        code_verifier: Optional[str] = None,
+        *,
+        scopes: Optional[list[str]] = None,
+        validate_scopes: bool = True,
+    ):
         from google_auth_oauthlib.flow import Flow
 
         return Flow.from_client_config(
             self._client_config(),
-            scopes=self.SCOPES,
+            # The authorization request needs the full application scope set.
+            # During the callback, scope validation is disabled because Google
+            # may return an equivalent granted set in a different order or
+            # with previously granted scopes merged in.
+            scopes=self.SCOPES if scopes is None else scopes,
             redirect_uri=self.redirect_uri,
             code_verifier=code_verifier,
             # Never let the library generate its own verifier: the verifier
@@ -114,8 +124,11 @@ class YouTubeService:
             code_verifier = generate_code_verifier()
         auth_url, _ = self._flow(code_verifier).authorization_url(
             access_type="offline",
-            prompt="consent",
-            include_granted_scopes="true",
+            # A second YouTube channel may be under another Google account.
+            # Always let the user choose the account and do not merge the
+            # previous account's grant into this authorization.
+            prompt="select_account consent",
+            include_granted_scopes="false",
             state=state,
         )
         return auth_url
@@ -134,7 +147,11 @@ class YouTubeService:
             )
 
         def _exchange():
-            flow = self._flow(code_verifier)
+            # Do not compare the callback response with an empty or stale
+            # requested-scope list. Google returns the actual granted scopes
+            # in the token response, and that set is authoritative.
+            flow = self._flow(code_verifier, validate_scopes=False)
+            flow.oauth2session.scope = None
             flow.fetch_token(code=code)
             return flow.credentials
 
@@ -262,6 +279,7 @@ class YouTubeService:
         *,
         as_short: bool = True,
         thumbnail_path: Optional[str] = None,
+        publish_at: Optional[datetime] = None,
     ) -> Dict[str, str]:
         """Upload a video to YouTube.
 
@@ -296,8 +314,9 @@ class YouTubeService:
                 "defaultLanguage": "en",
             },
             "status": {
-                "privacyStatus": "public",
+                "privacyStatus": "private" if publish_at else "public",
                 "selfDeclaredMadeForKids": False,
+                **({"publishAt": publish_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")} if publish_at else {}),
             },
         }
 

@@ -23,6 +23,7 @@ from models.social_scheduler import SocialContentKind, SocialMediaKind, SocialPl
 PLATFORM_VALUES = tuple(p.value for p in SocialPlatform)
 CONTENT_KIND_VALUES = tuple(k.value for k in SocialContentKind)
 MEDIA_KIND_VALUES = tuple(k.value for k in SocialMediaKind)
+SCHEDULING_METHOD_VALUES = ("linkeasy", "native")
 #: Playlists one Short may be filed into. A Short is one video; more than a
 #: handful of collections is a mistake, not a feature.
 MAX_PLAYLISTS_PER_POST = 10
@@ -74,8 +75,8 @@ def _validate_playlist_ids(values: list[str]) -> list[str]:
 
 
 def _clean_platform_accounts(
-    values: dict[str, str], platforms: list[str]
-) -> dict[str, str]:
+    values: dict[str, Any], platforms: list[str]
+) -> dict[str, list[str]]:
     """Normalise the upload editor's account picks ({platform: connection id}).
 
     Rules:
@@ -88,16 +89,23 @@ def _clean_platform_accounts(
     Ownership of every id (does this user really control that account?) is
     checked in the route, not here — the schema sees no database.
     """
-    cleaned: dict[str, str] = {}
+    cleaned: dict[str, list[str]] = {}
     selected = set(platforms or [])
     for raw_platform, raw_id in (values or {}).items():
         platform = str(raw_platform).strip().lower()
         if platform not in selected:
             continue
-        connection_id = str(raw_id or "").strip()
-        if not connection_id or len(connection_id) > 100:
+        raw_ids = raw_id if isinstance(raw_id, list) else [raw_id]
+        connection_ids: list[str] = []
+        for raw_connection_id in raw_ids:
+            connection_id = str(raw_connection_id or "").strip()
+            if not connection_id or len(connection_id) > 100:
+                raise ValueError(f"Invalid account selection for {platform}")
+            if connection_id not in connection_ids:
+                connection_ids.append(connection_id)
+        if not connection_ids:
             raise ValueError(f"Invalid account selection for {platform}")
-        cleaned[platform] = connection_id
+        cleaned[platform] = connection_ids
     return cleaned
 
 
@@ -176,6 +184,7 @@ class PostCreate(BaseModel):
     # A direct upload does not need a client-provided time; the API stamps it
     # when the post is committed. Scheduled posts must provide one.
     scheduled_at: Optional[datetime] = None
+    scheduling_method: str = "linkeasy"
     youtube_title: str = Field("", max_length=100)
     instagram_caption: str = Field("", max_length=2200)
     tiktok_caption: str = Field("", max_length=2200)
@@ -189,11 +198,11 @@ class PostCreate(BaseModel):
     # Facebook Groups to share the Reel to *by hand* — Meta removed the Groups
     # API, so these become a post-publish checklist, never an API call.
     facebook_groups: list[FacebookGroup] = Field(default_factory=list)
-    # Which account of each selected platform should publish this post
-    # ({platform: social_platform_connections.id}). A user with two YouTube
-    # channels picks one in the upload editor; an omitted key falls back to
-    # the platform's first-connected account at publish time.
-    platform_accounts: dict[str, str] = Field(default_factory=dict)
+    # Which accounts of each selected platform should publish this post
+    # ({platform: [social_platform_connections.id]}). A scalar is accepted
+    # for backwards compatibility with older upload editors.
+    platform_accounts: dict[str, Any] = Field(default_factory=dict)
+    youtube_playlists_by_account: dict[str, list[str]] = Field(default_factory=dict)
     publish_now: bool = False
     # ``shorts`` (default, existing behaviour) vs a regular feed ``post``.
     # The server still infers ``media_kind`` from the uploaded file.
@@ -214,12 +223,31 @@ class PostCreate(BaseModel):
         )
         return self
 
+    @field_validator("youtube_playlists_by_account")
+    @classmethod
+    def _playlists_by_account(cls, value):
+        cleaned = {}
+        for account_id, playlist_ids in (value or {}).items():
+            account = str(account_id).strip()
+            if not account or len(account) > 100:
+                raise ValueError("Invalid YouTube account for playlist selection")
+            cleaned[account] = _validate_playlist_ids(playlist_ids)
+        return cleaned
+
     @field_validator("media_kind")
     @classmethod
     def _media_kind(cls, v):
         value = str(v).strip().lower()
         if value not in MEDIA_KIND_VALUES:
             raise ValueError(f"Unknown media kind '{v}'. Choose from: {', '.join(MEDIA_KIND_VALUES)}")
+        return value
+
+    @field_validator("scheduling_method")
+    @classmethod
+    def _scheduling_method(cls, v):
+        value = str(v or "linkeasy").strip().lower()
+        if value not in SCHEDULING_METHOD_VALUES:
+            raise ValueError("scheduling_method must be native or linkeasy")
         return value
 
     @field_validator("youtube_playlist_ids")
@@ -327,16 +355,16 @@ class PostResponse(BaseModel):
     content_kind: str = SocialContentKind.SHORTS.value
     media_kind: str = SocialMediaKind.VIDEO.value
     scheduled_at: datetime
+    scheduling_method: str = "linkeasy"
     status: str
     youtube_title: str
     instagram_caption: str
     tiktok_caption: str
     platform_copy: dict[str, dict[str, str]] = Field(default_factory=dict)
-    # Platform → connection id chosen in the upload editor ({} on rows
-    # created before multi-account existed; the worker then publishes with
-    # the platform's first-connected account).
-    platform_accounts: dict[str, str] = Field(default_factory=dict)
+    # Platform → selected connection ids.
+    platform_accounts: dict[str, Any] = Field(default_factory=dict)
     youtube_playlist_ids: list[str] = Field(default_factory=list)
+    youtube_playlists_by_account: dict[str, list[str]] = Field(default_factory=dict)
     facebook_groups: list[FacebookGroup] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

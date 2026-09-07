@@ -236,11 +236,16 @@ def publish_post(post_id: str) -> dict:
             "platform_copy": post.platform_copy or {},
             # Chosen in the upload editor; filed into after the upload lands.
             "youtube_playlist_ids": list(post.youtube_playlist_ids or []),
+            "youtube_playlists_by_account": dict(
+                getattr(post, "youtube_playlists_by_account", None) or {}
+            ),
             # Manual destinations — never posted, only reported as a note.
             "facebook_groups": list(post.facebook_groups or []),
             # Missing on rows written before the columns existed → shorts video.
             "content_kind": getattr(post, "content_kind", None) or "shorts",
             "media_kind": getattr(post, "media_kind", None) or "video",
+            "scheduled_at": post.scheduled_at,
+            "scheduling_method": getattr(post, "scheduling_method", None) or "linkeasy",
         }
         # One pending result row per platform up front, so the UI can show
         # per-platform progress while uploads run.
@@ -255,7 +260,31 @@ def publish_post(post_id: str) -> dict:
     try:
         asyncio.set_event_loop(loop)
         for platform in platforms:
-            outcomes[platform] = loop.run_until_complete(_publish_to_platform(owner_email, snapshot, platform))
+            raw_accounts = (snapshot.get("platform_accounts") or {}).get(platform) or []
+            account_ids = raw_accounts if isinstance(raw_accounts, list) else [raw_accounts]
+            account_ids = [str(value).strip() for value in account_ids if str(value).strip()]
+            if platform != "youtube" or len(account_ids) <= 1:
+                outcomes[platform] = loop.run_until_complete(
+                    _publish_to_platform(owner_email, snapshot, platform)
+                )
+                continue
+
+            account_outcomes = []
+            for account_id in account_ids:
+                account_post = dict(snapshot)
+                account_post["platform_accounts"] = {platform: [account_id]}
+                account_outcomes.append(
+                    loop.run_until_complete(_publish_to_platform(owner_email, account_post, platform))
+                )
+            successful = [item for item in account_outcomes if item.get("ok")]
+            failed = [item for item in account_outcomes if not item.get("ok")]
+            outcomes[platform] = {
+                "ok": not failed,
+                "platform_id": ",".join(item.get("platform_id", "") for item in successful),
+                "platform_url": successful[0].get("platform_url", "") if successful else "",
+                "error": "; ".join(item.get("error", "") for item in failed)[:2000],
+                "note": "; ".join(item.get("note", "") for item in account_outcomes if item.get("note"))[:1000],
+            }
     finally:
         try:
             loop.run_until_complete(loop.shutdown_asyncgens())
@@ -378,7 +407,8 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
         # the upload editor's pick, or — for rows created before
         # multi-account (no pick stored) — the first-connected account, so
         # existing installs keep publishing exactly as before.
-        pick = str((post.get("platform_accounts") or {}).get(platform) or "")
+        raw_pick = (post.get("platform_accounts") or {}).get(platform) or ""
+        pick = str((raw_pick[0] if isinstance(raw_pick, list) else raw_pick) or "")
         query = db.query(SocialPlatformConnection).filter(
             SocialPlatformConnection.owner_email == owner_email,
             SocialPlatformConnection.platform == platform,
@@ -459,11 +489,20 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
                 refresh_token=tokens.refresh_token,
                 as_short=as_short,
                 thumbnail_path=thumbnail_path,
+                publish_at=(
+                    post.get("scheduled_at")
+                    if post.get("scheduling_method") == "native"
+                    else None
+                ),
             )
             note = await _add_to_youtube_playlists(
                 service,
                 video_id=result["video_id"],
-                playlist_ids=post.get("youtube_playlist_ids") or [],
+                playlist_ids=(
+                    (post.get("youtube_playlists_by_account") or {}).get(conn_id)
+                    or post.get("youtube_playlist_ids")
+                    or []
+                ),
                 tokens=tokens,
                 label=label,
             )

@@ -353,19 +353,25 @@ async def _validated_platform_accounts(
     publish time with a message that no longer explains what to click.
     """
     for platform in platforms:
-        connection_id = (picks or {}).get(platform)
-        if not connection_id:
+        raw_ids = (picks or {}).get(platform) or []
+        connection_ids = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+        if not connection_ids:
             continue
-        conn = await _owned_connection_by_id(db, owner_email, platform, connection_id)
-        if conn is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"The selected {PLATFORM_LABELS[platform]} account is no longer "
-                    "connected. Pick another account, or connect it again in Accounts → Socials."
-                ),
-            )
-    return {platform: str(picks[platform]).strip() for platform in platforms if (picks or {}).get(platform)}
+        for connection_id in connection_ids:
+            conn = await _owned_connection_by_id(db, owner_email, platform, str(connection_id).strip())
+            if conn is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"The selected {PLATFORM_LABELS[platform]} account is no longer "
+                        "connected. Pick another account, or connect it again in Accounts → Socials."
+                    ),
+                )
+    return {
+        platform: [str(value).strip() for value in (raw if isinstance(raw, list) else [raw])]
+        for platform, raw in (picks or {}).items()
+        if platform in platforms and raw
+    }
 
 
 async def _platform_configured_map(db: AsyncSession) -> dict[str, bool]:
@@ -540,6 +546,17 @@ async def create_post(
     if not payload.publish_now and scheduled_at < _now() - timedelta(minutes=1):
         raise HTTPException(status_code=400, detail="scheduled_at must be in the future")
 
+    # YouTube is the only currently supported native scheduler. Facebook's
+    # scheduled_posts edge is read-only for creation, and mixed-platform posts
+    # must remain in the LinkEasy queue so every platform publishes together.
+    scheduling_method = (
+        "native"
+        if payload.scheduling_method == "native"
+        and not payload.publish_now
+        and payload.platforms == ["youtube"]
+        else "linkeasy"
+    )
+
     # The account picks are only meaningful if the accounts still exist — a
     # channel disconnected after the page loaded is a 400 here (pick another
     # one) instead of a per-platform failure nobody understands later.
@@ -560,12 +577,14 @@ async def create_post(
         content_kind=payload.content_kind,
         media_kind=media_kind,
         scheduled_at=scheduled_at,
+        scheduling_method=scheduling_method,
         status=SocialPostStatus.PENDING.value,
         youtube_title=payload.youtube_title,
         instagram_caption=payload.instagram_caption,
         tiktok_caption=payload.tiktok_caption,
         platform_copy=payload.platform_copy,
         youtube_playlist_ids=payload.youtube_playlist_ids,
+        youtube_playlists_by_account=payload.youtube_playlists_by_account,
         # Stored as plain dicts: the column is JSON, so pydantic models would
         # not serialise.
         facebook_groups=[group.model_dump() for group in payload.facebook_groups],
@@ -574,7 +593,7 @@ async def create_post(
     await db.commit()
     await db.refresh(post)
 
-    if payload.publish_now:
+    if payload.publish_now or scheduling_method == "native":
         # The pending row is intentional: if Redis/Celery is temporarily
         # unavailable, the normal one-minute dispatcher can still pick it up.
         try:
