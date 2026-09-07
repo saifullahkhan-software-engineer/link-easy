@@ -1,5 +1,29 @@
 """Public inbox payloads. Provider tokens and Graph paging URLs never leave the API."""
+from datetime import datetime
+from typing import Optional
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class InboxAccount(BaseModel):
+    """One connected Meta account of an inbox channel (GET /inbox/accounts).
+
+    ``id`` is the social-connection row id — what the chat page sends back as
+    ``account_id`` to address this exact account. Display fields only; no
+    token material.
+    """
+
+    id: str
+    # Platform-side identity (Facebook account id / IG business user id).
+    account_id: str = ""
+    account_name: str = ""
+    reconnect_required: bool = False
+    connected_at: Optional[datetime] = None
+
+
+class InboxAccountsResponse(BaseModel):
+    platform: str  # "instagram" | "facebook"
+    accounts: list[InboxAccount]
 
 
 class InboxConversation(BaseModel):

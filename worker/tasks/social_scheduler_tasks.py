@@ -223,6 +223,10 @@ def publish_post(post_id: str) -> dict:
             "title": post.title,
             "caption": post.caption,
             "hashtags": post.hashtags or "",
+            # Platform → connection id chosen in the upload editor. Missing
+            # on rows written before multi-account existed → the worker
+            # publishes with the platform's first-connected account.
+            "platform_accounts": dict(getattr(post, "platform_accounts", None) or {}),
             "video_path": post.video_path,
             "video_url": post.video_url,
             "thumbnail": post.thumbnail or "",
@@ -370,15 +374,29 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
         # DB credential row (if any) so refresh/publish authenticate with the
         # same app the settings page configured.
         apply_credentials_sync(db, platform, service)
-        conn = (
-            db.query(SocialPlatformConnection)
-            .filter(
-                SocialPlatformConnection.owner_email == owner_email,
-                SocialPlatformConnection.platform == platform,
-            )
-            .one_or_none()
+        # Which of the owner's accounts of this platform publishes this post:
+        # the upload editor's pick, or — for rows created before
+        # multi-account (no pick stored) — the first-connected account, so
+        # existing installs keep publishing exactly as before.
+        pick = str((post.get("platform_accounts") or {}).get(platform) or "")
+        query = db.query(SocialPlatformConnection).filter(
+            SocialPlatformConnection.owner_email == owner_email,
+            SocialPlatformConnection.platform == platform,
         )
+        if pick:
+            query = query.filter(SocialPlatformConnection.id == pick)
+        else:
+            query = query.order_by(
+                SocialPlatformConnection.created_at.asc(),
+                SocialPlatformConnection.id.asc(),
+            )
+        conn = query.first()
         if conn is None:
+            if pick:
+                return _failure(
+                    f"The selected {label} account is no longer connected. "
+                    "Open the post, pick another account, and re-queue."
+                )
             return _failure(f"{label} is not connected. Open Accounts → Socials and connect the account.")
         conn_id = conn.id
         account_id = conn.account_id or ""

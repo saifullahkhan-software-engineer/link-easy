@@ -18,7 +18,7 @@ profile's session has expired.
 
 import shutil
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -168,18 +168,35 @@ def require_linkedin_enabled() -> None:
 async def _get_account_or_404(
     owner_email: str,
     db: AsyncSession,
+    account_id: str | None = None,
 ) -> LinkedInAccount:
     """
-    Fetch a LinkedIn account by owner email.
-    Raises 404 if not found.
+    Fetch one of the owner's LinkedIn accounts.
+
+    ``account_id`` selects a specific account (the row's UUID). When omitted
+    — single-account users and older clients — the first account is returned,
+    so the pre-multi-account behaviour is preserved exactly.
     """
-    result = await db.execute(
-        select(LinkedInAccount).where(LinkedInAccount.owner_email == owner_email)
-    )
+    query = select(LinkedInAccount).where(LinkedInAccount.owner_email == owner_email)
+    if account_id:
+        query = query.where(LinkedInAccount.id == account_id)
+    else:
+        query = query.order_by(LinkedInAccount.created_at.asc(), LinkedInAccount.id.asc())
+    result = await db.execute(query)
     account = result.scalars().first()
     if account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
     return account
+
+
+async def _list_accounts(owner_email: str, db: AsyncSession) -> list[LinkedInAccount]:
+    """All of the owner's LinkedIn accounts, oldest first (for listing)."""
+    result = await db.execute(
+        select(LinkedInAccount)
+        .where(LinkedInAccount.owner_email == owner_email)
+        .order_by(LinkedInAccount.created_at.asc(), LinkedInAccount.id.asc())
+    )
+    return list(result.scalars().all())
 
 
 # ---------------------------------------------------------------------------
@@ -218,17 +235,18 @@ async def add_linkedin_account(
     # attach the LinkedIn account to a different LinkEasy user.
     owner_email = _owner_email_from_user(current_user)
 
-    # Fail fast on duplicates BEFORE launching any browser.
+    # A user may now connect SEVERAL LinkedIn profiles (personal + work, or
+    # several client accounts). The only duplicate that still fails is the
+    # same LinkedIn email — globally unique — which would mean connecting one
+    # profile twice (here or to another LinkEasy user). Check BEFORE launching
+    # any browser.
     existing = await db.execute(
-        select(LinkedInAccount).where(
-            (LinkedInAccount.linkedin_email == linkedin_email)
-            | (LinkedInAccount.owner_email == owner_email)
-        )
+        select(LinkedInAccount).where(LinkedInAccount.linkedin_email == linkedin_email)
     )
     if existing.scalars().first() is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A LinkedIn account is already connected to your profile",
+            detail="That LinkedIn email is already connected — add it again from its own card, or connect a different profile.",
         )
 
     # Create the account row up front so the login can run inside its durable
@@ -357,16 +375,36 @@ async def add_linkedin_account(
 
 
 @router.get(
+    "/accounts",
+    response_model=list[LinkedInAccountResponse],
+    summary="List your LinkedIn accounts",
+)
+async def list_linkedin_accounts(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[LinkedInAccountResponse]:
+    """Returns every LinkedIn account the authenticated user has connected.
+
+    A user may run campaigns / live chat from more than one LinkedIn profile
+    (personal + work, or several client accounts); the account page renders
+    one card per entry and pickers elsewhere list them here.
+    """
+    accounts = await _list_accounts(_owner_email_from_user(current_user), db)
+    return [LinkedInAccountResponse.model_validate(a) for a in accounts]
+
+
+@router.get(
     "/account",
     response_model=LinkedInAccountResponse,
     summary="Get your LinkedIn account",
 )
 async def get_linkedin_account(
+    account_id: str | None = Query(default=None, description="One account; omit for the first-connected"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> LinkedInAccountResponse:
-    """Returns the LinkedIn account for the authenticated user."""
-    account = await _get_account_or_404(current_user.email, db)
+    """Returns one of the user's LinkedIn accounts (the first when no id)."""
+    account = await _get_account_or_404(_owner_email_from_user(current_user), db, account_id)
     return LinkedInAccountResponse.model_validate(account)
 
 
@@ -377,6 +415,7 @@ async def get_linkedin_account(
 )
 async def update_linkedin_account(
     payload: LinkedInAccountUpdate,
+    account_id: str | None = Query(default=None, description="One account; omit for the first-connected"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> LinkedInAccountResponse:
@@ -386,7 +425,7 @@ async def update_linkedin_account(
     On password update the status is reset to pending_verification so
     Playwright can re-confirm the credentials.
     """
-    account = await _get_account_or_404(current_user.email, db)
+    account = await _get_account_or_404(_owner_email_from_user(current_user), db, account_id)
 
     if payload.label is not None:
         account.label = payload.label
@@ -399,7 +438,17 @@ async def update_linkedin_account(
     if payload.linkedin_email is not None:
         account.linkedin_email = str(payload.linkedin_email).lower().strip()
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # With several connected profiles, renaming one to an email that is
+        # already connected (to this user or another) must be a clear 409,
+        # not a 500 off the unique index.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That LinkedIn email is already connected.",
+        )
     await db.refresh(account)
     return LinkedInAccountResponse.model_validate(account)
 
@@ -410,11 +459,12 @@ async def update_linkedin_account(
     summary="Remove a LinkedIn account",
 )
 async def delete_linkedin_account(
+    account_id: str | None = Query(default=None, description="One account; omit to remove the first-connected"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> LinkedInAccountDeleteResponse:
-    """Permanently removes a LinkedIn account. This action cannot be undone."""
-    account = await _get_account_or_404(current_user.email, db)
+    """Permanently removes one LinkedIn account. This action cannot be undone."""
+    account = await _get_account_or_404(_owner_email_from_user(current_user), db, account_id)
     profile_dir = account.profile_dir
     await db.delete(account)
     await db.commit()
@@ -673,6 +723,7 @@ async def verify_linkedin_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     owner_email: str | None = None,
+    account_id: str | None = Query(default=None, description="Which account's session to verify"),
 ) -> SessionVerificationResponse:
     """
     Verifies if the user's LinkedIn session is still active by opening the
@@ -693,13 +744,16 @@ async def verify_linkedin_session(
     owner_email = _owner_email_from_user(current_user)
     logger.info("🔍 Starting LinkedIn session verification for user: %s", owner_email)
 
-    # Get the user's LinkedIn account
-    result = await db.execute(
-        select(LinkedInAccount).where(
-            LinkedInAccount.owner_email == owner_email
-        )
+    # Get the user's LinkedIn account — a specific one when ``account_id`` is
+    # given (the account page's per-card "Refresh" button), else the first.
+    query = select(LinkedInAccount).where(
+        LinkedInAccount.owner_email == owner_email
     )
-    account = result.scalars().first()
+    if account_id:
+        query = query.where(LinkedInAccount.id == account_id)
+    else:
+        query = query.order_by(LinkedInAccount.created_at.asc(), LinkedInAccount.id.asc())
+    account = (await db.execute(query)).scalars().first()
 
     if not account:
         logger.warning("⚠️ No LinkedIn account found for user: %s", owner_email)

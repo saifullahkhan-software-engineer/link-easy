@@ -28,7 +28,7 @@ re-runs the OAuth flow, which upserts this same row.
 
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.sql import func
 
 from database import Base
@@ -41,12 +41,15 @@ def _uuid() -> str:
 class GmailConnection(Base):
     __tablename__ = "gmail_connections"
     __table_args__ = (
-        # One connected mailbox per user — the same singleton-per-owner model
-        # as WhatsApp. This composite unique index also serves the per-owner
-        # lookups (owner_email is its leading column).
-        UniqueConstraint("owner_email", name="uq_gmail_connections_owner_email"),
-        # Admin/ops views may want to find a mailbox across users.
+        # A user can connect several mailboxes (personal + work, or a client's
+        # account alongside their own). The per-owner lookups use the plain
+        # index below (owner_email leading).
+        # One mailbox may be connected by at most ONE LinkEasy user — the
+        # same mailbox twice would mean two live windows into one inbox with
+        # only one refreshable token set, so the account_email column stays
+        # globally unique (admin/ops views can find a mailbox across users).
         UniqueConstraint("account_email", name="uq_gmail_connections_account_email"),
+        Index("ix_gmail_connections_owner_email", "owner_email"),
     )
 
     id = Column(String, primary_key=True, default=_uuid)

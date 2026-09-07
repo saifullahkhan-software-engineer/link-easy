@@ -122,7 +122,58 @@ class LinkedInAccountOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.account.owner_email, "owner@test.dev")
         self.assertNotEqual(response.account.owner_email, "attacker@example.com")
 
-    async def test_duplicate_owner_is_still_rejected(self):
+    async def test_a_second_different_profile_is_now_allowed(self):
+        """Multi-account: a user may connect a SECOND, different LinkedIn
+        profile. The old per-owner singleton no longer applies — only the
+        same LinkedIn email is still rejected."""
+        from api.v1.linkedin import add_linkedin_account
+
+        async with self.Session() as db:
+            existing = LinkedInAccount(
+                owner_email="owner@test.dev",
+                linkedin_email="already@test.dev",
+                encrypted_password="enc",
+                label="Old",
+                profile_dir="/tmp/profiles/old",
+                status="active",
+            )
+            existing.assign_profile_dir()
+            db.add(existing)
+            await db.commit()
+
+            # A different LinkedIn email for the same owner must now succeed.
+            context = SimpleNamespace(close=AsyncMock())
+            pw = SimpleNamespace(stop=AsyncMock())
+            with (
+                patch("api.v1.linkedin.acquire_profile_lock", return_value=object()),
+                patch("api.v1.linkedin.release_profile_lock"),
+                patch("api.v1.linkedin.ensure_profile_dir"),
+                patch(
+                    "api.v1.linkedin.linkedin_login",
+                    AsyncMock(
+                        return_value=(
+                            LinkedInSessionStatus.VALID,
+                            (pw, object(), context, object(), "ua"),
+                            "ok",
+                        )
+                    ),
+                ),
+            ):
+                resp = await add_linkedin_account(
+                    LinkedInAccountCreate(
+                        owner_email="owner@test.dev",
+                        linkedin_email="new-li@test.dev",
+                        linkedin_password="secret1",
+                    ),
+                    db,
+                    _user("owner@test.dev"),
+                )
+            self.assertEqual(resp.status, "LOGIN_SUCCESS")
+            self.assertEqual(resp.account.linkedin_email, "new-li@test.dev")
+
+    async def test_same_linkedin_email_is_still_rejected(self):
+        """Reconnecting a LinkedIn email that is already connected (to this
+        user or another) is a 409 — that is the only duplicate that matters."""
         from api.v1.linkedin import add_linkedin_account
 
         async with self.Session() as db:
@@ -141,8 +192,8 @@ class LinkedInAccountOwnerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as ctx:
                 await add_linkedin_account(
                     LinkedInAccountCreate(
-                        owner_email="someone-else@test.dev",
-                        linkedin_email="new-li@test.dev",
+                        owner_email="owner@test.dev",
+                        linkedin_email="already@test.dev",
                         linkedin_password="secret1",
                     ),
                     db,

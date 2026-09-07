@@ -17,7 +17,14 @@ Ported from the standalone social_scheduler/main.py into the main app:
   also carries the PKCE ``code_verifier`` so the callback's token exchange
   uses the same verifier that produced the authorization URL's challenge;
 * tokens are AES-256-GCM encrypted before they touch the database
-  (services/social/connections.py) and never appear in a response.
+  (services/social/connections.py) and never appear in a response;
+* multi-account: a user can connect several accounts of the same platform
+  (two YouTube channels, two Meta Pages, …). ``GET /platforms`` lists them
+  per platform; ``POST /posts`` records which account of each selected
+  platform publishes the post (``platform_accounts``); ``DELETE
+  /platforms/{p}`` accepts an optional ``connection_id`` to remove one
+  account; the playlists picker takes the same. Every other lookup resolves
+  within the caller's own rows only.
 
 Route map (prefix /api/v1/social-scheduler):
 
@@ -86,6 +93,7 @@ from schemas.social_scheduler import (
     CalendarDay,
     ParseCopyRequest,
     ParseCopyResponse,
+    PlatformAccountResponse,
     PlatformAuthUrlResponse,
     PlatformConnectionResponse,
     PlatformCredentialsIn,
@@ -251,11 +259,36 @@ async def _owned_post(db: AsyncSession, post_id: str, owner_email: str) -> Socia
     return post
 
 
-async def _owned_connection(
+async def _owned_connections(
     db: AsyncSession, owner_email: str, platform: str
+) -> list[SocialPlatformConnection]:
+    """All of the caller's accounts for one platform, oldest first.
+
+    Never raises on a missing account — an empty list means "not connected".
+    """
+    result = await db.execute(
+        select(SocialPlatformConnection)
+        .where(
+            SocialPlatformConnection.owner_email == owner_email,
+            SocialPlatformConnection.platform == platform,
+        )
+        .order_by(SocialPlatformConnection.created_at.asc(), SocialPlatformConnection.id.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def _owned_connection_by_id(
+    db: AsyncSession, owner_email: str, platform: str, connection_id: str
 ) -> Optional[SocialPlatformConnection]:
+    """One of the caller's accounts for one platform, or None.
+
+    The id + platform + owner triple is checked together, so a connection id
+    that belongs to a different user (or a different platform) is simply not
+    found — the same no-existence-oracle rule as the post routes.
+    """
     result = await db.execute(
         select(SocialPlatformConnection).where(
+            SocialPlatformConnection.id == connection_id,
             SocialPlatformConnection.owner_email == owner_email,
             SocialPlatformConnection.platform == platform,
         )
@@ -263,27 +296,76 @@ async def _owned_connection(
     return result.scalar_one_or_none()
 
 
-def _connection_response(
-    platform: str,
-    conn: Optional[SocialPlatformConnection],
-    configured: bool,
-) -> PlatformConnectionResponse:
-    if conn is None:
-        return PlatformConnectionResponse(
-            platform=platform, label=PLATFORM_LABELS[platform], connected=False, configured=configured
-        )
-    return PlatformConnectionResponse(
-        platform=platform,
-        label=PLATFORM_LABELS[platform],
-        connected=True,
-        configured=configured,
-        account_name=conn.account_name or "",
+def _account_response(conn: SocialPlatformConnection) -> PlatformAccountResponse:
+    return PlatformAccountResponse(
+        id=conn.id,
+        platform=conn.platform,
         account_id=conn.account_id or "",
+        account_name=conn.account_name or "",
+        extra_data=dict(conn.extra_data or {}),
         expires_at=conn.expires_at,
         reconnect_required=reconnect_required(conn),
         connected_at=conn.created_at,
         updated_at=conn.updated_at,
     )
+
+
+def _platform_response(
+    platform: str,
+    connections: list[SocialPlatformConnection],
+    configured: bool,
+) -> PlatformConnectionResponse:
+    """One platform's summary row: every connected account plus legacy flat
+    fields mirroring the first (oldest) account for pre-multi-account clients."""
+    if not connections:
+        return PlatformConnectionResponse(
+            platform=platform, label=PLATFORM_LABELS[platform], connected=False, configured=configured
+        )
+    first = connections[0]
+    return PlatformConnectionResponse(
+        platform=platform,
+        label=PLATFORM_LABELS[platform],
+        connected=True,
+        configured=configured,
+        accounts=[_account_response(conn) for conn in connections],
+        account_name=first.account_name or "",
+        account_id=first.account_id or "",
+        expires_at=first.expires_at,
+        # Any account that cannot be renewed unattended degrades the platform.
+        reconnect_required=any(reconnect_required(conn) for conn in connections),
+        connected_at=first.created_at,
+        updated_at=first.updated_at,
+    )
+
+
+async def _validated_platform_accounts(
+    db: AsyncSession,
+    owner_email: str,
+    platforms: list[str],
+    picks: dict[str, str],
+) -> dict[str, str]:
+    """Check every {platform: connection_id} pick against the caller's rows.
+
+    The schema validator already kept only selected platforms and sane ids;
+    here the ids must be the caller's *own* connections for that platform.
+    A stale pick (the account was disconnected, or the id belongs to another
+    user) is a 400 with the platform named — not a stored post that fails at
+    publish time with a message that no longer explains what to click.
+    """
+    for platform in platforms:
+        connection_id = (picks or {}).get(platform)
+        if not connection_id:
+            continue
+        conn = await _owned_connection_by_id(db, owner_email, platform, connection_id)
+        if conn is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"The selected {PLATFORM_LABELS[platform]} account is no longer "
+                    "connected. Pick another account, or connect it again in Accounts → Socials."
+                ),
+            )
+    return {platform: str(picks[platform]).strip() for platform in platforms if (picks or {}).get(platform)}
 
 
 async def _platform_configured_map(db: AsyncSession) -> dict[str, bool]:
@@ -458,11 +540,19 @@ async def create_post(
     if not payload.publish_now and scheduled_at < _now() - timedelta(minutes=1):
         raise HTTPException(status_code=400, detail="scheduled_at must be in the future")
 
+    # The account picks are only meaningful if the accounts still exist — a
+    # channel disconnected after the page loaded is a 400 here (pick another
+    # one) instead of a per-platform failure nobody understands later.
+    platform_accounts = await _validated_platform_accounts(
+        db, current_user.email, payload.platforms, payload.platform_accounts
+    )
+
     post = SocialPost(
         owner_email=current_user.email,
         title=payload.title,
         caption=payload.caption,
         hashtags=payload.hashtags,
+        platform_accounts=platform_accounts,
         video_path=video_path,
         video_url=_public_video_url(request, payload.upload_id),
         thumbnail=payload.thumbnail,
@@ -920,13 +1010,24 @@ async def list_platforms(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Connection summary for all four platforms.
+
+    Every platform is present in the response (connected or not); a platform
+    with several accounts of the same kind lists them all in ``accounts``
+    (oldest first), which is what the upload page's account picker and the
+    inbox's account dropdown consume.
+    """
     result = await db.execute(
-        select(SocialPlatformConnection).where(SocialPlatformConnection.owner_email == current_user.email)
+        select(SocialPlatformConnection)
+        .where(SocialPlatformConnection.owner_email == current_user.email)
+        .order_by(SocialPlatformConnection.created_at.asc(), SocialPlatformConnection.id.asc())
     )
-    by_platform = {c.platform: c for c in result.scalars().all()}
+    by_platform: dict[str, list[SocialPlatformConnection]] = {p: [] for p in PLATFORM_VALUES}
+    for conn in result.scalars().all():
+        by_platform.setdefault(conn.platform, []).append(conn)
     configured_map = await _platform_configured_map(db)
     return [
-        _connection_response(p, by_platform.get(p), configured_map[p])
+        _platform_response(p, by_platform.get(p) or [], configured_map[p])
         for p in PLATFORM_VALUES
     ]
 
@@ -1011,8 +1112,23 @@ async def platform_oauth_callback(
         logger.warning("%s OAuth for %s failed: %s", platform, owner_email, exc)
         return _frontend_redirect(platform, error=str(exc))
 
-    conn = await _owned_connection(db, owner_email, platform)
-    if conn is None:
+    # Which *account* of this platform just signed in. The providers all
+    # resolve a platform-side id (channel UC…, IG user id, TikTok open_id,
+    # Facebook account id); the fallback keeps the unique
+    # (owner, platform, account_id) constraint satisfiable in the unlikely
+    # case one of them comes back without an id.
+    account_id = str(info.get("account_id") or "").strip() or f"auto-{uuid.uuid4().hex[:12]}"
+    conn = (
+        await db.execute(
+            select(SocialPlatformConnection).where(
+                SocialPlatformConnection.owner_email == owner_email,
+                SocialPlatformConnection.platform == platform,
+                SocialPlatformConnection.account_id == account_id,
+            )
+        )
+    ).scalar_one_or_none()
+    is_new_account = conn is None
+    if is_new_account:
         conn = SocialPlatformConnection(owner_email=owner_email, platform=platform, encrypted_access_token="")
         db.add(conn)
     try:
@@ -1024,34 +1140,59 @@ async def platform_oauth_callback(
         )
     except ValueError as exc:
         return _frontend_redirect(platform, error=str(exc))
-    conn.account_id = info.get("account_id") or ""
+    conn.account_id = account_id
     conn.account_name = info.get("account_name") or ""
     conn.extra_data = info.get("extra_data") or {}
 
     try:
         await db.commit()
     except IntegrityError:
-        # Two callbacks raced for the same (owner, platform); the other one won.
+        # Two callbacks raced for the same (owner, platform, account) — e.g.
+        # the user opened sign-in in two tabs; the other write won.
         await db.rollback()
         return _frontend_redirect(platform, connected=True)
 
-    logger.info("%s connected for %s (%s)", platform, owner_email, conn.account_name)
+    logger.info(
+        "%s %s for %s (%s)",
+        platform,
+        "connected" if is_new_account else "reconnected",
+        owner_email,
+        conn.account_name,
+    )
     return _frontend_redirect(platform, connected=True)
 
 
 @router.delete("/platforms/{platform}", response_model=PlatformDisconnectResponse)
 async def disconnect_platform(
     platform: str,
+    connection_id: Optional[str] = Query(default=None, description="One account; omit to disconnect every account of the platform"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Disconnect one account, or the whole platform when no id is given.
+
+    The id is always resolved within the caller's own rows for this platform,
+    so a foreign connection id 404s exactly like a missing platform.
+    """
     platform = _platform_or_404(platform)
-    conn = await _owned_connection(db, current_user.email, platform)
-    if conn is None:
-        raise HTTPException(status_code=404, detail=f"{PLATFORM_LABELS[platform]} is not connected")
-    await db.delete(conn)
+    label = PLATFORM_LABELS[platform]
+    connections = await _owned_connections(db, current_user.email, platform)
+    if not connections:
+        raise HTTPException(status_code=404, detail=f"{label} is not connected")
+    if connection_id:
+        conn = next((c for c in connections if c.id == connection_id), None)
+        if conn is None:
+            raise HTTPException(status_code=404, detail=f"That {label} account is no longer connected")
+        await db.delete(conn)
+        await db.commit()
+        name = conn.account_name or conn.account_id or "account"
+        logger.info("%s account %s disconnected for %s", platform, conn.id, current_user.email)
+        return PlatformDisconnectResponse(message=f"{label} account “{name}” disconnected", platform=platform)
+    for conn in connections:
+        await db.delete(conn)
     await db.commit()
-    return PlatformDisconnectResponse(message=f"{PLATFORM_LABELS[platform]} disconnected", platform=platform)
+    logger.info("%s disconnected (%d account(s)) for %s", platform, len(connections), current_user.email)
+    return PlatformDisconnectResponse(message=f"{label} disconnected", platform=platform)
 
 
 # ── Manual share targets (Facebook Groups) ───────────────────────────────────
@@ -1151,15 +1292,31 @@ async def delete_share_target(
 # wins over the parameterised ones.
 @router.get("/platforms/youtube/playlists", response_model=YouTubePlaylistListResponse)
 async def list_youtube_playlists(
+    connection_id: Optional[str] = Query(default=None, description="Which YouTube channel's playlists to list"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    conn = await _owned_connection(db, current_user.email, "youtube")
-    if conn is None:
+    """Playlists of ONE of the caller's YouTube channels.
+
+    With several channels connected, the upload editor passes the id of the
+    channel the Short will be published to; without it (single-account users,
+    older clients) the first-connected channel is used.
+    """
+    connections = await _owned_connections(db, current_user.email, "youtube")
+    if not connections:
         raise HTTPException(
             status_code=409,
             detail="YouTube is not connected. Connect it in Accounts → Socials, then pick playlists.",
         )
+    if connection_id:
+        conn = next((c for c in connections if c.id == connection_id), None)
+        if conn is None:
+            raise HTTPException(
+                status_code=404,
+                detail="That YouTube account is no longer connected — pick another channel.",
+            )
+    else:
+        conn = connections[0]
     try:
         tokens = read_tokens(conn)
     except ValueError as exc:
@@ -1352,11 +1509,17 @@ async def get_stats(
         if platform in per_platform and result_status in per_platform[platform]:
             per_platform[platform][result_status] = count
 
-    connected = (
-        await db.execute(
-            select(SocialPlatformConnection.platform).where(SocialPlatformConnection.owner_email == owner)
-        )
-    ).scalars().all()
+    # A user may now hold several accounts of one platform, so distinct()
+    # keeps "YouTube" from counting once per connected channel.
+    connected = set(
+        (
+            await db.execute(
+                select(SocialPlatformConnection.platform.distinct()).where(
+                    SocialPlatformConnection.owner_email == owner
+                )
+            )
+        ).scalars().all()
+    )
 
     return StatsResponse(
         scheduled_this_week=scheduled_this_week,

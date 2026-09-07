@@ -16,12 +16,33 @@ from pydantic import BaseModel, Field
 
 # ── connection / OAuth ────────────────────────────────────────────────────────
 
+class GmailAccount(BaseModel):
+    """One connected mailbox, as shown to its owner.
+
+    ``id`` is what the UI sends back as ``account_id`` to address this exact
+    mailbox in the read/send routes. Display + status fields only.
+    """
+
+    id: str
+    # The connected mailbox address — the detail the account cards show.
+    account_email: str = ""
+    expires_at: Optional[datetime] = None
+    # True when the access token is past expiry and no refresh token is held.
+    reconnect_required: bool = False
+    last_checked_at: Optional[datetime] = None
+
+
 class GmailStatus(BaseModel):
     connected: bool = False
     # True when the operator set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET, so
     # the UI can distinguish "not connected yet" from "cannot ever connect
     # on this instance".
     configured: bool = False
+    # Every connected mailbox (possibly several — personal + work). Empty
+    # when nothing is connected.
+    accounts: list[GmailAccount] = Field(default_factory=list)
+    # The first-connected mailbox — mirrors accounts[0] so clients predating
+    # multi-mailbox keep working.
     account_email: str = ""
     scopes: list[str] = Field(default_factory=list)
     expires_at: Optional[datetime] = None

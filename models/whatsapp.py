@@ -130,6 +130,11 @@ class WhatsAppScanFilter(Base):
     # rows created by the original singleton scanner valid until they are
     # edited from the new workflow.
     owner_email = Column(String, ForeignKey("users.email", ondelete="CASCADE"), nullable=True)
+    # Which WhatsApp session (device) this filter scans.  A user with several
+    # connected devices picks one per filter.  NULL keeps legacy filters (and
+    # filters created before multi-session) scanning the owner's default
+    # (newest) session, so existing automation is unchanged.
+    session_id = Column(Integer, ForeignKey("whatsapp_sessions.id", ondelete="SET NULL"), nullable=True)
     name = Column(String, nullable=False, default="WhatsApp Filter", server_default="WhatsApp Filter")
     # draft is used for a newly-created filter; active/paused control the
     # scheduler.  This is intentionally a String (rather than a database enum)

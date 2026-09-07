@@ -14,6 +14,10 @@ class LiveStartResponse(BaseModel):
     error: Optional[str] = None
     active_chat_id: Optional[str] = None
     active_chat_name: Optional[str] = None
+    # The connected profile this live session runs from (set once the session
+    # is running; the UI uses it to label the session and its account picker).
+    account_id: Optional[str] = None
+    account_email: Optional[str] = None
 
 
 class LiveChatItem(BaseModel):

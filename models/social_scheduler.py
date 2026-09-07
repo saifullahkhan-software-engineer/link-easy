@@ -13,8 +13,11 @@ Schema changes relative to the original:
 * Multi-tenant. Every row belongs to one platform user via ``owner_email``
   (FK ``users.email`` — the ownership key used by ``linkedin_accounts``,
   ``feed_scroll_jobs`` and ``whatsapp_sessions``; ``users`` has no integer
-  id). A platform can therefore be connected once *per user*
-  (``(owner_email, platform)`` unique) instead of once per deployment.
+  id). A user can connect *several accounts of the same platform*
+  (two YouTube channels, a personal and a work Facebook account, …); what
+  stays unique is the *account itself* — ``(owner_email, platform,
+  account_id)`` — so the same channel cannot be connected twice under one
+  user, but a different channel of the same platform adds a second row.
 * OAuth tokens are persisted AES-256-GCM encrypted only (see
   ``core.security.encrypt_credential``), mirroring
   ``LinkedInAccount.encrypted_password``. The column names say so, so an
@@ -98,6 +101,12 @@ class SocialPost(Base):
     title = Column(String, nullable=False)
     caption = Column(Text, nullable=False)
     hashtags = Column(Text, nullable=False, default="", server_default="")
+    # Which *account* of each platform publishes this post:
+    # {"youtube": "<social_platform_connections.id>", …}. A user with several
+    # channels of the same platform picks one in the upload editor; a missing
+    # key means "the account that was connected first" (the behaviour posts
+    # created before multi-account had — they publish unchanged).
+    platform_accounts = Column(JSON, nullable=False, default=dict, server_default="{}")
     # Server-side path of the uploaded file. Set by the upload endpoint from
     # its own generated filename — never taken from the client — because the
     # worker opens this path and streams it to YouTube/TikTok.
@@ -213,11 +222,20 @@ class SocialPostResult(Base):
 class SocialPlatformConnection(Base):
     __tablename__ = "social_platform_connections"
     __table_args__ = (
-        # One connection per user per platform. This composite unique index
-        # also serves the per-owner lookups (owner_email is its leading column).
+        # One row per *account*: a user may connect several accounts of the
+        # same platform (two YouTube channels, two Pages, …), but the same
+        # account (owner + platform + the platform-side account_id) cannot be
+        # connected twice. owner_email leads the index so per-owner lookups
+        # stay a single index scan.
         UniqueConstraint(
-            "owner_email", "platform", name="uq_social_platform_connections_owner_platform"
+            "owner_email", "platform", "account_id",
+            name="uq_social_platform_connections_owner_platform_account",
         ),
+        # account_id is a platform-side id (a YouTube channel UC…, an IG user
+        # id, a TikTok open_id, a Facebook account id) and is therefore not
+        # useful as a per-owner lookup; plain index for cross-user admin
+        # queries ("which users connected this channel").
+        Index("ix_social_platform_connections_account", "platform", "account_id"),
     )
 
     id = Column(String, primary_key=True, default=_uuid)

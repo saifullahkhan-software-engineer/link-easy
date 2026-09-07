@@ -839,5 +839,163 @@ class MimeHelperTests(unittest.TestCase):
         self.assertIn("alert(1)", html)
 
 
+class MultiMailboxTests(GmailApiTests):
+    """Several mailboxes under one user: connect, list, pick, disconnect.
+
+    The mailbox (account_email) is the identity — reconnecting the same
+    address refreshes tokens, a different Google account stores a second row,
+    and read/send routes resolve ``account_id`` within the caller's rows.
+    """
+
+    async def _backdate(self, account, hours_ago):
+        stamp = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        async with self.Session() as s:
+            conn = (
+                await s.execute(select(GmailConnection).where(GmailConnection.account_email == account))
+            ).scalar_one()
+            conn.created_at = stamp
+            await s.commit()
+
+    def test_two_google_accounts_are_two_mailboxes_and_status_lists_both(self):
+        async def run(client):
+            res = await self._connect(client, account="personal@gmail.com")
+            self.assertEqual(res.status_code, 302)
+            await self._backdate("personal@gmail.com", hours_ago=2)
+            res = await self._connect(client, account="work@gmail.com")
+            self.assertEqual(res.status_code, 302)
+            await self._backdate("work@gmail.com", hours_ago=1)
+
+            async with self.Session() as s:
+                rows = (await s.execute(select(GmailConnection))).scalars().all()
+                self.assertEqual(len(rows), 2)
+
+            status = (await client.get("/api/v1/gmail/status")).json()
+            self.assertTrue(status["connected"])
+            self.assertEqual(
+                [a["account_email"] for a in status["accounts"]],
+                ["personal@gmail.com", "work@gmail.com"],
+            )
+            # Flat fields mirror the first-connected mailbox.
+            self.assertEqual(status["account_email"], "personal@gmail.com")
+
+        self.run_async(run)
+
+    def test_reconnecting_the_same_mailbox_updates_the_existing_row(self):
+        async def run(client):
+            await self._connect(client, account="personal@gmail.com")
+            await self._connect(client, account="personal@gmail.com")
+            async with self.Session() as s:
+                rows = (await s.execute(select(GmailConnection))).scalars().all()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].account_email, "personal@gmail.com")
+
+        self.run_async(run)
+
+    def test_read_and_send_resolve_the_picked_mailbox_and_reject_stale_picks(self):
+        async def run(client):
+            await self._store_connection(OWNER, "personal@gmail.com")
+            await self._store_connection(OWNER, "work@gmail.com")
+            # Pin "first-connected" — SQLite's CURRENT_TIMESTAMP is
+            # second-precision, so without distinct stamps the default
+            # (oldest-first) row would be picked by uuid tie-break.
+            await self._backdate("personal@gmail.com", hours_ago=2)
+            await self._backdate("work@gmail.com", hours_ago=1)
+            async with self.Session() as s:
+                personal = (
+                    await s.execute(select(GmailConnection).where(GmailConnection.account_email == "personal@gmail.com"))
+                ).scalar_one()
+                work = (
+                    await s.execute(select(GmailConnection).where(GmailConnection.account_email == "work@gmail.com"))
+                ).scalar_one()
+
+            # profile resolves the picked mailbox (its address is echoed back).
+            with patch.object(
+                GmailService, "get_account_info",
+                AsyncMock(return_value={"emailAddress": "work@gmail.com", "messagesTotal": "5", "threadsTotal": "2", "historyId": "9"}),
+            ):
+                res = await client.get("/api/v1/gmail/profile", params={"account_id": work.id})
+            self.assertEqual(res.status_code, 200, res.text)
+            self.assertEqual(res.json()["email_address"], "work@gmail.com")
+
+            # Default (no pick) uses the first-connected mailbox.
+            with patch.object(
+                GmailService, "get_account_info",
+                AsyncMock(return_value={"emailAddress": "personal@gmail.com", "messagesTotal": "5", "threadsTotal": "2", "historyId": "9"}),
+            ):
+                res = await client.get("/api/v1/gmail/profile")
+            self.assertEqual(res.status_code, 200, res.text)
+            self.assertEqual(res.json()["email_address"], "personal@gmail.com")
+
+            # A stale/foreign pick is a 404, not a silent fallback.
+            res = await client.get("/api/v1/gmail/profile", params={"account_id": "gone"})
+            self.assertEqual(res.status_code, 404)
+
+            # Sending from the picked mailbox uses that address as the From.
+            with patch.object(
+                GmailService, "send_message",
+                AsyncMock(return_value={"id": "m1", "threadId": "t1"}),
+            ) as send:
+                res = await client.post(
+                    "/api/v1/gmail/send",
+                    params={"account_id": work.id},
+                    json={"to": "a@x.com", "subject": "Hi", "body": "Hey"},
+                )
+            self.assertEqual(res.status_code, 200, res.text)
+            # The From is the picked mailbox, not the other one.
+            sent_raw = send.call_args.args[1]["raw"]
+            import base64 as b64
+            raw = b64.urlsafe_b64decode(sent_raw + "=" * (-len(sent_raw) % 4)).decode()
+            self.assertIn("From: work@gmail.com", raw)
+
+        self.run_async(run)
+
+    def test_disconnect_removes_one_mailbox_or_all(self):
+        async def run(client):
+            await self._store_connection(OWNER, "personal@gmail.com")
+            await self._store_connection(OWNER, "work@gmail.com")
+            async with self.Session() as s:
+                work = (
+                    await s.execute(select(GmailConnection).where(GmailConnection.account_email == "work@gmail.com"))
+                ).scalar_one()
+
+            # Revoke is best-effort; stub it out.
+            with patch.object(GmailService, "revoke_token", AsyncMock()):
+                res = await client.delete("/api/v1/gmail/connection", params={"account_id": work.id})
+            self.assertEqual(res.status_code, 200)
+            status = (await client.get("/api/v1/gmail/status")).json()
+            self.assertEqual([a["account_email"] for a in status["accounts"]], ["personal@gmail.com"])
+
+            # Without the id, the rest goes too.
+            with patch.object(GmailService, "revoke_token", AsyncMock()):
+                res = await client.delete("/api/v1/gmail/connection")
+            self.assertEqual(res.status_code, 200)
+            status = (await client.get("/api/v1/gmail/status")).json()
+            self.assertFalse(status["connected"])
+            self.assertEqual(
+                (await client.delete("/api/v1/gmail/connection")).status_code, 404
+            )
+
+        self.run_async(run)
+
+    def test_another_users_mailbox_id_cannot_be_used(self):
+        async def run(client):
+            await self._store_connection(OTHER, "other-box@gmail.com")
+            async with self.Session() as s:
+                foreign = (
+                    await s.execute(select(GmailConnection).where(GmailConnection.account_email == "other-box@gmail.com"))
+                ).scalar_one()
+
+            # A pick that belongs to another user is not found (no oracle,
+            # no fallback to one of the caller's mailboxes).
+            res = await client.get("/api/v1/gmail/profile", params={"account_id": foreign.id})
+            self.assertEqual(res.status_code, 404)
+            # And with no pick at all the caller still has no mailbox of their
+            # own: the usual "connect first" answer.
+            res = await client.get("/api/v1/gmail/profile")
+            self.assertEqual(res.status_code, 409)
+
+        self.run_async(run)
+
+
 if __name__ == "__main__":
     unittest.main()
