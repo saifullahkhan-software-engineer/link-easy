@@ -18,6 +18,7 @@ import AccountsPage from './pages/AccountsPage';
 import LinkedInAccountPage from './pages/LinkedInAccountPage';
 import WhatsAppConnectPage from './pages/WhatsAppConnectPage';
 import GmailAccountPage from './pages/GmailAccountPage';
+import SocialAccountPage from './pages/SocialAccountPage';
 import MetaChatPage from './pages/inbox/MetaChatPage';
 import WhatsAppBusinessChatPage from './pages/inbox/WhatsAppBusinessChatPage';
 import CampaignCreatePage from './pages/CampaignCreatePage';
@@ -137,6 +138,7 @@ export default function App() {
             <Route path="account/linkedin" element={<LinkedInAccountPage />} />
             <Route path="account/whatsapp" element={<WhatsAppConnectPage />} />
             <Route path="account/gmail" element={<GmailAccountPage />} />
+            <Route path="account/social/:platform" element={<SocialAccountPage />} />
             <Route path="campaigns" element={<CampaignStatusPage />} />
             <Route path="campaigns/create" element={<CampaignCreatePage />} />
             <Route path="feed-scroll" element={<FeedScrollJobsPage />} />

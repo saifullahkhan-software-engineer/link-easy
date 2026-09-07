@@ -9,8 +9,7 @@ import Modal from '../components/Modal';
 import VerificationCodeModal from '../components/VerificationCodeModal';
 import { SlowOperationNotice, Spinner } from '../components/Spinner';
 import LinkedInUnavailableNotice from '../components/LinkedInUnavailableNotice';
-import AccountPicker from '../components/accounts/AccountPicker';
-import { useStoredAccountId } from '../hooks/useStoredAccountId';
+import { AddAccountCard, ConnectedAccountCard, LinkedInGlyph } from '../components/accounts/AccountCards';
 import { useFeatures } from '../hooks/useFeatures';
 
 function formatDate(iso) {
@@ -114,81 +113,71 @@ function EditAccountModal({ open, account, onClose, onSaved }) {
 }
 
 /* ------------------------------- main page ------------------------------- */
+/**
+ * Manage LinkedIn: one card per connected profile plus a "Connect another
+ * profile" action. The Accounts hub only says how many profiles are connected.
+ */
 export default function LinkedInAccountPage() {
   const { email: ownerEmail } = useAuth();
-  const {
-    linkedinEnabled,
-    linkedinMessage,
-    loading: featuresLoading,
-  } = useFeatures();
+  const { linkedinEnabled, linkedinMessage, loading: featuresLoading } = useFeatures();
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [account, setAccount] = useState(null);
-  const [notConnected, setNotConnected] = useState(false);
-  // Multi-profile: every connected LinkedIn profile and the one being viewed.
   const [accounts, setAccounts] = useState([]);
-  const [selectedAccountId, setSelectedAccountId] = useStoredAccountId('linkedin:active-account');
 
+  const [showConnect, setShowConnect] = useState(false);
   const [form, setForm] = useState({ linkedin_email: '', linkedin_password: '', label: '' });
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef(null);
+  const connectRef = useRef(null);
 
   const [verification, setVerification] = useState({ open: false, sessionId: null });
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshingId, setRefreshingId] = useState(null);
   const [refreshElapsed, setRefreshElapsed] = useState(0);
-  const [editOpen, setEditOpen] = useState(false);
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [editAccount, setEditAccount] = useState(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(null);
   const [disconnecting, setDisconnecting] = useState(false);
 
-  const fetchAccount = useCallback(async (accountId = null) => {
+  /** Every connected profile. Falls back to the single-account endpoint so
+   *  older backends (and installs with one profile) still render a card. */
+  const loadAccounts = useCallback(async () => {
     setLoadError(null);
     try {
-      const { data } = await linkedinApi.getAccount(accountId || null);
-      setAccount(data);
-      setNotConnected(false);
-    } catch (err) {
-      if (err?.response?.status === 404) {
-        setAccount(null);
-        setNotConnected(true);
-      } else {
-        // Don't block the user - allow them to still see the connect form
-        setAccount(null);
-        setNotConnected(true);
-        setLoadError(getErrorMessage(err, 'Could not load your LinkedIn account.'));
+      const { data } = await linkedinApi.listAccounts();
+      const list = Array.isArray(data) ? data : [];
+      if (list.length) {
+        setAccounts(list);
+        return;
+      }
+      throw new Error('empty');
+    } catch (listErr) {
+      try {
+        const { data } = await linkedinApi.getAccount();
+        setAccounts(data ? [data] : []);
+      } catch (err) {
+        setAccounts([]);
+        if (err?.response?.status !== 404 && listErr?.response) {
+          setLoadError(getErrorMessage(err, 'Could not load your LinkedIn profiles.'));
+        }
       }
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Load every connected profile (so the picker can list them), then fetch the
-  // currently selected one. Re-runs when the selection changes.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { data } = await linkedinApi.listAccounts();
-        if (!cancelled) setAccounts(Array.isArray(data) ? data : []);
-      } catch {
-        if (!cancelled) setAccounts([]);
-      }
-    })();
-    fetchAccount(selectedAccountId || null);
-    return () => {
-      cancelled = true;
-    };
-  }, [fetchAccount, selectedAccountId]);
+    loadAccounts();
+  }, [loadAccounts]);
 
-  // Switch the profile being viewed; the effect above re-fetches it.
-  const selectAccount = useCallback(
-    (id) => {
-      setSelectedAccountId(id);
-    },
-    [],
-  );
+  const upsertAccount = useCallback((updated) => {
+    if (!updated) return;
+    setAccounts((prev) => {
+      const exists = prev.some((a) => a.id === updated.id);
+      return exists ? prev.map((a) => (a.id === updated.id ? updated : a)) : [...prev, updated];
+    });
+  }, []);
 
   // elapsed timers for slow operations
   useEffect(() => {
@@ -197,15 +186,17 @@ export default function LinkedInAccountPage() {
       timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
       return () => clearInterval(timerRef.current);
     }
+    return undefined;
   }, [connecting]);
 
   useEffect(() => {
-    if (refreshing) {
+    if (refreshingId) {
       setRefreshElapsed(0);
       const t = setInterval(() => setRefreshElapsed((s) => s + 1), 1000);
       return () => clearInterval(t);
     }
-  }, [refreshing]);
+    return undefined;
+  }, [refreshingId]);
 
   /* ------------------------------ connect ------------------------------ */
   async function connect(e) {
@@ -226,17 +217,10 @@ export default function LinkedInAccountPage() {
 
       if (data.status === 'LOGIN_SUCCESS') {
         toast.success('LinkedIn account connected.');
-        setAccount(data.account);
-        setNotConnected(false);
-        try {
-          const { data: listData } = await linkedinApi.listAccounts();
-          const list = Array.isArray(listData) ? listData : [];
-          setAccounts(list);
-          if (data.account?.id) setSelectedAccountId(data.account.id);
-        } catch {
-          // The new account is already in `account`; keep going even if the list call fails.
-        }
+        upsertAccount(data.account);
         setForm({ linkedin_email: '', linkedin_password: '', label: '' });
+        setShowConnect(false);
+        loadAccounts();
       } else if (data.status === 'PENDING_VERIFICATION') {
         toast('LinkedIn wants a verification code — check the linked email/device.', {
           icon: '🔐',
@@ -253,15 +237,21 @@ export default function LinkedInAccountPage() {
     }
   }
 
+  const openConnectForm = () => {
+    setShowConnect(true);
+    setConnectError(null);
+    setTimeout(() => connectRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+  };
+
   /* --------------------------- refresh session -------------------------- */
-  async function refreshSession() {
+  async function refreshSession(account) {
     if (!ownerEmail) {
       toast.error('Owner email missing.');
       return;
     }
-    setRefreshing(true);
+    setRefreshingId(account.id);
     try {
-      const { data } = await linkedinApi.verifySession(selectedAccountId || null);
+      const { data } = await linkedinApi.verifySession(account.id || null);
       if (data.profile_missing) {
         toast(
           'The stored browser profile was missing, so this check started from a blank browser. If this keeps happening, the /app/profiles volume is not mounted.',
@@ -271,12 +261,12 @@ export default function LinkedInAccountPage() {
       switch (data.status) {
         case 'ACTIVE':
           toast.success('Session is active.');
-          if (data.account) setAccount(data.account);
+          upsertAccount(data.account);
           break;
         case 'REFRESHED':
           toast.success('Session refreshed successfully.');
-          if (data.account) setAccount(data.account);
-          else await fetchAccount();
+          if (data.account) upsertAccount(data.account);
+          else await loadAccounts();
           break;
         case 'PENDING_VERIFICATION':
           toast('LinkedIn needs a verification code to finish refreshing.', { icon: '🔐' });
@@ -288,33 +278,25 @@ export default function LinkedInAccountPage() {
         case 'FAILED':
         default:
           toast.error(data.message || 'Session refresh failed.');
-          await fetchAccount();
+          await loadAccounts();
       }
     } catch (err) {
       toast.error(getErrorMessage(err, 'Session refresh failed.'));
     } finally {
-      setRefreshing(false);
+      setRefreshingId(null);
     }
   }
 
   /* ----------------------------- disconnect ----------------------------- */
   async function disconnect() {
+    const target = confirmDisconnect;
+    if (!target) return;
     setDisconnecting(true);
     try {
-      await linkedinApi.disconnect(selectedAccountId || null);
+      await linkedinApi.disconnect(target.id || null);
       toast.success('LinkedIn account disconnected.');
-      // Drop the disconnected profile from the picker and fall back to another.
-      const remaining = accounts.filter((a) => a.id !== selectedAccountId);
-      setAccounts(remaining);
-      if (remaining.length) {
-        const next = remaining[0].id;
-        setSelectedAccountId(next);
-        await fetchAccount(next);
-      } else {
-        setAccount(null);
-        setNotConnected(true);
-      }
-      setConfirmDisconnect(false);
+      setAccounts((prev) => prev.filter((a) => a.id !== target.id));
+      setConfirmDisconnect(null);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Could not disconnect the account.'));
     } finally {
@@ -324,18 +306,25 @@ export default function LinkedInAccountPage() {
 
   function onVerificationResolved(status, data) {
     if (status === 'LOGIN_SUCCESS') {
-      if (data?.account) setAccount(data.account);
-      else fetchAccount();
-      setNotConnected(false);
+      if (data?.account) upsertAccount(data.account);
+      loadAccounts();
+      setShowConnect(false);
       toast.success('Verification succeeded — account is now active!');
     }
   }
 
   /* -------------------------------- render ------------------------------ */
+  const backLink = (
+    <Link to="/app/account" className="btn-secondary text-xs" data-testid="back-to-accounts">
+      ← Accounts
+    </Link>
+  );
+
   if (loading) {
     return (
-      <div className="max-w-3xl">
-        <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
+      <div className="mx-auto max-w-5xl">
+        {backLink}
+        <h1 className="mt-4 text-2xl font-bold text-zinc-50">LinkedIn profiles</h1>
         <div className="card mt-6 animate-pulse p-6">
           <div className="h-5 w-48 rounded bg-surface-700" />
           <div className="mt-4 h-4 w-72 rounded bg-surface-700" />
@@ -348,95 +337,112 @@ export default function LinkedInAccountPage() {
     );
   }
 
-  const hasAccount = Boolean(account);
+  const hasAccounts = accounts.length > 0;
+  const gated = !featuresLoading && !linkedinEnabled;
 
-  // LinkedIn is gated until per-account residential proxies exist — the API
-  // returns 503 for connect/verify, so showing the form would only produce a
-  // confusing failure. Users who connected earlier keep their account card
-  // (and its Disconnect button) below the notice.
-  if (!featuresLoading && !linkedinEnabled) {
-    return (
-      <div className="max-w-3xl">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
-            <p className="mt-1 text-sm text-zinc-400">
-              LinkedIn automation is paused on this deployment.
-            </p>
-          </div>
-          <Link to="/app/account" className="btn-secondary text-xs">
-            ← Accounts
-          </Link>
-        </div>
-
-        <LinkedInUnavailableNotice message={linkedinMessage} className="mt-6" />
-
-        {hasAccount && (
-          <div className="card mt-6 p-6">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-sm font-semibold text-zinc-200">
-                  Previously connected account
-                </h2>
-                <p className="mt-1 text-sm text-zinc-400">
-                  {account.linkedin_email}
-                  {account.label ? ` · ${account.label}` : ''}
-                </p>
-                <p className="mt-1 text-xs text-zinc-500">
-                  It stays linked and will resume when LinkedIn automation is re-enabled.
-                </p>
-              </div>
-              <button
-                onClick={() => setConfirmDisconnect(true)}
-                className="btn-secondary text-xs"
-              >
-                Disconnect
-              </button>
-            </div>
-          </div>
-        )}
-
-        <Modal
-          open={confirmDisconnect}
-          onClose={() => setConfirmDisconnect(false)}
-          title="Disconnect LinkedIn account?"
-        >
-          <p className="text-sm text-zinc-400">
-            This removes the stored credentials and browser profile. You can reconnect once
-            LinkedIn automation is available again.
-          </p>
-          <div className="mt-5 flex justify-end gap-3">
+  /** One profile card — the design every manage page mirrors. */
+  const renderCard = (account) => (
+    <ConnectedAccountCard
+      key={account.id || account.linkedin_email}
+      testId={`linkedin-account-${account.id || account.linkedin_email}`}
+      icon={(account.linkedin_email || '?').slice(0, 1).toUpperCase()}
+      iconClass="bg-accent-500/10 text-accent-300"
+      title={account.linkedin_email}
+      subtitle={account.label || 'LinkedIn profile'}
+      badge={<AccountStatusBadge status={account.status} />}
+      details={[
+        { label: 'Owner', value: account.owner_email || '—' },
+        { label: 'Added', value: formatDate(account.created_at) },
+        { label: 'Last updated', value: formatDate(account.updated_at) },
+        { label: 'Status', value: (account.status || '—').replace('_', ' ') },
+      ]}
+      actions={
+        gated ? (
+          <button type="button" className="btn-danger text-xs" onClick={() => setConfirmDisconnect(account)}>
+            Disconnect
+          </button>
+        ) : (
+          <>
             <button
-              onClick={() => setConfirmDisconnect(false)}
+              type="button"
               className="btn-secondary text-xs"
-              disabled={disconnecting}
+              onClick={() => refreshSession(account)}
+              disabled={refreshingId === account.id}
             >
-              Cancel
+              {refreshingId === account.id && <Spinner />}
+              {refreshingId === account.id ? 'Checking…' : 'Refresh session'}
             </button>
-            <button onClick={disconnect} className="btn-danger text-xs" disabled={disconnecting}>
-              {disconnecting && <Spinner />}
-              {disconnecting ? 'Disconnecting…' : 'Yes, disconnect'}
+            <button
+              type="button"
+              className="btn-secondary text-xs"
+              onClick={() => setEditAccount(account)}
+              disabled={refreshingId === account.id}
+            >
+              Edit
             </button>
-          </div>
-        </Modal>
-      </div>
-    );
-  }
+            <button
+              type="button"
+              className="btn-danger text-xs"
+              onClick={() => setConfirmDisconnect(account)}
+              disabled={refreshingId === account.id}
+            >
+              Disconnect
+            </button>
+          </>
+        )
+      }
+    >
+      {(account.status === 'failed' || account.status === 'suspended') && (
+        <p className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+          {account.status === 'suspended'
+            ? 'LinkedIn has suspended this profile. Log in on linkedin.com to resolve it, then refresh the session.'
+            : 'The last login attempt failed. Update the credentials and refresh the session to retry.'}
+        </p>
+      )}
+      {account.status === 'pending_verification' && (
+        <p className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          Verification needed — refresh the session to enter the code LinkedIn sent.
+        </p>
+      )}
+      {refreshingId === account.id && (
+        <div className="mt-4">
+          <SlowOperationNotice
+            title="Checking LinkedIn session…"
+            hint="Validating saved cookies and re-logging in if they expired — this may take up to two minutes on a cold start."
+            elapsedSeconds={refreshElapsed}
+          />
+        </div>
+      )}
+    </ConnectedAccountCard>
+  );
 
   return (
-    <div className="max-w-3xl">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-zinc-50">LinkedIn Account</h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            Connect the LinkedIn profile your campaigns will run from. Login happens in a real browser
-            on our side, so it may take up to two minutes during a cold start.
+    <div className="mx-auto max-w-5xl">
+      {backLink}
+
+      <header className="mt-4 flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-accent-400">Main accounts</p>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-accent-500/10 text-accent-300">
+              <LinkedInGlyph />
+            </span>
+            <h1 className="text-2xl font-bold text-zinc-50">LinkedIn profiles</h1>
+          </div>
+          <p className="mt-2 text-sm text-zinc-400">
+            {gated
+              ? 'LinkedIn automation is paused on this deployment. Connected profiles stay linked.'
+              : 'Every LinkedIn profile your campaigns, scans and live chat can run from. Login happens in a real browser on our side, so connecting can take up to two minutes on a cold start.'}
           </p>
         </div>
-        <Link to="/app/account" className="btn-secondary text-xs">
-          ← Accounts
-        </Link>
-      </div>
+        {!gated && hasAccounts && !showConnect && (
+          <button type="button" className="btn-primary" onClick={openConnectForm} data-testid="linkedin-add-account">
+            Connect another profile
+          </button>
+        )}
+      </header>
+
+      {gated && <LinkedInUnavailableNotice message={linkedinMessage} className="mt-6" />}
 
       {loadError && (
         <div className="card mt-6 border-amber-500/30 bg-amber-500/5 p-4">
@@ -445,13 +451,12 @@ export default function LinkedInAccountPage() {
             <div className="flex-1">
               <p className="text-sm font-medium text-amber-200">{loadError}</p>
               <p className="mt-1 text-xs text-zinc-400">
-                You can still try to connect your account below. If the problem persists, check if the
-                backend is running.
+                You can still try to connect a profile below. If the problem persists, check if the backend is running.
               </p>
               <button
                 onClick={() => {
                   setLoading(true);
-                  fetchAccount();
+                  loadAccounts();
                 }}
                 className="btn-secondary mt-3 text-xs"
               >
@@ -462,21 +467,61 @@ export default function LinkedInAccountPage() {
         </div>
       )}
 
-      {!hasAccount ? (
-        /* --------------------------- connect form --------------------------- */
-        <div className="card mt-6 p-6">
-          <div className="flex items-center justify-between">
+      <section className="mt-6" aria-label="Connected LinkedIn profiles">
+        <h2 className="text-sm font-semibold text-zinc-300">
+          {hasAccounts
+            ? `${accounts.length} ${accounts.length === 1 ? 'profile' : 'profiles'} connected`
+            : 'No profile connected yet'}
+        </h2>
+
+        <div className="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-2">
+          {accounts.map(renderCard)}
+          {!gated && hasAccounts && !showConnect && (
+            <AddAccountCard
+              label="Connect another profile"
+              hint="Add a second LinkedIn login to run campaigns from."
+              onClick={openConnectForm}
+              testId="linkedin-add-account-card"
+            />
+          )}
+        </div>
+      </section>
+
+      {!gated && hasAccounts && (
+        <>
+          <div className="mt-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            <p className="font-medium">⚠️ In early versions, running jobs need to be stopped before using Live Chat</p>
+            <p className="mt-1 text-amber-200/80">
+              Campaigns and live chat share the same LinkedIn session. Pause or stop your campaigns (or wait for them
+              to finish) before opening Live Chat, otherwise jobs will pause automatically while chat is open.
+            </p>
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-3">
+            <Link to="/app/feed-scroll" className="btn-primary">LinkedIn Scan</Link>
+            <Link to="/app/linkedin-live" className="btn-primary">Live Chat</Link>
+            <Link to="/app/campaigns/create" className="btn-secondary">Create campaign →</Link>
+          </div>
+        </>
+      )}
+
+      {/* --------------------------- connect form --------------------------- */}
+      {!gated && (!hasAccounts || showConnect) && (
+        <div className="card mt-6 p-6" ref={connectRef}>
+          <div className="flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-lg font-semibold text-zinc-100">Connect your LinkedIn account</h2>
+              <h2 className="text-lg font-semibold text-zinc-100">
+                {hasAccounts ? 'Connect another LinkedIn profile' : 'Connect your LinkedIn account'}
+              </h2>
               <p className="mt-1 text-sm text-zinc-500">
                 Your password is sent over HTTPS and stored only AES-256 encrypted. We never display it again.
               </p>
             </div>
-            <div className="hidden sm:flex h-10 w-10 items-center justify-center rounded-xl bg-accent-500/10 text-accent-300">
-              <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
-              </svg>
-            </div>
+            {hasAccounts && (
+              <button type="button" className="btn-secondary text-xs" onClick={() => setShowConnect(false)} disabled={connecting}>
+                Cancel
+              </button>
+            )}
           </div>
 
           {!ownerEmail && (
@@ -549,148 +594,23 @@ export default function LinkedInAccountPage() {
                 {connecting && <Spinner />}
                 {connecting ? 'Connecting…' : 'Connect LinkedIn account'}
               </button>
-              <span className="text-xs text-zinc-500">Takes ~30–40s • Secure & encrypted</span>
+              <span className="text-xs text-zinc-500">Takes ~30–40s • Secure &amp; encrypted</span>
             </div>
 
             <div className="rounded-lg bg-surface-800/60 p-3 text-xs leading-relaxed text-zinc-400">
               <p className="font-medium text-zinc-300">First time?</p>
-              <ul className="mt-1 list-disc pl-4 space-y-0.5">
-                <li>Use the email & password you normally use on linkedin.com</li>
-                <li>If LinkedIn asks for a PIN, you'll get a popup to enter it</li>
-                <li>You can disconnect anytime from this page</li>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                <li>Use the email &amp; password you normally use on linkedin.com</li>
+                <li>If LinkedIn asks for a PIN, you&apos;ll get a popup to enter it</li>
+                <li>You can disconnect any profile from its card above</li>
               </ul>
             </div>
           </form>
         </div>
-      ) : (
-        /* --------------------------- account card --------------------------- */
-        <div className="card mt-6 p-6">
-          {accounts.length > 1 && (
-            <div className="mb-4 w-80 max-w-full">
-              <AccountPicker
-                id="linkedin-account"
-                accounts={accounts}
-                value={selectedAccountId}
-                onChange={selectAccount}
-                getKey={(a) => a.id}
-                getLabel={(a) => a.label || a.linkedin_email}
-                placeholder="Select a profile"
-              />
-            </div>
-          )}
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent-500/10 text-xl font-bold text-accent-300">
-                {(account?.linkedin_email || '?').slice(0, 1).toUpperCase()}
-              </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <h2 className="text-lg font-semibold text-zinc-100">{account.linkedin_email}</h2>
-                  <AccountStatusBadge status={account.status} />
-                </div>
-                {account.label && <p className="mt-0.5 text-sm text-zinc-400">{account.label}</p>}
-              </div>
-            </div>
-            <button onClick={() => fetchAccount(selectedAccountId || null)} className="btn-secondary text-xs">
-              ↻ Refresh
-            </button>
-          </div>
-
-          <dl className="mt-5 grid grid-cols-1 gap-4 border-t border-surface-700 pt-5 text-sm sm:grid-cols-2">
-            <div>
-              <dt className="text-xs uppercase tracking-wide text-zinc-500">Owner</dt>
-              <dd className="mt-0.5 text-zinc-300">{account.owner_email}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase tracking-wide text-zinc-500">Added</dt>
-              <dd className="mt-0.5 text-zinc-300">{formatDate(account.created_at)}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase tracking-wide text-zinc-500">Last updated</dt>
-              <dd className="mt-0.5 text-zinc-300">{formatDate(account.updated_at)}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase tracking-wide text-zinc-500">Status details</dt>
-              <dd className="mt-0.5 text-zinc-300 capitalize">{account.status?.replace('_',' ')}</dd>
-            </div>
-          </dl>
-
-          {(account.status === 'failed' || account.status === 'suspended') && (
-            <div className="mt-5 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-              {account.status === 'suspended'
-                ? 'LinkedIn has suspended this account. Log in via LinkedIn directly to resolve it, then refresh the session.'
-                : 'The last login attempt failed. Update the credentials and refresh the session to retry.'}
-              <div className="mt-2 flex gap-2">
-                <button onClick={() => setEditOpen(true)} className="btn-secondary text-xs">
-                  Update credentials
-                </button>
-                <button onClick={refreshSession} className="btn-primary text-xs">
-                  Retry now
-                </button>
-              </div>
-            </div>
-          )}
-
-          {account.status === 'pending_verification' && (
-            <div className="mt-5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-              <p className="font-medium">Verification needed</p>
-              <p className="mt-1 text-amber-200/80">LinkedIn requested an extra check. Refresh to trigger code entry, or check your email.</p>
-              <button onClick={refreshSession} className="btn-primary mt-3 text-xs">
-                Refresh & verify
-              </button>
-            </div>
-          )}
-
-          {refreshing && (
-            <div className="mt-5">
-              <SlowOperationNotice
-                title="Checking LinkedIn session…"
-                hint="Validating saved cookies and re-logging in if they expired — this may take up to two minutes on a cold start."
-                elapsedSeconds={refreshElapsed}
-              />
-            </div>
-          )}
-
-          {/* Early-version note: live chat requires jobs to be stopped. */}
-          <div className="mt-5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-            <p className="font-medium">⚠️ In early versions, running jobs need to be stopped before using Live Chat</p>
-            <p className="mt-1 text-amber-200/80">
-              Campaigns and live chat share the same LinkedIn session. Pause or stop your
-              campaigns (or wait for them to finish) before opening Live Chat, otherwise
-              jobs will pause automatically while chat is open.
-            </p>
-          </div>
-
-          <div className="mt-6 flex flex-wrap gap-3">
-            <Link to="/app/feed-scroll" className="btn-primary">
-              LinkedIn Scan
-            </Link>
-            <Link to="/app/linkedin-live" className="btn-primary">
-              Live Chat
-            </Link>
-            <button onClick={refreshSession} className="btn-secondary" disabled={refreshing}>
-              {refreshing && <Spinner />}
-              {refreshing ? 'Checking…' : 'Refresh session'}
-            </button>
-            <button onClick={() => setEditOpen(true)} className="btn-secondary" disabled={refreshing}>
-              Edit
-            </button>
-            <button
-              onClick={() => setConfirmDisconnect(true)}
-              className="btn-danger"
-              disabled={refreshing}
-            >
-              Disconnect
-            </button>
-            <Link to="/app/campaigns/create" className="btn-secondary">
-              Create campaign →
-            </Link>
-          </div>
-        </div>
       )}
 
-      {/* Always-visible help card when no account, plus quick actions */}
-      {!hasAccount && !loading && (
+      {/* Help cards while nothing is connected */}
+      {!gated && !hasAccounts && (
         <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="card p-4">
             <h3 className="text-sm font-semibold text-zinc-200">How it works</h3>
@@ -704,12 +624,12 @@ export default function LinkedInAccountPage() {
           <div className="card p-4">
             <h3 className="text-sm font-semibold text-zinc-200">Need help?</h3>
             <p className="mt-2 text-xs text-zinc-400">
-              If you get stuck at login, LinkedIn may have triggered a checkpoint.
-              Try logging in manually on linkedin.com first, then return here.
+              If you get stuck at login, LinkedIn may have triggered a checkpoint. Try logging in manually on
+              linkedin.com first, then return here.
             </p>
             <div className="mt-3 flex gap-2">
-              <Link to="/" className="btn-secondary text-xs">Home</Link>
-              <button onClick={() => fetchAccount(selectedAccountId || null)} className="btn-secondary text-xs">Retry</button>
+              <Link to="/app/account" className="btn-secondary text-xs">Accounts</Link>
+              <button onClick={loadAccounts} className="btn-secondary text-xs">Retry</button>
             </div>
           </div>
         </div>
@@ -723,25 +643,25 @@ export default function LinkedInAccountPage() {
       />
 
       <EditAccountModal
-        open={editOpen}
-        account={account}
-        onClose={() => setEditOpen(false)}
-        onSaved={setAccount}
+        open={Boolean(editAccount)}
+        account={editAccount}
+        onClose={() => setEditAccount(null)}
+        onSaved={upsertAccount}
       />
 
       {/* Disconnect confirmation */}
       <Modal
-        open={confirmDisconnect}
-        onClose={disconnecting ? undefined : () => setConfirmDisconnect(false)}
+        open={Boolean(confirmDisconnect)}
+        onClose={disconnecting ? undefined : () => setConfirmDisconnect(null)}
         title="Disconnect LinkedIn account?"
       >
         <p className="text-sm text-zinc-400">
           This removes the saved credentials and session for{' '}
-          <span className="font-medium text-zinc-200">{account?.linkedin_email}</span>. Campaigns
-          tied to this account will stop running. This cannot be undone.
+          <span className="font-medium text-zinc-200">{confirmDisconnect?.linkedin_email}</span>. Campaigns tied to
+          this profile will stop running. This cannot be undone.
         </p>
         <div className="mt-6 flex justify-end gap-3">
-          <button className="btn-secondary" onClick={() => setConfirmDisconnect(false)} disabled={disconnecting}>
+          <button className="btn-secondary" onClick={() => setConfirmDisconnect(null)} disabled={disconnecting}>
             Keep account
           </button>
           <button className="btn-danger" onClick={disconnect} disabled={disconnecting}>

@@ -77,51 +77,52 @@ export function inboxSmokeCases({ AUTH_TOKENS, SOCIAL_API_STUBS, ACTIVE_ACCOUNT,
       mustContain: ['Instagram Chat', 'Go to social accounts'],
     },
     {
-      name: 'accounts socials — legacy OAuth success preserves unrelated params and focuses Accounts',
+      name: 'accounts socials — OAuth success hands over to that platform’s manage page',
       path: '/app/social-scheduler/settings?platform=tiktok&connected=1&keep=yes', storage: AUTH_TOKENS,
       api: { ...SOCIAL_API_STUBS, ...mainAccounts },
       interact: async (window) => {
-        await waitFor(() => window.location.pathname === '/app/account' && !window.location.search.includes('platform='));
-        assert.equal(window.location.hash, '#socials');
+        await waitFor(() => window.location.pathname === '/app/account/social/tiktok');
         assert.equal(window.location.search, '?keep=yes');
       },
-      mustContain: ['TikTok connected', 'Main accounts', 'Socials'],
+      mustContain: ['TikTok connected', 'TikTok accounts', 'Socials', '← Accounts'],
       mustNotContain: ['Social scheduler sections'],
     },
     {
-      name: 'accounts socials — legacy OAuth error is preserved and shown',
+      name: 'accounts socials — OAuth error is preserved and shown',
       path: '/app/social-scheduler/settings?platform=instagram&error=Permission%20not%20granted', storage: AUTH_TOKENS,
       api: { ...SOCIAL_API_STUBS, ...mainAccounts },
-      mustContain: ['Instagram: Permission not granted', 'Socials'],
+      mustContain: ['Instagram: Permission not granted', 'Instagram accounts'],
     },
     (() => {
       let connected = true;
       return {
-        name: 'accounts socials — reconnect errors recover and disconnect requires confirmation',
-        path: '/app/account#socials', storage: AUTH_TOKENS,
+        name: 'social manage page — connect errors recover and disconnect requires confirmation',
+        path: '/app/account/social/youtube', storage: AUTH_TOKENS,
         api: {
           ...SOCIAL_API_STUBS, ...mainAccounts,
-          'GET /api/v1/social-scheduler/platforms': (res) => json(res, 200, [{ platform: 'youtube', connected, configured: true, account_name: 'My Channel' }]),
+          'GET /api/v1/social-scheduler/platforms': (res) => json(res, 200, [{ platform: 'youtube', connected, configured: true, account_name: 'My Channel', accounts: connected ? [{ id: 'yt-1', platform: 'youtube', account_id: 'UC1', account_name: 'My Channel' }] : [] }]),
           'GET /api/v1/social-scheduler/platforms/youtube/auth-url': (res) => json(res, 502, { detail: 'Provider sign-in unavailable' }),
           'DELETE /api/v1/social-scheduler/platforms/youtube': (res) => { connected = false; json(res, 200, { message: 'YouTube disconnected' }); },
         },
         interact: async (window) => {
           const doc = window.document;
-          const card = await waitFor(() => doc.querySelector('[data-testid="platform-card-youtube"]'));
-          buttonNamed(card, 'Reconnect').click();
-          await waitFor(() => doc.body.textContent.includes('Provider sign-in unavailable') && !buttonNamed(card, 'Reconnect').disabled);
+          const card = await waitFor(() => doc.querySelector('[data-testid="social-account-yt-1"]'));
+          assert.ok(card.textContent.includes('My Channel'));
+          const connectAnother = await waitFor(() => buttonNamed(doc, 'Connect another account'));
+          connectAnother.click();
+          await waitFor(() => doc.body.textContent.includes('Provider sign-in unavailable'));
           buttonNamed(card, 'Disconnect').click();
-          await waitFor(() => doc.body.textContent.includes('Disconnect YouTube?'));
+          await waitFor(() => doc.body.textContent.includes('Disconnect My Channel?'));
           assert.equal(connected, true);
           buttonNamed(doc, 'Keep connected').click();
-          await waitFor(() => !doc.body.textContent.includes('Disconnect YouTube?'));
+          await waitFor(() => !doc.body.textContent.includes('Disconnect My Channel?'));
           assert.equal(connected, true);
           buttonNamed(card, 'Disconnect').click();
-          await waitFor(() => doc.body.textContent.includes('Disconnect YouTube?'));
+          await waitFor(() => doc.body.textContent.includes('Disconnect My Channel?'));
           [...doc.querySelectorAll('button')].filter((button) => button.textContent.trim() === 'Disconnect').at(-1).click();
-          await waitFor(() => !connected && card.textContent.includes('Connect YouTube'));
+          await waitFor(() => !connected && doc.body.textContent.includes('Connect your first YouTube account'));
         },
-        mustContain: ['Connect YouTube', 'Not connected', 'YouTube disconnected'],
+        mustContain: ['YouTube accounts', 'Connect YouTube', 'YouTube disconnected', '← Accounts'],
       };
     })(),
     (() => {
@@ -139,10 +140,15 @@ export function inboxSmokeCases({ AUTH_TOKENS, SOCIAL_API_STUBS, ACTIVE_ACCOUNT,
           assert.ok(doc.querySelector('#main-accounts').textContent.includes('Gmail'));
           assert.ok(doc.querySelector('[data-testid="platform-card-whatsapp-business"]'));
           buttonNamed(doc, 'Retry connections').click();
-          await waitFor(() => doc.querySelector('#socials').textContent.includes('Test Instagram'));
+          const card = await waitFor(() => {
+            const node = doc.querySelector('[data-testid="platform-card-instagram"]');
+            return node && node.textContent.includes('1 account connected') ? node : null;
+          });
+          assert.ok(card.querySelector('a[href="/app/account/social/instagram"]'));
         },
-        mustContain: ['Test Instagram', 'Test Page', 'Coming soon'],
-        mustNotContain: ['Connections temporarily unavailable'],
+        mustContain: ['1 account connected', 'Manage accounts', 'Coming soon'],
+        // The hub summarises: account names live on the manage pages only.
+        mustNotContain: ['Test Instagram', 'Test Page', 'Could not load your social connections.'],
       };
     })(),
     {
@@ -162,7 +168,7 @@ export function inboxSmokeCases({ AUTH_TOKENS, SOCIAL_API_STUBS, ACTIVE_ACCOUNT,
       interact: async (window) => {
         await waitFor(() => window.location.pathname === '/app/account/gmail' && !window.location.search);
       },
-      mustContain: ['Gmail connection', 'mail@test.dev', 'Reconnect Gmail', 'Disconnect', 'Gmail connected'],
+      mustContain: ['Gmail connection', 'mail@test.dev', 'Connect another mailbox', 'Disconnect', 'Gmail connected'],
     },
     (() => {
       let connected = true;
@@ -177,7 +183,7 @@ export function inboxSmokeCases({ AUTH_TOKENS, SOCIAL_API_STUBS, ACTIVE_ACCOUNT,
           const doc = window.document;
           const disconnect = await waitFor(() => buttonNamed(doc, 'Disconnect'));
           disconnect.click();
-          await waitFor(() => doc.body.textContent.includes('Disconnect Gmail?'));
+          await waitFor(() => doc.body.textContent.includes('Disconnect mail@test.dev?'));
           assert.equal(connected, true);
           [...doc.querySelectorAll('button')].filter((button) => button.textContent.trim() === 'Disconnect').at(-1).click();
           await waitFor(() => !connected && buttonNamed(doc, 'Connect Gmail'));

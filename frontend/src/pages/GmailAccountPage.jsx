@@ -1,19 +1,36 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { gmailApi } from '../api/gmail';
 import { getErrorMessage } from '../api/client';
-import { GmailMark, GmailStatusBadge } from '../components/gmail/GmailBits';
+import { GmailMark } from '../components/gmail/GmailBits';
 import Modal from '../components/Modal';
 import { Spinner } from '../components/Spinner';
+import {
+  AddAccountCard,
+  ConnectedAccountCard,
+  ConnectionStatusPill,
+  GmailGlyph,
+  connectionCountLabel,
+} from '../components/accounts/AccountCards';
 
-/** Gmail sign-in and disconnect live under Accounts, not inside the mailbox. */
+function formatDate(iso) {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * Manage Gmail: one card per connected mailbox plus "Connect another mailbox".
+ * The Accounts hub only shows how many mailboxes are connected.
+ */
 export default function GmailAccountPage() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
   const load = useCallback(async () => {
@@ -70,84 +87,154 @@ export default function GmailAccountPage() {
     }
   };
 
-  return (
-    <div className="mx-auto max-w-3xl">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-accent-400">Main accounts</p>
-          <h1 className="text-2xl font-bold text-zinc-100">Gmail connection</h1>
-          <p className="mt-1 text-sm text-zinc-400">Manage the Gmail or Google Workspace mailbox you read and reply from.</p>
-        </div>
-        <Link to="/app/account" className="btn-secondary text-xs">← Accounts</Link>
-      </div>
+  const mailboxes = useMemo(() => {
+    if (Array.isArray(status?.accounts) && status.accounts.length) return status.accounts;
+    if (status?.connected) {
+      return [{
+        id: null,
+        account_email: status.account_email,
+        reconnect_required: status.reconnect_required,
+        last_checked_at: status.last_checked_at,
+        expires_at: status.expires_at,
+      }];
+    }
+    return [];
+  }, [status]);
 
-      <section className="card mt-6 p-6 sm:p-8">
-        {loading ? (
-          <div className="flex h-32 items-center justify-center gap-2 text-sm text-zinc-400" role="status"><Spinner /> Loading connection…</div>
-        ) : error ? (
-          <div role="alert">
-            <p className="text-sm text-red-300">{error}</p>
-            <button type="button" className="btn-secondary mt-4" onClick={load}>Retry</button>
+  const configured = Boolean(status?.configured);
+
+  return (
+    <div className="mx-auto max-w-5xl">
+      <Link to="/app/account" className="btn-secondary text-xs" data-testid="back-to-accounts">← Accounts</Link>
+
+      <header className="mt-4 flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-accent-400">Main accounts</p>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-rose-500/10 text-rose-300">
+              <GmailGlyph />
+            </span>
+            <h1 className="text-2xl font-bold text-zinc-100">Gmail connection</h1>
+            {!loading && <ConnectionStatusPill state={mailboxes.length ? (mailboxes.some((m) => m.reconnect_required) ? 'attention' : 'connected') : 'none'} />}
           </div>
-        ) : (
-          <>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <h2 className="min-w-0 break-all text-lg font-semibold text-zinc-100">{status?.connected ? status.account_email : 'Connect your Gmail'}</h2>
-              <GmailStatusBadge status={status} />
-            </div>
-            {status?.connected ? (
-              <>
-                <p className="mt-3 text-sm text-zinc-400">
-                  Your mailbox{status.accounts?.length > 1 ? 'es are' : ' is'} connected. Open Gmail to read messages, check for new mail and send replies.
-                </p>
-                {(status.accounts || []).some((m) => m.reconnect_required) && (
-                  <p className="mt-3 text-sm text-amber-300">
-                    One or more mailboxes need Google access renewed. Connect them again to keep the inbox working.
-                  </p>
-                )}
-                <ul className="mt-4 divide-y divide-surface-700 rounded-lg border border-surface-700">
-                  {(status.accounts && status.accounts.length ? status.accounts : [{ account_email: status.account_email, id: null }]).map((mb) => (
-                    <li key={mb.id || mb.account_email} className="flex items-center justify-between gap-3 px-3 py-2.5">
-                      <span className="min-w-0">
-                        <span className="block break-all text-sm text-zinc-100">{mb.account_email}</span>
-                        {mb.reconnect_required && <span className="text-[11px] text-amber-300">Reconnect needed</span>}
-                      </span>
-                      <button
-                        type="button"
-                        className="shrink-0 rounded-md border border-surface-600 px-2.5 py-1 text-xs text-zinc-300 transition hover:border-red-500/50 hover:text-red-200 disabled:opacity-50"
-                        onClick={() => setConfirmDisconnect({ accountId: mb.id || null, email: mb.account_email })}
-                        disabled={busy}
-                      >
-                        Disconnect
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                <div className="mt-6 flex flex-wrap gap-3 border-t border-surface-700 pt-5">
-                  <Link to="/app/gmail" className="btn-primary">Open Gmail inbox</Link>
-                  <button type="button" className="btn-secondary" onClick={connect} disabled={busy || !status.configured}>{busy && <Spinner />}Connect another mailbox</button>
-                </div>
-              </>
-            ) : status?.configured ? (
-              <>
-                <p className="mt-3 text-sm leading-relaxed text-zinc-400">LinkEasy uses Google's official sign-in. Personal @gmail.com accounts and Google Workspace mailboxes are supported.</p>
-                <ul className="mt-4 list-disc space-y-2 pl-5 text-sm text-zinc-300">
-                  <li>Read and search messages and conversations.</li>
-                  <li>Manage labels, read status, archive and trash.</li>
-                  <li>Compose messages and send replies.</li>
-                </ul>
-                <button type="button" className="btn-primary mt-6" onClick={connect} disabled={busy}>
-                  {busy ? <Spinner /> : <GmailMark />}{busy ? 'Opening Google…' : 'Connect Gmail'}
-                </button>
-              </>
-            ) : (
-              <p className="mt-3 text-sm leading-relaxed text-zinc-400">Gmail needs a setup step first. Ask the operator to configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (see docs/gmail_setup.md). Sign-in will be available after setup.</p>
-            )}
-            <p className="mt-5 text-xs leading-relaxed text-zinc-500">Tokens are stored encrypted. Disconnecting removes LinkEasy's stored connection; it does not delete any messages from Gmail.</p>
-          </>
+          <p className="mt-2 text-sm text-zinc-400">
+            The Gmail or Google Workspace mailboxes you read and reply from. Tokens are stored encrypted.
+          </p>
+        </div>
+        {mailboxes.length > 0 && configured && (
+          <button type="button" className="btn-primary" onClick={connect} disabled={busy} data-testid="gmail-connect-another">
+            {busy && <Spinner />}
+            Connect another mailbox
+          </button>
         )}
-      </section>
-      <Modal open={Boolean(confirmDisconnect)} title={confirmDisconnect?.email ? `Disconnect ${confirmDisconnect.email}?` : 'Disconnect Gmail?'} onClose={() => !busy && setConfirmDisconnect(null)}>
+      </header>
+
+      {loading ? (
+        <div className="flex h-32 items-center justify-center gap-2 text-sm text-zinc-400" role="status"><Spinner /> Loading connection…</div>
+      ) : error ? (
+        <div className="card mt-6 p-6" role="alert">
+          <p className="text-sm text-red-300">{error}</p>
+          <button type="button" className="btn-secondary mt-4" onClick={load}>Retry</button>
+        </div>
+      ) : (
+        <section className="mt-6" aria-label="Connected Gmail mailboxes">
+          <h2 className="text-sm font-semibold text-zinc-300">
+            {connectionCountLabel(mailboxes.length, { one: 'mailbox', many: 'mailboxes' })}
+          </h2>
+
+          {mailboxes.length === 0 ? (
+            <div className="card mt-4 p-6">
+              {configured ? (
+                <>
+                  <h3 className="text-base font-semibold text-zinc-100">Connect your Gmail</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                    LinkEasy uses Google&apos;s official sign-in. Personal @gmail.com accounts and Google Workspace mailboxes are supported.
+                  </p>
+                  <ul className="mt-4 list-disc space-y-2 pl-5 text-sm text-zinc-300">
+                    <li>Read and search messages and conversations.</li>
+                    <li>Manage labels, read status, archive and trash.</li>
+                    <li>Compose messages and send replies.</li>
+                  </ul>
+                  <button type="button" className="btn-primary mt-6" onClick={connect} disabled={busy}>
+                    {busy ? <Spinner /> : <GmailMark />}{busy ? 'Opening Google…' : 'Connect Gmail'}
+                  </button>
+                </>
+              ) : (
+                <p className="text-sm leading-relaxed text-zinc-400">
+                  Gmail needs a setup step first. Ask the operator to configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET
+                  (see docs/gmail_setup.md). Sign-in will be available after setup.
+                </p>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="mt-4 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                {mailboxes.map((mailbox) => (
+                  <ConnectedAccountCard
+                    key={mailbox.id || mailbox.account_email}
+                    testId={`gmail-mailbox-${mailbox.id || mailbox.account_email}`}
+                    icon={<GmailGlyph />}
+                    iconClass="bg-rose-500/10 text-rose-300"
+                    title={mailbox.account_email}
+                    subtitle={mailbox.reconnect_required ? 'Google access needs renewing' : 'Connected mailbox'}
+                    badge={<ConnectionStatusPill state={mailbox.reconnect_required ? 'attention' : 'connected'} />}
+                    details={[
+                      { label: 'Last checked', value: formatDate(mailbox.last_checked_at) },
+                      { label: 'Token expires', value: formatDate(mailbox.expires_at) },
+                    ]}
+                    actions={
+                      <>
+                        {mailbox.reconnect_required ? (
+                          <button type="button" className="btn-primary text-xs" onClick={connect} disabled={busy}>
+                            {busy && <Spinner />}
+                            Reconnect Gmail
+                          </button>
+                        ) : (
+                          <Link to="/app/gmail" className="btn-secondary text-xs">Open inbox</Link>
+                        )}
+                        <button
+                          type="button"
+                          className="btn-danger text-xs"
+                          onClick={() => setConfirmDisconnect({ accountId: mailbox.id, email: mailbox.account_email })}
+                          disabled={busy}
+                          data-testid={`disconnect-mailbox-${mailbox.id || 'default'}`}
+                        >
+                          Disconnect
+                        </button>
+                      </>
+                    }
+                  />
+                ))}
+
+                {configured && (
+                  <AddAccountCard
+                    label="Connect another mailbox"
+                    hint="Sign in with a second Google account."
+                    onClick={connect}
+                    disabled={busy}
+                    testId="add-gmail-mailbox"
+                  />
+                )}
+              </div>
+
+              <div className="mt-6 flex flex-wrap gap-3">
+                <Link to="/app/gmail" className="btn-primary">Open Gmail inbox</Link>
+                <Link to="/app/gmail/compose" className="btn-secondary">Compose a message</Link>
+              </div>
+            </>
+          )}
+
+          <p className="mt-6 text-xs leading-relaxed text-zinc-500">
+            Disconnecting removes LinkEasy&apos;s stored connection; it does not delete any messages from Gmail.
+          </p>
+        </section>
+      )}
+
+      <Modal
+        open={Boolean(confirmDisconnect)}
+        title={confirmDisconnect?.email ? `Disconnect ${confirmDisconnect.email}?` : 'Disconnect Gmail?'}
+        onClose={() => !busy && setConfirmDisconnect(null)}
+      >
         <p className="text-sm text-zinc-400">
           LinkEasy will stop accessing{' '}
           {confirmDisconnect?.email ? (
