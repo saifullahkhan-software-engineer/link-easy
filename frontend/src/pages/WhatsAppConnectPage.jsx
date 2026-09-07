@@ -4,9 +4,14 @@ import toast from 'react-hot-toast';
 import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
-import AccountPicker from '../components/accounts/AccountPicker';
 import { useStoredAccountId } from '../hooks/useStoredAccountId';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
+import {
+  AddAccountCard,
+  ConnectedAccountCard,
+  WhatsAppGlyph,
+  connectionCountLabel,
+} from '../components/accounts/AccountCards';
 import BrowserViewPanel from '../components/live/BrowserViewPanel';
 
 function formatDate(iso) {
@@ -251,36 +256,71 @@ export default function WhatsAppConnectPage() {
   const connected = status === 'connected';
 
   return (
-    <div className="max-w-3xl">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
+    <div className="mx-auto max-w-4xl">
+      <Link to="/app/account" className="btn-secondary text-xs" data-testid="back-to-accounts">
+        ← Accounts
+      </Link>
+
+      <header className="mt-4">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-accent-400">Main accounts</p>
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-green-500/10 text-green-300">
+            <WhatsAppGlyph />
+          </span>
           <h1 className="text-2xl font-bold text-zinc-50">WhatsApp Account</h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            Link WhatsApp Web by scanning the QR code with your phone. The session is
-            kept in a dedicated browser profile on our side, so it stays connected
-            across restarts and scanner operations. Starting that browser may take
-            up to two minutes (longer on a free-beta cold start), so the QR code can take a
-            moment to appear.
-          </p>
         </div>
-        <Link to="/app/account" className="btn-secondary text-xs">
-          ← Accounts
-        </Link>
-      </div>
+        <p className="mt-2 text-sm text-zinc-400">
+          Link WhatsApp Web by scanning the QR code with your phone. The session is
+          kept in a dedicated browser profile on our side, so it stays connected
+          across restarts and scanner operations. Starting that browser may take
+          up to two minutes (longer on a free-beta cold start), so the QR code can take a
+          moment to appear.
+        </p>
+      </header>
 
       {sessions.length > 0 && (
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <AccountPicker
-            id="whatsapp-session"
-            hideLabel
-            accounts={sessions}
-            value={selectedSessionId}
-            onChange={selectSession}
-            getKey={(s) => String(s.id)}
-            getLabel={(s) => (s.is_default ? 'Default device' : `Device #${s.id}`)}
-            placeholder="Add / connect a device"
-          />
-        </div>
+        <section className="mt-6" aria-label="Connected WhatsApp devices">
+          <h2 className="text-sm font-semibold text-zinc-300">
+            {connectionCountLabel(sessions.length, { one: 'device', many: 'devices' })}
+          </h2>
+          <div className="mt-4 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {sessions.map((device) => {
+              const active = String(device.id) === String(selectedSessionId);
+              return (
+                <ConnectedAccountCard
+                  key={device.id}
+                  testId={`whatsapp-device-${device.id}`}
+                  icon={<WhatsAppGlyph />}
+                  iconClass="bg-green-500/10 text-green-300"
+                  title={device.is_default ? 'Default device' : `Device #${device.id}`}
+                  subtitle={active ? 'Managing this device' : 'WhatsApp Web session'}
+                  badge={<WhatsAppStatusBadge status={active ? status : device.status} reconnectRequired={false} />}
+                  details={[{ label: 'Added', value: formatDate(device.created_at) }]}
+                  highlighted={active}
+                  actions={
+                    active ? (
+                      <span className="text-xs text-zinc-500">Shown below</span>
+                    ) : (
+                      <button type="button" className="btn-secondary text-xs" onClick={() => selectSession(String(device.id))}>
+                        Manage device
+                      </button>
+                    )
+                  }
+                />
+              );
+            })}
+            <AddAccountCard
+              label="Connect another device"
+              hint="Scan a new WhatsApp Web QR code."
+              onClick={() => {
+                selectSession('');
+                handleConnect();
+              }}
+              disabled={connecting}
+              testId="add-whatsapp-device"
+            />
+          </div>
+        </section>
       )}
 
       {connected ? (

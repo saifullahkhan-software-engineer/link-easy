@@ -229,7 +229,7 @@ export default function MetaChatPage({ channel }) {
             {' '}Manage the connection in Accounts → Socials and approve messaging permissions.
           </p>
           {connection?.configured === false && <p className="mt-3 text-xs text-amber-300">The operator needs to configure this platform before you can connect.</p>}
-          <Link to="/app/account#socials" className="btn-primary mt-6">Go to social accounts</Link>
+          <Link to={`/app/account/social/${meta.platform}`} className="btn-primary mt-6">Go to social accounts</Link>
         </section>
       ) : (
         <>
@@ -239,7 +239,7 @@ export default function MetaChatPage({ channel }) {
           </div>
           {listError && <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4" role="alert">
             <p className="text-sm text-amber-200">{listError}</p>
-            <div className="mt-3 flex flex-wrap gap-3"><button type="button" className="btn-secondary" onClick={() => loadConversations()} disabled={listLoading}>Retry conversations</button><Link to="/app/account#socials" className="btn-secondary">Check social connection</Link></div>
+            <div className="mt-3 flex flex-wrap gap-3"><button type="button" className="btn-secondary" onClick={() => loadConversations()} disabled={listLoading}>Retry conversations</button><Link to={`/app/account/social/${meta.platform}`} className="btn-secondary">Check social connection</Link></div>
           </div>}
           <div className="card flex h-[34rem] overflow-hidden p-0">
             <aside className={`${selected ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-surface-700 md:w-72`}>

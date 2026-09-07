@@ -152,6 +152,7 @@ const ADMIN_API_STUBS = {
 };
 
 const ACTIVE_ACCOUNT = {
+  id: 'li-1',
   owner_email: 'owner@test.dev',
   linkedin_email: 'li@test.dev',
   label: 'Work account',
@@ -480,7 +481,7 @@ const CASES = [
       'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }),
       'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
     },
-    mustContain: ['Accounts', 'LinkedIn', 'WhatsApp', 'Connect LinkedIn account', 'Not connected'],
+    mustContain: ['Accounts', 'LinkedIn', 'WhatsApp', 'Manage profiles', 'Not connected'],
     mustNotContain: ['Session expired', 'Forgot password?'],
   },
   {
@@ -512,27 +513,43 @@ const CASES = [
     mustNotContain: ['Connect LinkedIn account'],
   },
   {
-    name: 'accounts hub — main account cards with connect actions',
+    name: 'accounts hub — nothing connected shows summary cards with manage buttons only',
     path: '/app/account',
     storage: AUTH_TOKENS,
     api: {
       'GET /api/v1/linkedin/account': (res) => json(res, 404, { detail: 'Account not found' }),
       'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'disconnected', is_active: false }),
     },
-    mustContain: ['Accounts', 'LinkedIn', 'WhatsApp', 'Connect LinkedIn account', 'Connect WhatsApp', 'Not connected'],
+    mustContain: [
+      'Accounts', 'LinkedIn', 'WhatsApp', 'Gmail',
+      'Manage profiles', 'Manage devices', 'Manage mailboxes',
+      'No profile connected yet', 'Not connected',
+    ],
+    // Connecting and per-account details belong to the manage pages.
+    mustNotContain: ['Connect LinkedIn account', 'Connect WhatsApp', 'Connect another'],
   },
   {
-    name: 'accounts hub — connected statuses render manage actions',
+    name: 'accounts hub — connected platforms only show the count, never the account',
     path: '/app/account',
     storage: AUTH_TOKENS,
     api: {
       'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT),
       'GET /api/v1/whatsapp/status': (res) => json(res, 200, { status: 'connected', is_active: true, created_at: '2026-07-15T09:00:00Z', updated_at: '2026-08-10T09:00:00Z' }),
     },
-    // The hub only shows the account + its status; details live on the
-    // manage pages.
-    mustContain: ['li@test.dev', 'Manage LinkedIn account', 'Manage WhatsApp connection', 'Connected'],
-    mustNotContain: ['Open scanner', 'Disconnect WhatsApp'],
+    interact: async (window) => {
+      const card = await (async () => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const node = window.document.querySelector('[data-testid="account-card-linkedin"]');
+          if (node && node.textContent.includes('1 profile connected')) return node;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error('Timed out waiting for the LinkedIn summary card');
+      })();
+      if (!card.querySelector('a[href="/app/account/linkedin"]')) throw new Error('Manage link missing');
+    },
+    mustContain: ['1 profile connected', '1 device connected', 'Manage profiles', 'Connected'],
+    // No account identities, no connect/disconnect actions on the hub.
+    mustNotContain: ['li@test.dev', 'Work account', 'Disconnect', 'Open scanner'],
   },
   {
     name: 'whatsapp connect page — disconnected shows connect flow + browser view',
@@ -867,11 +884,39 @@ const CASES = [
     mustNotContain: ['Forgot password?', 'Session expired'],
   },
   {
-    name: 'linkedin account page — active account renders card + actions',
+    name: 'linkedin manage page — every connected profile gets its own card',
+    path: '/app/account/linkedin',
+    storage: AUTH_TOKENS,
+    api: {
+      'GET /api/v1/linkedin/accounts': (res) =>
+        json(res, 200, [
+          ACTIVE_ACCOUNT,
+          { ...ACTIVE_ACCOUNT, id: 'li-2', linkedin_email: 'second@test.dev', label: 'Personal', status: 'pending_verification' },
+        ]),
+      'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT),
+    },
+    interact: async (window) => {
+      const waitFor = async (selector) => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const element = window.document.querySelector(selector);
+          if (element) return element;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error(`Timed out waiting for ${selector}`);
+      };
+      await waitFor('[data-testid="linkedin-account-li-1"]');
+      await waitFor('[data-testid="linkedin-account-li-2"]');
+      await waitFor('[data-testid="linkedin-add-account"]');
+      await waitFor('[data-testid="back-to-accounts"]');
+    },
+    mustContain: ['2 profiles connected', 'li@test.dev', 'second@test.dev', 'Connect another profile', '← Accounts'],
+  },
+  {
+    name: 'linkedin manage page — a card per connected profile plus connect another',
     path: '/app/account/linkedin',
     storage: AUTH_TOKENS,
     api: { 'GET /api/v1/linkedin/account': (res) => json(res, 200, ACTIVE_ACCOUNT) },
-    mustContain: ['li@test.dev', 'Connected', 'Refresh session', 'Disconnect', 'Work account'],
+    mustContain: ['li@test.dev', 'Connected', 'Refresh session', 'Disconnect', 'Work account', '← Accounts', 'Connect another profile'],
   },
   {
     name: 'campaigns page — two-panel workspace with leads',
@@ -1401,8 +1446,8 @@ const CASES = [
     mustContain: ['Calendar', 'Mon', 'Sun', 'calendar-day', 'Launch teaser', 'this month'],
   },
   {
-    name: 'accounts socials — manages the saved Facebook groups',
-    path: '/app/account#socials',
+    name: 'facebook manage page — manages the saved Facebook groups',
+    path: '/app/account/social/facebook',
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
     interact: async (window) => {
@@ -1432,14 +1477,46 @@ const CASES = [
     mustContain: ['Facebook groups for manual sharing', 'Video Editors PK', 'Save group'],
   },
   {
-    name: 'accounts socials — legacy settings redirect shows connect / disconnect state',
-    path: '/app/social-scheduler/settings?platform=tiktok&connected=1',
+    name: 'accounts hub — socials summarise connections and link to their manage pages',
+    path: '/app/account',
     storage: AUTH_TOKENS,
     api: SOCIAL_API_STUBS,
     mustContain: [
-      'Main accounts', 'Socials', 'Connected platforms: 1 of 4', 'My Channel', 'Disconnect', 'Reconnect', 'Connect TikTok',
-      'Connect Facebook', 'Not available on this instance', 'platform-card-instagram',
+      'Main accounts', 'Socials', 'YouTube', 'TikTok', 'Manage accounts',
+      '1 account connected', 'No account connected yet', 'Not set up on this instance yet',
+      'platform-card-instagram', '/app/account/social/youtube',
     ],
+    // Account names, connect and disconnect all live on the manage pages.
+    mustNotContain: ['My Channel', 'Disconnect', 'Connect TikTok', 'Set up app credentials'],
+  },
+  {
+    name: 'social manage page — every connected account gets its own card',
+    path: '/app/account/social/youtube',
+    storage: AUTH_TOKENS,
+    api: {
+      ...SOCIAL_API_STUBS,
+      'GET /api/v1/social-scheduler/platforms': (res) =>
+        json(res, 200, [
+          {
+            platform: 'youtube', label: 'YouTube', connected: true, configured: true, account_name: 'Main Channel', account_id: 'UC1',
+            accounts: [
+              { id: 'yt-1', platform: 'youtube', account_id: 'UC1', account_name: 'Main Channel', reconnect_required: false, connected_at: socialPast, updated_at: socialPast },
+              { id: 'yt-2', platform: 'youtube', account_id: 'UC2', account_name: 'Clips Channel', reconnect_required: true, connected_at: socialPast, updated_at: socialPast },
+            ],
+          },
+        ]),
+    },
+    mustContain: [
+      'YouTube accounts', '2 accounts connected', 'Main Channel', 'Clips Channel',
+      'Connect another account', 'Reconnect', '← Accounts',
+    ],
+  },
+  {
+    name: 'social manage page — an unconfigured platform explains itself instead of offering connect',
+    path: '/app/account/social/instagram',
+    storage: AUTH_TOKENS,
+    api: SOCIAL_API_STUBS,
+    mustContain: ['Instagram accounts', 'not set up on this instance yet', '← Accounts'],
   },
 ];
 

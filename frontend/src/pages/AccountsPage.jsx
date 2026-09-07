@@ -1,131 +1,70 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { linkedinApi, whatsappApi } from '../api/endpoints';
 import { gmailApi } from '../api/gmail';
-import { AccountStatusBadge } from '../components/Badge';
-import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
-import { GmailStatusBadge } from '../components/gmail/GmailBits';
-import SocialConnectionsSection from '../components/accounts/SocialConnectionsSection';
-
-function NotConnectedBadge() {
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-500/10 px-2.5 py-1 text-xs font-medium text-zinc-300 ring-1 ring-inset ring-zinc-500/20">
-      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
-      Not connected
-    </span>
-  );
-}
-
-/* Platform glyphs kept local so the Accounts hub stays self-contained. */
-function WhatsAppIcon() {
-  return (
-    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 9.75a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375m-13.5 3.01c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.184-4.183a1.14 1.14 0 0 1 .778-.332 48.294 48.294 0 0 0 5.83-.498c1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
-    </svg>
-  );
-}
-function LinkedInIcon() {
-  return (
-    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
-    </svg>
-  );
-}
-function GmailIcon() {
-  return (
-    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M1.5 5.25A2.25 2.25 0 0 1 3.75 3h16.5a2.25 2.25 0 0 1 2.25 2.25v13.5A2.25 2.25 0 0 1 20.25 21H3.75a2.25 2.25 0 0 1-2.25-2.25V5.25Zm1.5.66v12.84c0 .41.34.75.75.75h16.5c.41 0 .75-.34.75-.75V5.91l-8.28 6.07a1.5 1.5 0 0 1-1.68 0L3 5.91Zm1.03-.66L12 11.32l7.97-6.07H4.03Z" />
-    </svg>
-  );
-}
-
-/** A group of connection cards for one platform, with a connect/manage header. */
-function PlatformGroup({ icon, title, to, connectLabel, children }) {
-  return (
-    <div className="mt-7">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-800 text-zinc-200">{icon}</div>
-          <h3 className="text-lg font-semibold text-zinc-100">{title}</h3>
-        </div>
-        <Link to={to} className="btn-secondary text-xs">{connectLabel}</Link>
-      </div>
-      <div className="mt-4 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">{children}</div>
-    </div>
-  );
-}
-
-/** One card per connected account/session/mailbox. */
-function ConnectionCard({ icon, title, subtitle, badge, manageTo, manageLabel }) {
-  return (
-    <div className="card relative flex min-w-0 flex-col p-5">
-      <div className="flex items-start gap-3 pb-5 pr-28">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-800 text-zinc-200">{icon}</div>
-          <div className="min-w-0">
-            <h3 className="text-lg font-semibold text-zinc-100">{title}</h3>
-            {subtitle ? (
-              <p className="mt-0.5 truncate text-sm text-zinc-400">{subtitle}</p>
-            ) : (
-              <p className="mt-0.5 h-4 w-28 animate-pulse rounded bg-surface-700" />
-            )}
-          </div>
-        </div>
-        {badge && <div className="absolute right-5 top-5">{badge}</div>}
-      </div>
-      <div className="mt-auto flex flex-wrap gap-3 border-t border-surface-700 pt-4">
-        <Link to={manageTo} className="btn-primary">{manageLabel}</Link>
-      </div>
-    </div>
-  );
-}
-
-function EmptyConnectionCard({ icon, label, to, label2 }) {
-  return (
-    <div className="card flex min-w-0 flex-col p-5">
-      <div className="flex min-w-0 items-center gap-3 pb-5">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-800 text-zinc-200">{icon}</div>
-        <p className="text-sm text-zinc-400">{label}</p>
-      </div>
-      <div className="mt-auto border-t border-surface-700 pt-4">
-        {label2 ? <p className="text-xs text-zinc-500">{label2}</p> : <Link to={to} className="btn-secondary text-xs">Connect</Link>}
-      </div>
-    </div>
-  );
-}
+import { socialSchedulerApi, PLATFORMS } from '../api/socialScheduler';
+import { PlatformIcon } from '../components/social/SocialBits';
+import { ChannelIcon } from '../components/inbox/InboxBits';
+import {
+  GmailGlyph,
+  LinkedInGlyph,
+  PlatformSummaryCard,
+  WhatsAppGlyph,
+} from '../components/accounts/AccountCards';
 
 /**
- * Accounts hub — Main accounts (WhatsApp, LinkedIn, Gmail) and Socials.
+ * Accounts hub — a summary only.
  *
- * Each card only shows the account and its status. All details — when it was
- * added, session health, disconnect, and the Scan / Live Chat shortcuts —
- * live on each account's manage page.
+ * Every platform gets one card that says whether it is connected and how many
+ * accounts are connected, plus a single button to its manage page. No account
+ * names, no connect buttons and no per-account actions live here: those all
+ * belong to the manage pages (e.g. /app/account/linkedin).
  */
 export default function AccountsPage() {
-  const { hash, key } = useLocation();
+  const { hash, key, pathname } = useLocation();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   useEffect(() => {
     if (hash === '#socials' || hash === '#main-accounts') {
       document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' });
     }
   }, [hash, key]);
-  // WhatsApp — one card per connected device/session.
+
+  // WhatsApp — connected devices/sessions.
   const [waLoading, setWaLoading] = useState(true);
   const [waSessions, setWaSessions] = useState([]);
-  // LinkedIn — one card per connected profile.
+  // LinkedIn — connected profiles.
   const [liLoading, setLiLoading] = useState(true);
   const [liAccounts, setLiAccounts] = useState([]);
-  // Gmail — one card per connected mailbox.
+  // Gmail — connected mailboxes.
   const [gmLoading, setGmLoading] = useState(true);
-  const [gmAccounts, setGmAccounts] = useState([]);
+  const [gmStatus, setGmStatus] = useState(null);
+  // Socials — YouTube / Facebook / Instagram / TikTok.
+  const [socialLoading, setSocialLoading] = useState(true);
+  const [socialError, setSocialError] = useState(null);
+  const [connections, setConnections] = useState([]);
 
   const loadWhatsApp = useCallback(async () => {
     setWaLoading(true);
     try {
       const { data } = await whatsappApi.listSessions();
-      setWaSessions(Array.isArray(data?.sessions) ? data.sessions : []);
+      const list = Array.isArray(data?.sessions) ? data.sessions : [];
+      if (list.length) {
+        setWaSessions(list);
+        return;
+      }
+      // Older backends (and installs with a single device) only expose status.
+      const { data: status } = await whatsappApi.getStatus();
+      setWaSessions(status?.status === 'connected' ? [{ id: 'default', status: status.status, connected: true }] : []);
     } catch {
-      setWaSessions([]); // backend down → treat as no sessions
+      try {
+        const { data: status } = await whatsappApi.getStatus();
+        setWaSessions(status?.status === 'connected' ? [{ id: 'default', status: status.status, connected: true }] : []);
+      } catch {
+        setWaSessions([]); // backend down → treat as no devices
+      }
     } finally {
       setWaLoading(false);
     }
@@ -135,9 +74,20 @@ export default function AccountsPage() {
     setLiLoading(true);
     try {
       const { data } = await linkedinApi.listAccounts();
-      setLiAccounts(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      if (list.length) {
+        setLiAccounts(list);
+        return;
+      }
+      const { data: single } = await linkedinApi.getAccount();
+      setLiAccounts(single ? [single] : []);
     } catch {
-      setLiAccounts([]); // 404 or backend down → treat as no accounts
+      try {
+        const { data: single } = await linkedinApi.getAccount();
+        setLiAccounts(single ? [single] : []);
+      } catch {
+        setLiAccounts([]); // 404 or backend down → treat as no profiles
+      }
     } finally {
       setLiLoading(false);
     }
@@ -147,11 +97,25 @@ export default function AccountsPage() {
     setGmLoading(true);
     try {
       const { data } = await gmailApi.status();
-      setGmAccounts(Array.isArray(data?.accounts) ? data.accounts : []);
+      setGmStatus(data || null);
     } catch {
-      setGmAccounts([]);
+      setGmStatus(null);
     } finally {
       setGmLoading(false);
+    }
+  }, []);
+
+  const loadSocials = useCallback(async () => {
+    setSocialLoading(true);
+    setSocialError(null);
+    try {
+      const { data } = await socialSchedulerApi.listPlatforms();
+      setConnections(Array.isArray(data) ? data : []);
+    } catch {
+      setSocialError('Could not load your social connections.');
+      setConnections([]);
+    } finally {
+      setSocialLoading(false);
     }
   }, []);
 
@@ -159,124 +123,170 @@ export default function AccountsPage() {
     loadWhatsApp();
     loadLinkedIn();
     loadGmail();
-  }, [loadWhatsApp, loadLinkedIn, loadGmail]);
+    loadSocials();
+  }, [loadWhatsApp, loadLinkedIn, loadGmail, loadSocials]);
+
+  // A platform OAuth round-trip returns the browser here (the backend's
+  // configured return URL). Report the outcome and hand the user over to that
+  // platform's manage page, where the account now shows up.
+  useEffect(() => {
+    const platform = searchParams.get('platform');
+    if (!platform) return;
+    const label = PLATFORMS.find((p) => p.id === platform)?.label || platform;
+    const error = searchParams.get('error');
+    const connected = searchParams.get('connected') === '1';
+    if (connected) toast.success(`${label} connected`);
+    else if (error) toast.error(`${label}: ${error}`, { duration: 8000 });
+
+    const remaining = new URLSearchParams(searchParams);
+    ['platform', 'connected', 'error'].forEach((param) => remaining.delete(param));
+    const known = PLATFORMS.some((p) => p.id === platform);
+    navigate(
+      known
+        ? { pathname: `/app/account/social/${platform}`, search: remaining.toString() }
+        : { pathname, search: remaining.toString(), hash: '#socials' },
+      { replace: true },
+    );
+  }, [searchParams, pathname, navigate]);
+
+  const gmailAccounts = useMemo(() => {
+    if (Array.isArray(gmStatus?.accounts) && gmStatus.accounts.length) return gmStatus.accounts;
+    if (gmStatus?.connected) return [{ id: 'default', account_email: gmStatus.account_email }];
+    return [];
+  }, [gmStatus]);
+
+  const waConnected = waSessions.filter((s) => s.connected || s.status === 'connected');
+  const liActive = liAccounts.filter((a) => a.status === 'active');
+  const gmAttention = gmailAccounts.some((m) => m.reconnect_required);
+
+  const mainCards = [
+    {
+      key: 'whatsapp',
+      title: 'WhatsApp',
+      icon: <WhatsAppGlyph />,
+      iconClass: 'bg-green-500/10 text-green-300',
+      loading: waLoading,
+      count: waSessions.length,
+      noun: { one: 'device', many: 'devices' },
+      state: waSessions.length === 0 ? 'none' : waConnected.length ? 'connected' : 'pending',
+      manageTo: '/app/account/whatsapp',
+      manageLabel: 'Manage devices',
+    },
+    {
+      key: 'linkedin',
+      title: 'LinkedIn',
+      icon: <LinkedInGlyph />,
+      iconClass: 'bg-accent-500/10 text-accent-300',
+      loading: liLoading,
+      count: liAccounts.length,
+      noun: { one: 'profile', many: 'profiles' },
+      state: liAccounts.length === 0 ? 'none' : liActive.length ? 'connected' : 'pending',
+      manageTo: '/app/account/linkedin',
+      manageLabel: 'Manage profiles',
+    },
+    {
+      key: 'gmail',
+      title: 'Gmail',
+      icon: <GmailGlyph />,
+      iconClass: 'bg-rose-500/10 text-rose-300',
+      loading: gmLoading,
+      count: gmailAccounts.length,
+      noun: { one: 'mailbox', many: 'mailboxes' },
+      state: gmailAccounts.length === 0 ? 'none' : gmAttention ? 'attention' : 'connected',
+      manageTo: '/app/account/gmail',
+      manageLabel: 'Manage mailboxes',
+    },
+  ];
 
   return (
     <div className="mx-auto max-w-6xl">
       <h1 className="text-2xl font-bold text-zinc-50">Accounts</h1>
       <p className="mt-1 text-sm text-zinc-400">
-        All your connections, in one place. Manage your main accounts and socials here.
+        An overview of your connections. Open a platform to see its accounts, add another one or disconnect.
       </p>
-
-      <nav aria-label="Account sections" className="mt-5 flex flex-wrap gap-2">
-        <Link to="/app/account#main-accounts" className="btn-secondary">Main accounts</Link>
-        <Link to="/app/account#socials" className="btn-secondary">Socials</Link>
-      </nav>
 
       <section id="main-accounts" aria-labelledby="main-accounts-title" className="mt-8 scroll-mt-20 lg:scroll-mt-6">
         <h2 id="main-accounts-title" className="text-xl font-semibold text-zinc-100">Main accounts</h2>
-        <p className="mt-1 text-sm text-zinc-400">
-          WhatsApp, LinkedIn and Gmail connections for your day-to-day work. Each connected account is listed
-          separately — manage or add more from each one&apos;s own card.
-        </p>
+        <p className="mt-1 text-sm text-zinc-400">WhatsApp, LinkedIn and Gmail — your day-to-day connections.</p>
 
-        {/* WhatsApp — one card per device/session */}
-        <PlatformGroup
-          icon={<WhatsAppIcon />}
-          title="WhatsApp"
-          to="/app/account/whatsapp"
-          connectLabel={waLoading ? 'WhatsApp' : waSessions.length ? 'Connect another device' : 'Connect WhatsApp'}
-        >
-          {waLoading ? (
-            <div className="card flex min-w-0 flex-col p-5">
-              <div className="flex items-center gap-3 pb-5">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-800 text-green-300"><WhatsAppIcon /></div>
-                <p className="h-4 w-32 animate-pulse rounded bg-surface-700" />
-              </div>
-            </div>
-          ) : waSessions.length === 0 ? (
-            <EmptyConnectionCard icon={<WhatsAppIcon />} label="No WhatsApp devices connected yet." to="/app/account/whatsapp" />
-          ) : (
-            waSessions.map((s) => (
-              <ConnectionCard
-                key={s.id}
-                icon={<WhatsAppIcon />}
-                title={`Session #${s.id}`}
-                subtitle={s.connected ? (s.is_default ? 'Default device' : 'Connected device') : (s.status === 'waiting_qr' ? 'Awaiting QR scan' : 'Not connected')}
-                badge={<WhatsAppStatusBadge status={s.status} reconnectRequired={false} />}
-                manageTo="/app/account/whatsapp"
-                manageLabel="Manage device"
-              />
-            ))
-          )}
-        </PlatformGroup>
-
-        {/* LinkedIn — one card per profile */}
-        <PlatformGroup
-          icon={<LinkedInIcon />}
-          title="LinkedIn"
-          to="/app/account/linkedin"
-          connectLabel={liLoading ? 'LinkedIn' : liAccounts.length ? 'Connect another profile' : 'Connect LinkedIn'}
-        >
-          {liLoading ? (
-            <div className="card flex min-w-0 flex-col p-5">
-              <div className="flex items-center gap-3 pb-5">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-800 text-accent-300"><LinkedInIcon /></div>
-                <p className="h-4 w-32 animate-pulse rounded bg-surface-700" />
-              </div>
-            </div>
-          ) : liAccounts.length === 0 ? (
-            <EmptyConnectionCard icon={<LinkedInIcon />} label="No LinkedIn profiles connected yet." to="/app/account/linkedin" />
-          ) : (
-            liAccounts.map((acc) => (
-              <ConnectionCard
-                key={acc.id}
-                icon={<LinkedInIcon />}
-                title={acc.label || acc.linkedin_email}
-                subtitle={acc.linkedin_email}
-                badge={<AccountStatusBadge status={acc.status} />}
-                manageTo="/app/account/linkedin"
-                manageLabel="Manage profile"
-              />
-            ))
-          )}
-        </PlatformGroup>
-
-        {/* Gmail — one card per mailbox */}
-        <PlatformGroup
-          icon={<GmailIcon />}
-          title="Gmail"
-          to="/app/account/gmail"
-          connectLabel={gmLoading ? 'Gmail' : gmAccounts.length ? 'Connect another mailbox' : 'Connect Gmail'}
-        >
-          {gmLoading ? (
-            <div className="card flex min-w-0 flex-col p-5">
-              <div className="flex items-center gap-3 pb-5">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-800 text-rose-300"><GmailIcon /></div>
-                <p className="h-4 w-32 animate-pulse rounded bg-surface-700" />
-              </div>
-            </div>
-          ) : gmAccounts.length === 0 ? (
-            <EmptyConnectionCard icon={<GmailIcon />} label="No Gmail mailboxes connected yet." to="/app/account/gmail" />
-          ) : (
-            gmAccounts.map((acc) => (
-              <ConnectionCard
-                key={acc.id}
-                icon={<GmailIcon />}
-                title={acc.account_email}
-                subtitle={acc.reconnect_required ? 'Reconnect needed' : 'Connected mailbox'}
-                badge={<GmailStatusBadge status={{ connected: !acc.reconnect_required, reconnect_required: acc.reconnect_required }} />}
-                manageTo="/app/account/gmail"
-                manageLabel="Open mailbox"
-              />
-            ))
-          )}
-        </PlatformGroup>
+        <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {mainCards.map((card) => (
+            <PlatformSummaryCard
+              key={card.key}
+              testId={`account-card-${card.key}`}
+              icon={card.icon}
+              iconClass={card.iconClass}
+              title={card.title}
+              loading={card.loading}
+              state={card.state}
+              count={card.count}
+              noun={card.noun}
+              manageTo={card.manageTo}
+              manageLabel={card.manageLabel}
+            />
+          ))}
+        </div>
       </section>
 
-      <div className="mt-10">
-        <SocialConnectionsSection />
-      </div>
+      <section
+        id="socials"
+        aria-labelledby="socials-title"
+        className="mt-10 scroll-mt-20 border-t border-surface-700 pt-8 lg:scroll-mt-6"
+      >
+        <h2 id="socials-title" className="text-xl font-semibold text-zinc-100">Socials</h2>
+        <p className="mt-1 text-sm text-zinc-400">
+          The social accounts used by Social Scheduler and Ultimate Inbox. Tokens are stored encrypted.
+        </p>
+
+        {socialError && (
+          <div className="mt-4 rounded-xl border border-red-500/20 bg-red-500/5 p-4" role="alert">
+            <p className="text-sm text-red-300">{socialError}</p>
+            <button type="button" className="btn-secondary mt-3" onClick={loadSocials}>
+              Retry connections
+            </button>
+          </div>
+        )}
+
+        <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {PLATFORMS.map((platform) => {
+            const conn = connections.find((c) => c.platform === platform.id);
+            const accounts = Array.isArray(conn?.accounts)
+              ? conn.accounts
+              : conn?.connected
+                ? [{ id: 'default' }]
+                : [];
+            const attention = Boolean(conn?.reconnect_required) || accounts.some((a) => a.reconnect_required);
+            const state = accounts.length === 0 ? 'none' : attention ? 'attention' : 'connected';
+            return (
+              <PlatformSummaryCard
+                key={platform.id}
+                testId={`platform-card-${platform.id}`}
+                icon={<PlatformIcon platform={platform.id} className="h-6 w-6" />}
+                iconClass={accounts.length ? 'bg-accent-500/15 text-accent-300' : 'bg-surface-700 text-zinc-400'}
+                title={platform.label}
+                hint={!socialLoading && conn && !conn.configured ? 'Not set up on this instance yet.' : undefined}
+                loading={socialLoading}
+                state={state}
+                count={accounts.length}
+                manageTo={`/app/account/social/${platform.id}`}
+                manageLabel="Manage accounts"
+              />
+            );
+          })}
+
+          <PlatformSummaryCard
+            testId="platform-card-whatsapp-business"
+            icon={<ChannelIcon channel="whatsapp-business" className="h-6 w-6" />}
+            iconClass="bg-green-500/10 text-green-300"
+            title="WhatsApp Business"
+            hint="Business connections and messaging arrive in a future update."
+            state="soon"
+            count={0}
+            manageLabel="Coming soon"
+            disabled
+          />
+        </div>
+      </section>
     </div>
   );
 }
