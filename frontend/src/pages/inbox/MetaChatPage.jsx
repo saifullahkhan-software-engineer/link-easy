@@ -6,6 +6,8 @@ import { socialSchedulerApi } from '../../api/socialScheduler';
 import { getErrorMessage } from '../../api/client';
 import { INBOX_CHANNELS } from '../../constants/inbox';
 import { ChannelIcon, InboxPageHeader } from '../../components/inbox/InboxBits';
+import AccountPicker from '../../components/accounts/AccountPicker';
+import { useStoredAccountId } from '../../hooks/useStoredAccountId';
 import { Spinner } from '../../components/Spinner';
 import { formatDateTime } from '../../components/social/SocialBits';
 
@@ -35,6 +37,34 @@ export default function MetaChatPage({ channel }) {
   const messagesEnd = useRef(null);
   const available = Boolean(connection?.connected && !connection?.reconnect_required);
 
+  // Multi-account: pick which connected Facebook Page / Instagram account to
+  // read and reply from for this channel.
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAccountId, setSelectedAccountId] = useStoredAccountId(`meta-inbox:${channel}`);
+  const accountRef = useRef('');
+  useEffect(() => {
+    accountRef.current = selectedAccountId;
+  }, [selectedAccountId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await inboxApi.accounts(channel);
+        const list = Array.isArray(data?.accounts) ? data.accounts : [];
+        if (cancelled) return;
+        setAccounts(list);
+        const defaultId = list.find((a) => a.is_default)?.id ?? list[0]?.id ?? '';
+        if (!accountRef.current && defaultId) setSelectedAccountId(String(defaultId));
+      } catch {
+        if (!cancelled) setAccounts([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [channel]);
+
   useEffect(() => {
     let cancelled = false;
     setConnectionLoading(true);
@@ -56,7 +86,7 @@ export default function MetaChatPage({ channel }) {
     setListLoading(true);
     setListError(null);
     try {
-      const { data } = await inboxApi.conversations(channel, { after, signal: request.signal });
+      const { data } = await inboxApi.conversations(channel, { after, signal: request.signal, accountId: accountRef.current || null });
       if (request.signal.aborted) return;
       const rows = Array.isArray(data.conversations) ? data.conversations : [];
       setConversations((previous) => after
@@ -77,7 +107,7 @@ export default function MetaChatPage({ channel }) {
     setMessagesLoading(true);
     setMessagesError(null);
     try {
-      const { data } = await inboxApi.messages(channel, conversationId, { signal: request.signal });
+      const { data } = await inboxApi.messages(channel, conversationId, { signal: request.signal, accountId: accountRef.current || null });
       if (!request.signal.aborted && activeConversation.current === conversationId) {
         setMessages(Array.isArray(data.messages) ? data.messages : []);
       }
@@ -144,7 +174,7 @@ export default function MetaChatPage({ channel }) {
     sendInFlight.current = true;
     setSending(true);
     try {
-      const { data } = await inboxApi.reply(channel, conversationId, text);
+      const { data } = await inboxApi.reply(channel, conversationId, text, accountRef.current || null);
       if (activeConversation.current !== conversationId) return;
       // Display only a provider-acknowledged send, never an optimistic/fake reply.
       const createdAt = new Date().toISOString();
@@ -166,7 +196,21 @@ export default function MetaChatPage({ channel }) {
       <InboxPageHeader
         channel={channel}
         description={channel === 'instagram' ? 'Read and reply to conversations on your connected professional Instagram account.' : 'Read and reply to Messenger conversations on your connected Facebook Page.'}
-        action={available && <button type="button" className="btn-secondary" onClick={refresh} disabled={listLoading || messagesLoading || sending}>{listLoading && <Spinner />}Refresh inbox</button>}
+        action={available && (<>
+          {accounts.length > 1 && (
+            <AccountPicker
+              id={`meta-${channel}-account`}
+              hideLabel
+              accounts={accounts}
+              value={selectedAccountId}
+              onChange={setSelectedAccountId}
+              getKey={(a) => String(a.id)}
+              getLabel={(a) => a.account_name || a.account_id}
+              placeholder="Account"
+            />
+          )}
+          <button type="button" className="btn-secondary" onClick={refresh} disabled={listLoading || messagesLoading || sending}>{listLoading && <Spinner />}Refresh inbox</button>
+        </>)}
       />
 
       {connectionLoading ? (
@@ -190,7 +234,7 @@ export default function MetaChatPage({ channel }) {
       ) : (
         <>
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
-            <p>Account: <span className="font-medium text-zinc-300">{connection.account_name || connection.account_id}</span></p>
+            <p>Account: <span className="font-medium text-zinc-300">{accounts.find((a) => a.id === selectedAccountId)?.account_name || connection.account_name || connection.account_id}</span></p>
             <p>Latest 20 messages per conversation · Refresh to check for updates</p>
           </div>
           {listError && <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4" role="alert">

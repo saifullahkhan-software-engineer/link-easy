@@ -98,6 +98,9 @@ class LinkedInAccountUpdate(BaseModel):
 class LinkedInAccountResponse(BaseModel):
     """Safe account representation returned to the client."""
 
+    # Row id — what the account picker sends back as ``account_id`` to address
+    # this exact LinkedIn profile in update/delete/verify/live-chat routes.
+    id: str
     owner_email: EmailStr
     linkedin_email: EmailStr
     label: str | None

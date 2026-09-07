@@ -9,6 +9,8 @@ import Modal from '../components/Modal';
 import VerificationCodeModal from '../components/VerificationCodeModal';
 import { SlowOperationNotice, Spinner } from '../components/Spinner';
 import LinkedInUnavailableNotice from '../components/LinkedInUnavailableNotice';
+import AccountPicker from '../components/accounts/AccountPicker';
+import { useStoredAccountId } from '../hooks/useStoredAccountId';
 import { useFeatures } from '../hooks/useFeatures';
 
 function formatDate(iso) {
@@ -46,7 +48,7 @@ function EditAccountModal({ open, account, onClose, onSaved }) {
         onClose();
         return;
       }
-      const { data } = await linkedinApi.updateAccount(payload);
+      const { data } = await linkedinApi.updateAccount(payload, account?.id);
       toast.success('Account updated.');
       if (payload.linkedin_password)
         toast('Password changed — the session will need re-verification.', { icon: 'ℹ️' });
@@ -124,6 +126,9 @@ export default function LinkedInAccountPage() {
   const [loadError, setLoadError] = useState(null);
   const [account, setAccount] = useState(null);
   const [notConnected, setNotConnected] = useState(false);
+  // Multi-profile: every connected LinkedIn profile and the one being viewed.
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAccountId, setSelectedAccountId] = useStoredAccountId('linkedin:active-account');
 
   const [form, setForm] = useState({ linkedin_email: '', linkedin_password: '', label: '' });
   const [connecting, setConnecting] = useState(false);
@@ -138,10 +143,10 @@ export default function LinkedInAccountPage() {
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
 
-  const fetchAccount = useCallback(async () => {
+  const fetchAccount = useCallback(async (accountId = null) => {
     setLoadError(null);
     try {
-      const { data } = await linkedinApi.getAccount();
+      const { data } = await linkedinApi.getAccount(accountId || null);
       setAccount(data);
       setNotConnected(false);
     } catch (err) {
@@ -159,9 +164,31 @@ export default function LinkedInAccountPage() {
     }
   }, []);
 
+  // Load every connected profile (so the picker can list them), then fetch the
+  // currently selected one. Re-runs when the selection changes.
   useEffect(() => {
-    fetchAccount();
-  }, [fetchAccount]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await linkedinApi.listAccounts();
+        if (!cancelled) setAccounts(Array.isArray(data) ? data : []);
+      } catch {
+        if (!cancelled) setAccounts([]);
+      }
+    })();
+    fetchAccount(selectedAccountId || null);
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchAccount, selectedAccountId]);
+
+  // Switch the profile being viewed; the effect above re-fetches it.
+  const selectAccount = useCallback(
+    (id) => {
+      setSelectedAccountId(id);
+    },
+    [],
+  );
 
   // elapsed timers for slow operations
   useEffect(() => {
@@ -201,6 +228,14 @@ export default function LinkedInAccountPage() {
         toast.success('LinkedIn account connected.');
         setAccount(data.account);
         setNotConnected(false);
+        try {
+          const { data: listData } = await linkedinApi.listAccounts();
+          const list = Array.isArray(listData) ? listData : [];
+          setAccounts(list);
+          if (data.account?.id) setSelectedAccountId(data.account.id);
+        } catch {
+          // The new account is already in `account`; keep going even if the list call fails.
+        }
         setForm({ linkedin_email: '', linkedin_password: '', label: '' });
       } else if (data.status === 'PENDING_VERIFICATION') {
         toast('LinkedIn wants a verification code — check the linked email/device.', {
@@ -226,7 +261,7 @@ export default function LinkedInAccountPage() {
     }
     setRefreshing(true);
     try {
-      const { data } = await linkedinApi.verifySession(ownerEmail);
+      const { data } = await linkedinApi.verifySession(selectedAccountId || null);
       if (data.profile_missing) {
         toast(
           'The stored browser profile was missing, so this check started from a blank browser. If this keeps happening, the /app/profiles volume is not mounted.',
@@ -266,10 +301,19 @@ export default function LinkedInAccountPage() {
   async function disconnect() {
     setDisconnecting(true);
     try {
-      await linkedinApi.disconnect();
+      await linkedinApi.disconnect(selectedAccountId || null);
       toast.success('LinkedIn account disconnected.');
-      setAccount(null);
-      setNotConnected(true);
+      // Drop the disconnected profile from the picker and fall back to another.
+      const remaining = accounts.filter((a) => a.id !== selectedAccountId);
+      setAccounts(remaining);
+      if (remaining.length) {
+        const next = remaining[0].id;
+        setSelectedAccountId(next);
+        await fetchAccount(next);
+      } else {
+        setAccount(null);
+        setNotConnected(true);
+      }
       setConfirmDisconnect(false);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Could not disconnect the account.'));
@@ -521,6 +565,19 @@ export default function LinkedInAccountPage() {
       ) : (
         /* --------------------------- account card --------------------------- */
         <div className="card mt-6 p-6">
+          {accounts.length > 1 && (
+            <div className="mb-4 w-80 max-w-full">
+              <AccountPicker
+                id="linkedin-account"
+                accounts={accounts}
+                value={selectedAccountId}
+                onChange={selectAccount}
+                getKey={(a) => a.id}
+                getLabel={(a) => a.label || a.linkedin_email}
+                placeholder="Select a profile"
+              />
+            </div>
+          )}
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="flex items-center gap-4">
               <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent-500/10 text-xl font-bold text-accent-300">
@@ -534,7 +591,7 @@ export default function LinkedInAccountPage() {
                 {account.label && <p className="mt-0.5 text-sm text-zinc-400">{account.label}</p>}
               </div>
             </div>
-            <button onClick={fetchAccount} className="btn-secondary text-xs">
+            <button onClick={() => fetchAccount(selectedAccountId || null)} className="btn-secondary text-xs">
               ↻ Refresh
             </button>
           </div>
@@ -652,7 +709,7 @@ export default function LinkedInAccountPage() {
             </p>
             <div className="mt-3 flex gap-2">
               <Link to="/" className="btn-secondary text-xs">Home</Link>
-              <button onClick={fetchAccount} className="btn-secondary text-xs">Retry</button>
+              <button onClick={() => fetchAccount(selectedAccountId || null)} className="btn-secondary text-xs">Retry</button>
             </div>
           </div>
         </div>

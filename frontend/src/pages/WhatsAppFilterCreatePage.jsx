@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import TagInput from '../components/feed/TagInput';
+import AccountPicker from '../components/accounts/AccountPicker';
+import { useStoredAccountId } from '../hooks/useStoredAccountId';
 import { Spinner } from '../components/Spinner';
 import SchedulingDisabledNotice from '../components/SchedulingDisabledNotice';
 
@@ -34,6 +36,28 @@ export default function WhatsAppFilterCreatePage() {
   const [intervalHours, setIntervalHours] = useState(1);
   const [latestMessagesLimit, setLatestMessagesLimit] = useState(20);
 
+  // Multi-device: choose which WhatsApp session this filter scans.
+  const [sessions, setSessions] = useState([]);
+  const [selectedSessionId, setSelectedSessionId] = useStoredAccountId('whatsapp-filter:active-session');
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await whatsappApi.listSessions();
+        const list = Array.isArray(data?.sessions) ? data.sessions : [];
+        if (cancelled) return;
+        setSessions(list);
+        const defaultId = list.find((s) => s.is_default)?.id ?? list[0]?.id ?? '';
+        if (!selectedSessionId && defaultId) setSelectedSessionId(String(defaultId));
+      } catch {
+        if (!cancelled) setSessions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSessionId]);
+
   const handleSubmit = async (event) => {
     event.preventDefault();
     const finalKeywords = addPendingTags(keywords, pendingKeyword);
@@ -63,6 +87,7 @@ export default function WhatsAppFilterCreatePage() {
         match_threshold: Number(matchThreshold),
         interval_hours: Number(intervalHours) || 1,
         latest_messages_limit: latestLimit,
+        session_id: selectedSessionId || null,
       });
       toast.success('WhatsApp filter created. Now choose its groups.');
       navigate(`/app/whatsapp-scanner/jobs/${data.id}/edit`);
@@ -90,6 +115,20 @@ export default function WhatsAppFilterCreatePage() {
       <SchedulingDisabledNotice className="mb-6" />
 
       <form onSubmit={handleSubmit} className="space-y-6 rounded-xl border border-surface-700 bg-surface-800 p-6">
+        <div>
+          <AccountPicker
+            id="filter-session"
+            accounts={sessions}
+            value={selectedSessionId}
+            onChange={setSelectedSessionId}
+            getKey={(s) => String(s.id)}
+            getLabel={(s) => (s.is_default ? 'Default device' : `Device #${s.id}`)}
+            placeholder="Choose a device"
+          />
+          {sessions.length > 0 && (
+            <p className="mt-1 text-xs text-zinc-500">This filter scans the selected WhatsApp device.</p>
+          )}
+        </div>
         <div>
           <label className="mb-1.5 block text-sm font-medium text-zinc-300">Filter Name</label>
           <input

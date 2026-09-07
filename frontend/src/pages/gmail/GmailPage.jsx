@@ -5,6 +5,8 @@ import { gmailApi } from '../../api/gmail';
 import { getErrorMessage } from '../../api/client';
 import Modal from '../../components/Modal';
 import { Spinner } from '../../components/Spinner';
+import AccountPicker from '../../components/accounts/AccountPicker';
+import { useStoredAccountId } from '../../hooks/useStoredAccountId';
 import ComposeForm from '../../components/gmail/ComposeForm';
 import { Avatar, GmailMark, GmailStatusBadge, LabelChip, formatDateTimeSafe } from '../../components/gmail/GmailBits';
 import { formatRelative } from '../../components/social/SocialBits';
@@ -43,6 +45,16 @@ export default function GmailPage() {
   // Connection
   const [status, setStatus] = useState(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
+  // Multi-mailbox: every connected Gmail mailbox, plus the one currently open.
+  // `accountId` is the connection row id; '' means the server's default
+  // (first-connected) mailbox — the legacy behaviour.
+  const [gmailAccounts, setGmailAccounts] = useState([]);
+  const [accountId, setAccountId] = useStoredAccountId('gmail:active-account');
+  // Ref so the (memoised) data-loaders always read the latest choice.
+  const accountIdRef = useRef('');
+  useEffect(() => {
+    accountIdRef.current = accountId;
+  }, [accountId]);
 
   // Mailbox data
   const [labels, setLabels] = useState([]);
@@ -80,6 +92,7 @@ export default function GmailPage() {
     try {
       const { data } = await gmailApi.status();
       setStatus(data);
+      setGmailAccounts(Array.isArray(data?.accounts) ? data.accounts : []);
       return data;
     } catch (err) {
       toast.error(getErrorMessage(err, 'Could not load the Gmail connection'));
@@ -91,7 +104,7 @@ export default function GmailPage() {
 
   const loadLabels = useCallback(async () => {
     try {
-      const { data } = await gmailApi.labels();
+      const { data } = await gmailApi.labels(accountIdRef.current);
       setLabels(Array.isArray(data) ? data : []);
     } catch (err) {
       toast.error(getErrorMessage(err, 'Could not load Gmail labels'));
@@ -110,7 +123,7 @@ export default function GmailPage() {
         if (query) params.q = query;
         if (label && !q.trim()) params.label_ids = label;
         if (token) params.page_token = token;
-        const { data } = await gmailApi.listMessages(params);
+        const { data } = await gmailApi.listMessages(params, accountIdRef.current);
         const rows = Array.isArray(data.messages) ? data.messages : [];
         setMessages(token ? (prev) => [...prev, ...rows] : rows);
         setPageToken(data.next_page_token || '');
@@ -135,12 +148,13 @@ export default function GmailPage() {
     loadStatus();
   }, [loadStatus]);
 
+  // Reload the mailbox whenever the connection state or the chosen mailbox changes.
   useEffect(() => {
     if (!status?.connected) return;
     loadLabels();
     loadList({ label: 'INBOX', q: '', unread: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.connected]);
+  }, [status?.connected, accountId]);
 
   // Older deployments may still return OAuth to the mailbox. Keep those
   // callbacks working, but finish connection management under Accounts.
@@ -156,7 +170,7 @@ export default function GmailPage() {
       if (!status?.connected) return;
       setChecking(true);
       try {
-        const { data } = await gmailApi.unread();
+        const { data } = await gmailApi.unread(accountIdRef.current);
         setUnreadCount(data.unread_in_inbox);
         setInboxTotal(data.inbox_total);
         setCheckedAt(data.checked_at ? new Date(data.checked_at) : new Date());
@@ -242,23 +256,36 @@ export default function GmailPage() {
     checkMail(false);
   };
 
+  // Switch the open mailbox: clear the reading pane so a thread from the old
+  // mailbox can't linger, then the [status?.connected, accountId] effect reloads.
+  const switchAccount = (id) => {
+    if (id === accountId) return;
+    setAccountId(id);
+    setSelectedThreadId(null);
+    setThread(null);
+  };
+
   // ── reading pane ──────────────────────────────────────────────────────────
   async function openThread(threadId, openedMessageId) {
     setSelectedThreadId(threadId);
     setThreadLoading(true);
     setThread(null);
     try {
-      const { data } = await gmailApi.getThread(threadId);
+      const { data } = await gmailApi.getThread(threadId, accountIdRef.current);
       const msgs = Array.isArray(data.messages) ? data.messages : [];
       setThread({ ...data, messages: msgs });
       // Gmail semantics: opening a message marks *that* message read.
       const opened = msgs.find((m) => m.id === openedMessageId);
       if (opened && !opened.is_read) {
         try {
-          const { data: updated } = await gmailApi.modify(openedMessageId, {
-            add_label_ids: [],
-            remove_label_ids: ['UNREAD'],
-          });
+          const { data: updated } = await gmailApi.modify(
+            openedMessageId,
+            {
+              add_label_ids: [],
+              remove_label_ids: ['UNREAD'],
+            },
+            accountIdRef.current,
+          );
           const patchRow = (m) => (m.id === openedMessageId ? { ...m, ...updated } : m);
           setThread((t) => (t ? { ...t, messages: t.messages.map(patchRow) } : t));
           setMessages((rows) => rows.map(patchRow));
@@ -275,10 +302,14 @@ export default function GmailPage() {
 
   const applyMessageLabels = async (messageId, addLabelIds, removeLabelIds) => {
     try {
-      const { data } = await gmailApi.modify(messageId, {
-        add_label_ids: addLabelIds,
-        remove_label_ids: removeLabelIds,
-      });
+      const { data } = await gmailApi.modify(
+        messageId,
+        {
+          add_label_ids: addLabelIds,
+          remove_label_ids: removeLabelIds,
+        },
+        accountIdRef.current,
+      );
       const patchRow = (m) => (m.id === messageId ? { ...m, ...data } : m);
       setThread((t) => (t ? { ...t, messages: t.messages.map(patchRow) } : t));
       setMessages((rows) => rows.map(patchRow));
@@ -307,7 +338,7 @@ export default function GmailPage() {
 
   const downloadAttachment = async (messageId, attachment) => {
     try {
-      const res = await gmailApi.downloadAttachment(messageId, attachment.attachment_id);
+      const res = await gmailApi.downloadAttachment(messageId, attachment.attachment_id, accountIdRef.current);
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
@@ -378,7 +409,11 @@ export default function GmailPage() {
             <h1 className="text-2xl font-bold text-zinc-50">Gmail</h1>
             <p className="text-sm text-zinc-400">
               {connected
-                ? `${status.account_email} — read, check and send from your own mailbox.`
+                ? `${
+                    accountId
+                      ? gmailAccounts.find((a) => a.id === accountId)?.account_email || status.account_email
+                      : status.account_email
+                  } — read, check and send from your own mailbox.`
                 : 'Bring your personal Gmail or Google Workspace mailbox in.'}
             </p>
           </div>
@@ -407,6 +442,20 @@ export default function GmailPage() {
         <>
           {/* ── toolbar ────────────────────────────────────────────────── */}
           <div className="card flex flex-wrap items-center gap-3 p-4">
+            {gmailAccounts.length > 1 && (
+              <div className="w-60">
+                <AccountPicker
+                  id="gmail-account"
+                  hideLabel
+                  accounts={gmailAccounts}
+                  value={accountId}
+                  onChange={switchAccount}
+                  getKey={(a) => a.id}
+                  getLabel={(a) => a.account_email}
+                  placeholder="All mailboxes"
+                />
+              </div>
+            )}
             <form onSubmit={submitSearch} className="flex min-w-[16rem] flex-1 items-center gap-2">
               <input
                 className="input-field"
@@ -713,6 +762,7 @@ export default function GmailPage() {
             initial={compose.initial}
             onCancel={() => setCompose(null)}
             onSent={() => setCompose(null)}
+            accountId={accountId || null}
           />
         </Modal>
       )}

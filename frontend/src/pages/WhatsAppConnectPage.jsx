@@ -4,6 +4,8 @@ import toast from 'react-hot-toast';
 import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
+import AccountPicker from '../components/accounts/AccountPicker';
+import { useStoredAccountId } from '../hooks/useStoredAccountId';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
 import BrowserViewPanel from '../components/live/BrowserViewPanel';
 
@@ -40,6 +42,14 @@ export default function WhatsAppConnectPage() {
   const [capturing, setCapturing] = useState(false);
   const [captureFailed, setCaptureFailed] = useState(false);
   const [connectError, setConnectError] = useState(null);
+  // Multi-device: every WhatsApp session the caller owns, plus the one being
+  // managed. '' means "add / connect a new device" (the server default).
+  const [sessions, setSessions] = useState([]);
+  const [selectedSessionId, setSelectedSessionId] = useStoredAccountId('whatsapp:active-session');
+  const sessionRef = useRef('');
+  useEffect(() => {
+    sessionRef.current = selectedSessionId;
+  }, [selectedSessionId]);
   const connectionStartedRef = useRef(false);
   // Prevent a very fast SSE "connected" event from being overwritten by the
   // slightly later POST /connect response, which still carries waiting_qr for
@@ -56,7 +66,7 @@ export default function WhatsAppConnectPage() {
   const loadStatus = useCallback(async () => {
     const requestId = ++statusRequestRef.current;
     try {
-      const { data } = await whatsappApi.getStatus();
+      const { data } = await whatsappApi.getStatus(sessionRef.current || null);
       // A request that started before an SSE connection event must not restore
       // the older waiting_qr snapshot after the backend has committed success.
       if (requestId !== statusRequestRef.current) return;
@@ -89,6 +99,38 @@ export default function WhatsAppConnectPage() {
   useEffect(() => {
     loadStatus();
   }, [loadStatus]);
+
+  // List every owned WhatsApp device and pre-select the default one. Picking a
+  // different device reloads its status through the override below.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await whatsappApi.listSessions();
+        const list = Array.isArray(data?.sessions) ? data.sessions : [];
+        if (cancelled) return;
+        setSessions(list);
+        const defaultId = list.find((s) => s.is_default)?.id ?? list[0]?.id ?? '';
+        if (!sessionRef.current && defaultId) {
+          setSelectedSessionId(String(defaultId));
+          loadStatus(String(defaultId));
+        }
+      } catch {
+        if (!cancelled) setSessions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadStatus]);
+
+  const selectSession = useCallback(
+    (id) => {
+      setSelectedSessionId(id);
+      loadStatus(id || null);
+    },
+    [loadStatus],
+  );
 
   const handleBrowserSessionStatus = useCallback((event) => {
     if (event?.status !== 'connected') return;
@@ -143,7 +185,7 @@ export default function WhatsAppConnectPage() {
       setCaptureFailed(false);
       setShowBrowserView(true);
       setReconnectRequired(false);
-      const { data } = await whatsappApi.connect();
+      const { data } = await whatsappApi.connect(sessionRef.current || null);
       if (!sessionConnectedRef.current) {
         toast.success(data?.message || 'WhatsApp connection started — scan the QR code');
         setStatus(data?.status || 'waiting_qr');
@@ -168,7 +210,7 @@ export default function WhatsAppConnectPage() {
   const handleCaptureSession = async (force = false) => {
     try {
       setCapturing(true);
-      const { data } = await whatsappApi.captureSession(force);
+      const { data } = await whatsappApi.captureSession(sessionRef.current || null, force);
       connectionStartedRef.current = false;
       sessionConnectedRef.current = true;
       setCaptureFailed(false);
@@ -192,7 +234,7 @@ export default function WhatsAppConnectPage() {
 
     try {
       setDisconnecting(true);
-      const { data } = await whatsappApi.disconnect();
+      const { data } = await whatsappApi.disconnect(sessionRef.current || null);
       connectionStartedRef.current = false;
       sessionConnectedRef.current = false;
       setCaptureFailed(false);
@@ -225,6 +267,21 @@ export default function WhatsAppConnectPage() {
           ← Accounts
         </Link>
       </div>
+
+      {sessions.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <AccountPicker
+            id="whatsapp-session"
+            hideLabel
+            accounts={sessions}
+            value={selectedSessionId}
+            onChange={selectSession}
+            getKey={(s) => String(s.id)}
+            getLabel={(s) => (s.is_default ? 'Default device' : `Device #${s.id}`)}
+            placeholder="Add / connect a device"
+          />
+        </div>
+      )}
 
       {connected ? (
         /* ── Account card (mirrors the LinkedIn manage card) ────── */

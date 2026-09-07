@@ -27,18 +27,26 @@ const LINKEDIN_TIMEOUT = 180_000;
 
 export const linkedinApi = {
   connect: (payload) => api.post('/linkedin/account', payload, { timeout: LINKEDIN_TIMEOUT }),
-  getAccount: () => api.get('/linkedin/account'),
-  updateAccount: (payload) => api.patch('/linkedin/account', payload),
-  disconnect: () => api.delete('/linkedin/account'),
+  // List every connected LinkedIn profile for the signed-in user.
+  listAccounts: () => api.get('/linkedin/accounts'),
+  // `accountId` selects one profile (the row id); omit for the first-connected.
+  getAccount: (accountId = null) =>
+    api.get('/linkedin/account', { params: accountId ? { account_id: accountId } : {} }),
+  updateAccount: (payload, accountId = null) =>
+    api.patch('/linkedin/account', payload, { params: accountId ? { account_id: accountId } : {} }),
+  disconnect: (accountId = null) =>
+    api.delete('/linkedin/account', { params: accountId ? { account_id: accountId } : {} }),
   submitVerificationCode: (sessionId, code) =>
     api.post(
       '/linkedin/account/verify',
       { session_id: sessionId, verification_code: code },
       { timeout: LINKEDIN_TIMEOUT }
     ),
-  verifySession: (ownerEmail) =>
+  // `accountId` selects which profile's session to verify; omit for the
+  // first-connected profile.
+  verifySession: (accountId = null) =>
     api.post('/linkedin/account/verify-session', null, {
-      params: { owner_email: ownerEmail },
+      params: accountId ? { account_id: accountId } : {},
       timeout: LINKEDIN_TIMEOUT,
     }),
 };
@@ -190,19 +198,32 @@ export const feedLeadsApi = {
 const WHATSAPP_TIMEOUT = 180_000;
 
 export const whatsappApi = {
-  connect: () =>
-    api.post('/whatsapp/connect', null, { timeout: WHATSAPP_TIMEOUT }),
-  disconnect: () =>
-    api.delete('/whatsapp/connection', { timeout: WHATSAPP_TIMEOUT }),
-  // Manual escape hatch when the automatic QR watcher misses a successful
-  // scan: snapshot the live browser's session right now.
-  captureSession: (force = false) =>
-    api.post('/whatsapp/session/capture', null, {
-      params: { force },
+  // Every device/session the caller owns, newest first. `id` is what the
+  // pickers send back as `session_id`.
+  listSessions: () => api.get('/whatsapp/sessions'),
+  // `sessionId` targets one device (reconnect/add); omit for the default
+  // (newest) session, matching the single-session behaviour.
+  connect: (sessionId = null) =>
+    api.post('/whatsapp/connect', null, {
+      params: sessionId ? { session_id: sessionId } : {},
       timeout: WHATSAPP_TIMEOUT,
     }),
-  getStatus: () =>
-    api.get('/whatsapp/status'),
+  // `sessionId` disconnects exactly one session; omit to disconnect the default.
+  disconnect: (sessionId = null) =>
+    api.delete('/whatsapp/connection', {
+      params: sessionId ? { session_id: sessionId } : {},
+      timeout: WHATSAPP_TIMEOUT,
+    }),
+  // Manual escape hatch when the automatic QR watcher misses a successful
+  // scan: snapshot the live browser's session right now.
+  captureSession: (sessionId = null, force = false) =>
+    api.post('/whatsapp/session/capture', null, {
+      params: { ...(sessionId ? { session_id: sessionId } : {}), force },
+      timeout: WHATSAPP_TIMEOUT,
+    }),
+  // `sessionId` scopes the status to one device; omit for the default session.
+  getStatus: (sessionId = null) =>
+    api.get('/whatsapp/status', { params: sessionId ? { session_id: sessionId } : {} }),
 
   // The groups endpoint still talks to WhatsApp Web, but saved selections are
   // scoped to a filter job when filterId is supplied.
@@ -274,39 +295,57 @@ const WHATSAPP_LIVE_TIMEOUT = 60_000;
 const WHATSAPP_LIVE_START_TIMEOUT = 120_000;
 
 export const whatsappLiveApi = {
-  start: () =>
-    api.post('/whatsapp/live/start', null, { timeout: WHATSAPP_LIVE_START_TIMEOUT }),
-  stop: () =>
-    api.post('/whatsapp/live/stop', null, { timeout: WHATSAPP_LIVE_TIMEOUT }),
-  getStatus: () => api.get('/whatsapp/live/status'),
-  listChats: ({ q = '', limit = 10 } = {}) =>
-    api.get('/whatsapp/live/chats', {
-      params: { ...(q ? { q } : {}), limit },
+  // `sessionId` opens live chat from one of the caller's devices; omit for the
+  // default (newest) session.
+  start: (sessionId = null) =>
+    api.post('/whatsapp/live/start', null, {
+      params: sessionId ? { session_id: sessionId } : {},
+      timeout: WHATSAPP_LIVE_START_TIMEOUT,
+    }),
+  stop: (sessionId = null) =>
+    api.post('/whatsapp/live/stop', null, {
+      params: sessionId ? { session_id: sessionId } : {},
       timeout: WHATSAPP_LIVE_TIMEOUT,
     }),
-  openChat: (chatId) =>
+  getStatus: (sessionId = null) =>
+    api.get('/whatsapp/live/status', {
+      params: sessionId ? { session_id: sessionId } : {},
+    }),
+  listChats: ({ q = '', limit = 10, sessionId = null } = {}) =>
+    api.get('/whatsapp/live/chats', {
+      params: { ...(q ? { q } : {}), limit, ...(sessionId ? { session_id: sessionId } : {}) },
+      timeout: WHATSAPP_LIVE_TIMEOUT,
+    }),
+  openChat: (chatId, sessionId = null) =>
     api.post(
       '/whatsapp/live/chats/open',
       { chat_id: chatId },
-      { timeout: WHATSAPP_LIVE_TIMEOUT }
+      {
+        params: sessionId ? { session_id: sessionId } : {},
+        timeout: WHATSAPP_LIVE_TIMEOUT,
+      }
     ),
-  closeChat: () =>
+  closeChat: (sessionId = null) =>
     api.post('/whatsapp/live/chats/close', null, {
+      params: sessionId ? { session_id: sessionId } : {},
       timeout: WHATSAPP_LIVE_TIMEOUT,
     }),
   // No special endpoint — GET /messages or POST /send handle reading/writing
   // when a chat is open. Frontend may call closeChat first, then GET /messages
   // returns 409 if no chat was open. Open chat list via /chats (Sidebar).
-  getMessages: ({ limit = 50 } = {}) =>
+  getMessages: ({ limit = 50, sessionId = null } = {}) =>
     api.get('/whatsapp/live/messages', {
-      params: { limit },
+      params: { limit, ...(sessionId ? { session_id: sessionId } : {}) },
       timeout: WHATSAPP_LIVE_TIMEOUT,
     }),
-  sendMessage: (text) =>
+  sendMessage: (text, sessionId = null) =>
     api.post(
       '/whatsapp/live/messages/send',
       { text },
-      { timeout: WHATSAPP_LIVE_TIMEOUT }
+      {
+        params: sessionId ? { session_id: sessionId } : {},
+        timeout: WHATSAPP_LIVE_TIMEOUT,
+      }
     ),
 };
 
@@ -316,7 +355,9 @@ export const whatsappLiveApi = {
 const LINKEDIN_LIVE_TIMEOUT = 60_000;
 
 export const linkedinLiveApi = {
-  start:  () => api.post('/linkedin/live/start',   null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
+  // `accountId` opens live chat from one of the caller's LinkedIn profiles;
+  // omit for the most recently active profile.
+  start:  (accountId = null) => api.post('/linkedin/live/start',   null, { params: accountId ? { account_id: accountId } : {}, timeout: LINKEDIN_LIVE_TIMEOUT }),
   stop:   () => api.post('/linkedin/live/stop',    null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
   getStatus:    () => api.get('/linkedin/live/status'),
   listChats:    ({ q = '', limit = 30 } = {}) =>

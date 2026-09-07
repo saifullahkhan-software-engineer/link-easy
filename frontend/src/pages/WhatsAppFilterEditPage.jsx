@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import { whatsappApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import TagInput from '../components/feed/TagInput';
+import AccountPicker from '../components/accounts/AccountPicker';
 import { Spinner } from '../components/Spinner';
 import WhatsAppStatusBadge from '../components/whatsapp/WhatsAppStatusBadge';
 
@@ -46,6 +47,27 @@ export default function WhatsAppFilterEditPage() {
   const [reconnectRequired, setReconnectRequired] = useState(false);
   const [filterJob, setFilterJob] = useState(null);
 
+  // Multi-device: which WhatsApp session this filter scans (seeded from the
+  // saved job, then editable via the picker).
+  const [sessions, setSessions] = useState([]);
+  const [selectedSessionId, setSelectedSessionId] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await whatsappApi.listSessions();
+        const list = Array.isArray(data?.sessions) ? data.sessions : [];
+        if (!cancelled) setSessions(list);
+      } catch {
+        if (!cancelled) setSessions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
   const [jobTitle, setJobTitle] = useState('');
@@ -77,6 +99,7 @@ export default function WhatsAppFilterEditPage() {
 
         const data = filterResponse.data;
         setFilterJob(data);
+        setSelectedSessionId(data.session_id ? String(data.session_id) : '');
         setName(data.name || '');
         setRole(data.role || '');
         setJobTitle(data.job_title || '');
@@ -195,6 +218,7 @@ export default function WhatsAppFilterEditPage() {
         match_threshold: Number(matchThreshold),
         interval_hours: Number(intervalHours),
         latest_messages_limit: latestLimit,
+        session_id: selectedSessionId || null,
       });
 
       await whatsappApi.selectGroups({
@@ -271,6 +295,21 @@ export default function WhatsAppFilterEditPage() {
           <h2 className="text-lg font-semibold text-zinc-100">Search Filters</h2>
           <p className="mt-1 text-sm text-zinc-500">Define which job messages count as matches.</p>
         </div>
+
+        {sessions.length > 1 && (
+          <div className="max-w-sm">
+            <AccountPicker
+              id="filter-edit-session"
+              accounts={sessions}
+              value={selectedSessionId}
+              onChange={setSelectedSessionId}
+              getKey={(s) => String(s.id)}
+              getLabel={(s) => (s.is_default ? 'Default device' : `Device #${s.id}`)}
+              placeholder="Choose a device"
+            />
+            <p className="mt-1 text-xs text-zinc-500">This filter scans the selected WhatsApp device.</p>
+          </div>
+        )}
 
         <div>
           <label className="mb-1.5 block text-sm font-medium text-zinc-300">Filter Name</label>

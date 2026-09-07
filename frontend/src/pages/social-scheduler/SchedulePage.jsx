@@ -11,6 +11,7 @@ import {
   fromLocalInputValue,
   toLocalInputValue,
 } from '../../components/social/SocialBits';
+import AccountPicker from '../../components/accounts/AccountPicker';
 import VideoEditPanel from '../../components/social/VideoEditPanel';
 
 const ACCEPT_VIDEO = '.mp4,.mov,.m4v,.webm,video/mp4,video/quicktime,video/x-m4v,video/webm';
@@ -149,6 +150,10 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
   const isPost = kind === 'post';
 
   const [connections, setConnections] = useState(null);
+  // Per-platform account pick: { [platform]: connectionId }. Empty value means
+  // "use the server's default (first-connected) account", matching the legacy
+  // behaviour. Seeded from the first connected account of each platform.
+  const [selectedAccounts, setSelectedAccounts] = useState({});
   const [mediaType, setMediaType] = useState(isPost ? 'image' : 'video');
   const [file, setFile] = useState(null);
   const [upload, setUpload] = useState(null);
@@ -209,6 +214,16 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
                 .filter((p) => p.connected && !(isImage && p.platform === 'youtube'))
                 .map((p) => p.platform),
         }));
+        // Seed a default account per platform: the first (oldest) connection.
+        // A user with several accounts can then switch in the "Publish from"
+        // picker below; single-account users never see a prompt.
+        const defaults = {};
+        for (const p of data || []) {
+          if (p.connected && Array.isArray(p.accounts) && p.accounts.length) {
+            defaults[p.platform] = p.accounts[0].id;
+          }
+        }
+        setSelectedAccounts((prev) => ({ ...defaults, ...prev }));
       })
       .catch(() => setConnections([]));
   }, []);
@@ -218,12 +233,13 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
   // Playlists are fetched only once YouTube is actually a target, so an
   // Instagram-only upload never pays for the round trip and never sees the
   // picker. One fetch per mount unless the retry button asks for another.
+  // They belong to the *selected* YouTube account when several are connected.
   useEffect(() => {
     if (!youtubeSelected || !youtubeConnected || playlistFetchStarted.current) return;
     playlistFetchStarted.current = true;
     setPlaylistState({ status: 'loading', items: null, error: '' });
     socialSchedulerApi
-      .listYouTubePlaylists()
+      .listYouTubePlaylists(selectedAccounts.youtube || null)
       .then(({ data }) => {
         setPlaylistState({ status: 'ready', items: data?.playlists || [], error: '' });
       })
@@ -236,7 +252,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
           error: getErrorMessage(err, 'Could not load your YouTube playlists'),
         });
       });
-  }, [youtubeSelected, youtubeConnected, playlistReload]);
+  }, [youtubeSelected, youtubeConnected, playlistReload, selectedAccounts.youtube]);
 
   const reloadPlaylists = () => {
     playlistFetchStarted.current = false;
@@ -466,6 +482,13 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
         instagram_caption: form.instagram_caption,
         tiktok_caption: form.tiktok_caption,
         platform_copy: form.platform_copy,
+        // Map each selected platform to the account connection the user picked.
+        // Only truthy (explicitly chosen) picks are sent; an empty value lets
+        // the worker fall back to the first-connected account, keeping the
+        // legacy behaviour for single-account users.
+        platform_accounts: Object.fromEntries(
+          form.platforms.filter((p) => selectedAccounts[p]).map((p) => [p, selectedAccounts[p]]),
+        ),
         youtube_playlist_ids: youtubeSelected ? form.youtube_playlist_ids : [],
         // Groups are a manual share checklist, valid for any upload — even
         // when Facebook is not one of the publish targets.
@@ -656,6 +679,38 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
               );
             })}
           </div>
+
+          {/* Per-account picker: choose which connected account of each selected
+              platform actually publishes the post. Hidden entirely when a platform
+              has at most one account (the default selection is implied). */}
+          {form.platforms.length > 0 && (
+            <div className="mt-4 space-y-3 border-t border-surface-700 pt-4">
+              <p className="text-xs font-medium text-zinc-400">Publish from</p>
+              {form.platforms.map((id) => {
+                const conn = connectionFor(id);
+                const accounts = conn?.accounts || [];
+                if (accounts.length <= 1) return null;
+                return (
+                  <div key={id} className="flex flex-wrap items-center gap-3">
+                    <PlatformIcon platform={id} className="h-5 w-5 text-zinc-300" />
+                    <span className="w-28 shrink-0 text-sm text-zinc-300">{platformLabel(id, kind)}</span>
+                    <AccountPicker
+                      id={`account-${id}`}
+                      className="flex-1 min-w-[12rem]"
+                      hideLabel
+                      accounts={accounts}
+                      value={selectedAccounts[id] || ''}
+                      onChange={(v) => setSelectedAccounts((prev) => ({ ...prev, [id]: v }))}
+                      getKey={(a) => a.id}
+                      getLabel={(a) => a.account_name || a.account_id || 'Account'}
+                      placeholder={`Select ${platformLabel(id, kind)} account`}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {unconnectedSelected.length > 0 && (
             <p className="mt-3 text-xs text-amber-300">
               {unconnectedSelected.map((id) => platformLabel(id, kind)).join(', ')}{' '}

@@ -25,9 +25,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
-import { whatsappLiveApi } from '../api/endpoints';
+import { whatsappApi, whatsappLiveApi } from '../api/endpoints';
 import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
+import AccountPicker from '../components/accounts/AccountPicker';
+import { useStoredAccountId } from '../hooks/useStoredAccountId';
 import { InboxPageHeader } from '../components/inbox/InboxBits';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -99,13 +101,45 @@ export default function WhatsAppLiveChatPage() {
   const isRunning = status?.status === 'running';
   const statusInfo = useMemo(() => describeStatus(status), [status]);
 
+  // Multi-device: pick which WhatsApp session live chat runs against.
+  const [sessions, setSessions] = useState([]);
+  const [selectedSessionId, setSelectedSessionId] = useStoredAccountId('whatsapp-live:active-session');
+  const sessionRef = useRef('');
+  useEffect(() => {
+    sessionRef.current = selectedSessionId;
+  }, [selectedSessionId]);
+
+  // Load every owned WhatsApp device and pre-select the default one.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await whatsappApi.listSessions();
+        const list = Array.isArray(data?.sessions) ? data.sessions : [];
+        if (cancelled) return;
+        setSessions(list);
+        const defaultId = list.find((s) => s.is_default)?.id ?? list[0]?.id ?? '';
+        if (!sessionRef.current && defaultId) setSelectedSessionId(String(defaultId));
+      } catch {
+        if (!cancelled) setSessions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const selectSession = useCallback((id) => {
+    setSelectedSessionId(id);
+  }, []);
+
   // ── Pollers ───────────────────────────────────────────────────────────────
 
   const refreshStatus = useCallback(async () => {
     if (freezeStatusRef.current) return; // don't clobber an in-flight action
     const requestId = ++statusRequestRef.current;
     try {
-      const { data } = await whatsappLiveApi.getStatus();
+      const { data } = await whatsappLiveApi.getStatus(sessionRef.current || null);
       // Ignore a request that began before start/stop/open/close changed the
       // authoritative browser state.
       if (requestId !== statusRequestRef.current || freezeStatusRef.current) return;
@@ -122,6 +156,7 @@ export default function WhatsAppLiveChatPage() {
       const { data } = await whatsappLiveApi.listChats({
         q: rawFilter || '',
         limit: DEFAULT_CHAT_LIMIT,
+        sessionId: sessionRef.current || null,
       });
       // The backend returns `{ chats, count, query }` — see schema.
       setChats(data.chats || []);
@@ -149,7 +184,7 @@ export default function WhatsAppLiveChatPage() {
     const requestId = ++messagesRequestRef.current;
     try {
       setMsgsLoading(true);
-      const { data } = await whatsappLiveApi.getMessages({ limit: 50 });
+      const { data } = await whatsappLiveApi.getMessages({ limit: 50, sessionId: sessionRef.current || null });
       // Backend returns oldest→newest. Apply it only if the user is still on
       // the conversation that initiated this request.
       if (
@@ -252,7 +287,7 @@ export default function WhatsAppLiveChatPage() {
     freezeStatusRef.current = true;
     statusRequestRef.current += 1;
     try {
-      const { data } = await whatsappLiveApi.start();
+      const { data } = await whatsappLiveApi.start(sessionRef.current || null);
       // Apply the action response directly. Previously refreshStatus was called
       // while frozen, so it returned early and the UI looked stopped for up to
       // the next five-second poll even though Chromium was already running.
@@ -277,7 +312,7 @@ export default function WhatsAppLiveChatPage() {
     statusRequestRef.current += 1;
     messagesRequestRef.current += 1;
     try {
-      const { data } = await whatsappLiveApi.stop();
+      const { data } = await whatsappLiveApi.stop(sessionRef.current || null);
       activeChatRef.current = null;
       setActiveChatId(null);
       setStatus(data);
@@ -297,7 +332,7 @@ export default function WhatsAppLiveChatPage() {
     statusRequestRef.current += 1;
     messagesRequestRef.current += 1;
     try {
-      const { data } = await whatsappLiveApi.openChat(chatId);
+      const { data } = await whatsappLiveApi.openChat(chatId, sessionRef.current || null);
       if (!data.ok) {
         toast.error(data.error || 'Could not open that chat.');
         return;
@@ -323,7 +358,7 @@ export default function WhatsAppLiveChatPage() {
     statusRequestRef.current += 1;
     messagesRequestRef.current += 1;
     try {
-      await whatsappLiveApi.closeChat();
+      await whatsappLiveApi.closeChat(sessionRef.current || null);
       activeChatRef.current = null;
       setActiveChatId(null);
       setStatus((prev) => prev ? {
@@ -359,7 +394,7 @@ export default function WhatsAppLiveChatPage() {
 
     setSending(true);
     try {
-      const { data } = await whatsappLiveApi.sendMessage(text);
+      const { data } = await whatsappLiveApi.sendMessage(text, sessionRef.current || null);
       setDraft('');
       lastSendTsRef.current = Date.now();
       // Force a refresh so the message appears immediately (the next 3s poll
@@ -393,6 +428,18 @@ export default function WhatsAppLiveChatPage() {
         channel="whatsapp"
         description="Click a chat, read messages, and reply below. While live, the scheduled scanner is paused."
         action={<>
+          {sessions.length > 1 && (
+            <AccountPicker
+              id="whatsapp-live-session"
+              hideLabel
+              accounts={sessions}
+              value={selectedSessionId}
+              onChange={selectSession}
+              getKey={(s) => String(s.id)}
+              getLabel={(s) => (s.is_default ? 'Default device' : `Device #${s.id}`)}
+              placeholder="Device"
+            />
+          )}
           <StatusBadge status={statusInfo} />
           {!isRunning ? (
             <button
