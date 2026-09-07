@@ -431,6 +431,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
             )
 
         if platform == "youtube":
+            thumbnail_path = _thumbnail_path_for_video(video_path)
             result = await service.upload_short(
                 video_path=video_path,
                 title=platform_copy.get("title") or post["youtube_title"] or post["title"],
@@ -439,13 +440,7 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
                 access_token=tokens.access_token,
                 refresh_token=tokens.refresh_token,
                 as_short=as_short,
-            )
-            thumbnail_path = _thumbnail_path_for_video(video_path)
-            thumbnail_note = await _set_youtube_thumbnail(
-                service,
-                video_id=result["video_id"],
                 thumbnail_path=thumbnail_path,
-                tokens=tokens,
             )
             note = await _add_to_youtube_playlists(
                 service,
@@ -457,7 +452,9 @@ async def _publish_to_platform(owner_email: str, post: dict, platform: str) -> d
             return _success(
                 result["video_id"],
                 result["video_url"],
-                note="; ".join(item for item in (thumbnail_note, note) if item),
+                note="; ".join(
+                    item for item in (result.get("thumbnail_note", ""), note) if item
+                ),
             )
 
         if platform == "instagram":

@@ -12,11 +12,14 @@ requests, and never follow or expose Graph's token-bearing paging URLs.
 from __future__ import annotations
 
 import asyncio
+import logging
 from urllib.parse import quote
 
 import aiohttp
 
 from .meta_graph import GRAPH_API_BASE
+
+logger = logging.getLogger(__name__)
 
 
 class InboxError(Exception):
@@ -71,6 +74,10 @@ class MetaInboxService:
         error = data.get("error") or {}
         if error or http_status >= 300:
             code = error.get("code")
+            provider_message = str(error.get("message") or "").strip()
+            # Keep the provider detail useful without ever returning request
+            # URLs, access tokens, or the full Graph payload to the browser.
+            provider_detail = f" Meta error {code}: {provider_message}" if code or provider_message else ""
             if code == 190 or http_status == 401:
                 raise InboxError("Meta access has expired. Reconnect the account in Accounts → Socials.", 409)
             if code in (4, 17, 32, 613) or http_status == 429:
@@ -78,12 +85,13 @@ class MetaInboxService:
             if code in (10, 200) or http_status == 403:
                 raise InboxError(
                     "Meta has not allowed this messaging request. Reconnect in Accounts → Socials and approve "
-                    "messaging permissions. The operator may need Meta App Review; replies must be within Meta's allowed window.",
+                    "messaging permissions. The operator may need Meta App Review; replies must be within Meta's allowed window."
+                    + provider_detail,
                     403,
                 )
             if code == 100 or http_status == 404:
                 raise InboxError("Meta could not find or open this conversation. Refresh the inbox and try again.", 404)
-            raise InboxError("Meta could not complete the messaging request. Please try again.")
+            raise InboxError("Meta could not complete the messaging request. Please try again." + provider_detail)
         return data
 
     async def _page_token(self, session):
@@ -136,6 +144,13 @@ class MetaInboxService:
             if after:
                 params["after"] = after
             data = await self._request(session, self.page_id, edge="conversations", token=token, params=params)
+        logger.info(
+            "Meta inbox conversations response channel=%s page_id=%s rows=%s has_paging=%s",
+            self.channel,
+            self.page_id,
+            len(_rows(data)),
+            bool(data.get("paging")),
+        )
         conversations = []
         for row in _rows(data):
             # The collection belongs to our Page. Ignore malformed entries;

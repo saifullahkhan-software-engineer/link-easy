@@ -261,6 +261,7 @@ class YouTubeService:
         on_tokens_callback=None,
         *,
         as_short: bool = True,
+        thumbnail_path: Optional[str] = None,
     ) -> Dict[str, str]:
         """Upload a video to YouTube.
 
@@ -377,6 +378,28 @@ class YouTubeService:
         video_id = response.get("id", "")
         if not video_id:
             raise Exception("YouTube API did not return a video ID")
+        thumbnail_note = ""
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            try:
+                await self.set_thumbnail(
+                    video_id,
+                    thumbnail_path,
+                    access_token,
+                    refresh_token,
+                )
+                thumbnail_note = "Custom thumbnail applied"
+            except Exception as exc:
+                # The video is already published; preserve that success and
+                # return an actionable note instead of turning it into a retry.
+                detail = (
+                    _http_error_message(exc, "YouTube thumbnail upload failed")
+                    if isinstance(exc, HttpError)
+                    else str(exc)
+                )
+                thumbnail_note = (
+                    "Published, but custom thumbnail could not be applied: "
+                    f"{detail[:500]}"
+                )
         return {
             "video_id": video_id,
             "video_url": (
@@ -384,6 +407,7 @@ class YouTubeService:
                 if as_short
                 else f"https://www.youtube.com/watch?v={video_id}"
             ),
+            "thumbnail_note": thumbnail_note,
         }
 
     # ── Playlists ────────────────────────────────────────────────────────────

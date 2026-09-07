@@ -93,10 +93,24 @@ export default function MetaChatPage({ channel }) {
     return () => { listRequest.current?.abort(); };
   }, [available, loadConversations]);
 
+  // Refresh while the page is open so newly received conversations appear
+  // without requiring the user to leave and re-enter the inbox.
+  useEffect(() => {
+    if (!available) return undefined;
+    const timer = setInterval(() => loadConversations(), 15_000);
+    return () => clearInterval(timer);
+  }, [available, loadConversations]);
+
   useEffect(() => {
     if (selected) loadMessages(selected.id);
     return () => { messagesRequest.current?.abort(); };
   }, [selected, loadMessages]);
+
+  useEffect(() => {
+    if (!available || !selected) return undefined;
+    const timer = setInterval(() => loadMessages(selected.id), 10_000);
+    return () => clearInterval(timer);
+  }, [available, selected, loadMessages]);
 
   useEffect(() => {
     messagesEnd.current?.scrollIntoView({ block: 'nearest' });
@@ -194,8 +208,8 @@ export default function MetaChatPage({ channel }) {
                   <div className="flex justify-center gap-2 p-8 text-sm text-zinc-500" role="status"><Spinner /> Loading chats…</div>
                 ) : visibleConversations.length === 0 ? (
                   <div className="px-5 py-10 text-center text-sm text-zinc-500">
-                    <p className="font-medium text-zinc-300">{listError ? 'Conversations unavailable' : search ? 'No matching conversations' : 'No conversations yet'}</p>
-                    <p className="mt-2 text-xs leading-relaxed">{search ? 'Try another search or load more conversations.' : 'Conversations made available by Meta will appear here. App permissions and review can limit which messages are visible.'}</p>
+                    <p className="font-medium text-zinc-300">{listError ? 'Conversations unavailable' : search ? 'No matching conversations' : 'No conversations returned by Meta'}</p>
+                    <p className="mt-2 text-xs leading-relaxed">{search ? 'Try another search or load more conversations.' : 'Send a test message to this Facebook Page or professional Instagram account, then refresh. Meta only returns conversations available to the connected Page token and approved messaging permissions.'}</p>
                   </div>
                 ) : (
                   <ul>

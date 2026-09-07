@@ -70,15 +70,14 @@ export default function GmailAccountPage() {
 
   return (
     <div className="mx-auto max-w-3xl">
-      <Link to="/app/account" className="text-sm text-zinc-400 hover:text-accent-300">← Accounts</Link>
-      <div className="mt-4 flex items-center gap-3">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-rose-500/10 text-rose-300"><GmailMark className="h-6 w-6" /></div>
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wider text-accent-400">Main accounts</p>
           <h1 className="text-2xl font-bold text-zinc-100">Gmail connection</h1>
+          <p className="mt-1 text-sm text-zinc-400">Manage the Gmail or Google Workspace mailbox you read and reply from.</p>
         </div>
+        <Link to="/app/account" className="btn-secondary text-xs">← Accounts</Link>
       </div>
-      <p className="mt-3 text-sm text-zinc-400">Manage the Gmail or Google Workspace mailbox you read and reply from.</p>
 
       <section className="card mt-6 p-6 sm:p-8">
         {loading ? (

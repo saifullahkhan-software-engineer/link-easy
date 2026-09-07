@@ -101,8 +101,8 @@ export default function AccountsPage() {
         <p className="mt-1 text-sm text-zinc-400">WhatsApp, LinkedIn and Gmail connections for your day-to-day work.</p>
         <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
           {/* ── WhatsApp card ─────────────────────────────────────── */}
-          <div className="card flex min-w-0 flex-col p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3 pb-5">
+          <div className="card relative flex min-w-0 flex-col p-5">
+            <div className="flex items-start gap-3 pb-5 pr-28">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-green-500/10 text-green-300">
                   <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -122,11 +122,7 @@ export default function AccountsPage() {
                   )}
                 </div>
               </div>
-              {waLoading ? (
-                <Spinner />
-              ) : (
-                <WhatsAppStatusBadge status={waStatus} reconnectRequired={waReconnectRequired} />
-              )}
+              <div className="absolute right-5 top-5">{waLoading ? <Spinner /> : <WhatsAppStatusBadge status={waStatus} reconnectRequired={waReconnectRequired} />}</div>
             </div>
 
             <div className="mt-auto flex flex-wrap gap-3 border-t border-surface-700 pt-4">
@@ -137,8 +133,8 @@ export default function AccountsPage() {
           </div>
 
           {/* ── LinkedIn card ─────────────────────────────────────── */}
-          <div className="card flex min-w-0 flex-col p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3 pb-5">
+          <div className="card relative flex min-w-0 flex-col p-5">
+            <div className="flex items-start gap-3 pb-5 pr-28">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-500/10 text-accent-300">
                   <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
@@ -156,7 +152,7 @@ export default function AccountsPage() {
                   )}
                 </div>
               </div>
-              {liLoading ? <Spinner /> : liAccount ? <AccountStatusBadge status={liAccount.status} /> : <NotConnectedBadge />}
+              <div className="absolute right-5 top-5">{liLoading ? <Spinner /> : liAccount ? <AccountStatusBadge status={liAccount.status} /> : <NotConnectedBadge />}</div>
             </div>
 
             <div className="mt-auto flex flex-wrap gap-3 border-t border-surface-700 pt-4">
@@ -167,8 +163,8 @@ export default function AccountsPage() {
           </div>
 
           {/* ── Gmail card ─────────────────────────────────────────────── */}
-          <div className="card flex min-w-0 flex-col p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3 pb-5">
+          <div className="card relative flex min-w-0 flex-col p-5">
+            <div className="flex items-start gap-3 pb-5 pr-28">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rose-500/10 text-rose-300">
                   <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
@@ -188,18 +184,13 @@ export default function AccountsPage() {
                   )}
                 </div>
               </div>
-              {gmLoading ? <Spinner /> : <GmailStatusBadge status={gmStatus} />}
+              <div className="absolute right-5 top-5">{gmLoading ? <Spinner /> : <GmailStatusBadge status={gmStatus} />}</div>
             </div>
 
             <div className="mt-auto flex flex-wrap gap-3 border-t border-surface-700 pt-4">
               <Link to="/app/account/gmail" className="btn-primary">
-                {gmStatus?.connected ? 'Manage Gmail connection' : 'Connect Gmail'}
+                {gmStatus?.connected ? 'Manage Gmail account' : 'Connect Gmail account'}
               </Link>
-              {gmStatus?.connected && (
-                <Link to="/app/gmail" className="btn-secondary">
-                  Open inbox
-                </Link>
-              )}
             </div>
           </div>
         </div>

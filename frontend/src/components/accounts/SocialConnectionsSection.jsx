@@ -302,13 +302,13 @@ export default function SocialConnectionsSection() {
           const busy = pending === p.id;
           const operatorManaged = Boolean(cred?.source === 'database');
           return (
-            <div key={p.id} className="card flex h-full min-w-0 min-h-[258px] flex-col p-5" data-testid={`platform-card-${p.id}`}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
+            <div key={p.id} className="card relative flex h-full min-w-0 min-h-[258px] flex-col p-5" data-testid={`platform-card-${p.id}`}>
+              <div className="flex items-start gap-3 pr-28">
                 <PlatformIcon
                   platform={p.id}
                   className={`h-11 w-11 rounded-xl ${conn.connected ? 'bg-accent-500/15 text-accent-300' : 'bg-surface-700 text-zinc-400'}`}
                 />
-                <ConnectionBadge conn={conn} />
+                <div className="absolute right-5 top-5"><ConnectionBadge conn={conn} /></div>
               </div>
               <h3 className="mt-4 text-base font-semibold text-zinc-100">{p.label}</h3>
               {p.id === 'facebook' && <p className="mt-1 text-xs text-zinc-500">Publishing & Messenger Chat</p>}
@@ -390,10 +390,10 @@ export default function SocialConnectionsSection() {
             </div>
           );
         })}
-        <div className="card flex min-h-[258px] flex-col border-dashed p-5" data-testid="platform-card-whatsapp-business">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="card relative flex min-h-[258px] flex-col border-dashed p-5" data-testid="platform-card-whatsapp-business">
+          <div className="flex items-start gap-3 pr-28">
             <ChannelIcon channel="whatsapp-business" className="h-11 w-11 rounded-xl bg-green-500/10 text-green-300" />
-            <span className="rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 ring-1 ring-inset ring-amber-500/20">Coming soon</span>
+            <span className="absolute right-5 top-5 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 ring-1 ring-inset ring-amber-500/20">Coming soon</span>
           </div>
           <h3 className="mt-4 text-base font-semibold text-zinc-100">WhatsApp Business</h3>
           <p className="mt-1 text-sm text-zinc-400">Coming in a future update. Business connections and messaging are not available yet.</p>
