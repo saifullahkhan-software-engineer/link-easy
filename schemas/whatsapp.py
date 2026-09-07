@@ -32,6 +32,28 @@ class WhatsAppCaptureResponse(BaseModel):
     updated_at: Optional[datetime] = None
 
 
+class WhatsAppSessionItem(BaseModel):
+    """One connected WhatsApp device/session, as shown to its owner.
+
+    ``id`` is what the UI sends back as ``session_id`` to address this exact
+    device in the connect/scan/live routes. Display + status fields only.
+    """
+
+    id: int
+    status: str = "disconnected"  # disconnected | waiting_qr | connected | error
+    is_active: bool = False
+    connected: bool = False
+    # Whether this is the default (newest) session the UI pre-selects.
+    is_default: bool = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class WhatsAppSessionListResponse(BaseModel):
+    sessions: list[WhatsAppSessionItem]
+    count: int
+
+
 class WhatsAppStatusResponse(BaseModel):
     status: str  # disconnected | waiting_qr | connected | error
     is_active: bool
@@ -123,6 +145,9 @@ class WhatsAppScanFilterRequest(BaseModel):
     match_threshold: float = Field(60.0, ge=0.0, le=100.0)
     interval_hours: float = Field(1.0, ge=0.25, le=168.0)
     latest_messages_limit: int = Field(20, ge=1, le=100)
+    # Which connected WhatsApp session (device) this filter scans. Omitted =
+    # the owner's default (newest) session, matching single-account behaviour.
+    session_id: Optional[int] = Field(None, ge=1)
 
     @field_validator("experience_level")
     @classmethod
@@ -151,6 +176,8 @@ class WhatsAppScanFilterUpdate(BaseModel):
     match_threshold: Optional[float] = Field(None, ge=0.0, le=100.0)
     interval_hours: Optional[float] = Field(None, ge=0.25, le=168.0)
     latest_messages_limit: Optional[int] = Field(None, ge=1, le=100)
+    # Explicitly nullable so a PATCH can clear the binding (back to default).
+    session_id: Optional[int] = Field(None, ge=1)
 
     @field_validator("experience_level")
     @classmethod
@@ -164,6 +191,8 @@ class WhatsAppScanFilterResponse(BaseModel):
     id: int
     name: str = "WhatsApp Filter"
     owner_email: Optional[str] = None
+    # Bound WhatsApp session id (None = owner's default session).
+    session_id: Optional[int] = None
     status: str = "draft"  # draft | active | paused
     role: Optional[str] = None
     job_title: Optional[str] = None

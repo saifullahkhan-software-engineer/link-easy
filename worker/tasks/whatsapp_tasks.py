@@ -327,15 +327,37 @@ async def _check_whatsapp_messages_async(
                 return {"status": "skipped", "reason": "No active WhatsApp filter"}
 
         # Per-user rollout: the scan runs on the filter owner's own WhatsApp
-        # session, never a global singleton. Legacy (unowned) filters keep
-        # the legacy unowned session, falling back to the newest connected
-        # session so old manual scan tasks keep working.
+        # session, never a global singleton. A filter bound to a specific
+        # session (``session_id``) scans exactly that device; otherwise the
+        # owner's newest connected session is used, so legacy (unowned)
+        # filters and old manual scan tasks keep working.
         owner_email = getattr(filters_row, "owner_email", None)
+        bound_session_id = getattr(filters_row, "session_id", None)
         session_query = db.query(WhatsAppSession).filter(
             WhatsAppSession.is_active == True,
             WhatsAppSession.status == "connected",
         )
-        if owner_email:
+        if bound_session_id is not None:
+            session_row = (
+                session_query
+                .filter(
+                    WhatsAppSession.id == bound_session_id,
+                    (WhatsAppSession.owner_email == owner_email)
+                    if owner_email
+                    else True,
+                )
+                .first()
+            )
+            if not session_row:
+                logger.warning(
+                    "⚠️  WhatsApp session %s bound to filter is not connected — skipping check",
+                    bound_session_id,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "Bound WhatsApp session is not connected",
+                }
+        elif owner_email:
             session_row = (
                 session_query.filter(WhatsAppSession.owner_email == owner_email)
                 .order_by(WhatsAppSession.id.desc())

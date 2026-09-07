@@ -61,10 +61,12 @@ router = APIRouter(prefix="/api/v1/whatsapp/live", tags=["whatsapp-live"])
 
 
 async def _require_connection(
-    db: AsyncSession, current_user: User
+    db: AsyncSession, current_user: User, session_id: Optional[int] = None
 ) -> WhatsAppSession:
-    """Resolve the caller's connected session or raise a readable 400."""
-    return await get_owned_session(db, current_user, require_connected=True)
+    """Resolve the caller's connected session or raise a readable 400/404."""
+    return await get_owned_session(
+        db, current_user, require_connected=True, session_id=session_id
+    )
 
 
 def _manager_for(session: Optional[WhatsAppSession]):
@@ -72,9 +74,9 @@ def _manager_for(session: Optional[WhatsAppSession]):
     return get_live_browser(getattr(session, "id", None) if session else None)
 
 
-async def _require_running(db: AsyncSession, current_user: User):
+async def _require_running(db: AsyncSession, current_user: User, session_id: Optional[int] = None):
     """Return the caller's running manager or raise the uniform 409."""
-    session = await get_owned_session(db, current_user)
+    session = await get_owned_session(db, current_user, session_id=session_id)
     manager = _manager_for(session)
     if manager.status != "running":
         raise HTTPException(
@@ -99,8 +101,9 @@ def _snapshot_response(manager) -> LiveStartResponse:
 async def start_live_chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session to open live chat from"),
 ) -> LiveStartResponse:
-    session = await _require_connection(db, current_user)
+    session = await _require_connection(db, current_user, session_id)
     manager = _manager_for(session)
 
     # Run on the API event loop. Browser launch + is_logged_in takes a few
@@ -125,8 +128,9 @@ async def start_live_chat(
 async def stop_live_chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session to stop"),
 ) -> LiveStartResponse:
-    session = await get_owned_session(db, current_user)
+    session = await get_owned_session(db, current_user, session_id=session_id)
     manager = _manager_for(session)
     result = await manager.stop()
     return LiveStartResponse(**result)
@@ -136,8 +140,9 @@ async def stop_live_chat(
 async def live_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session's live status"),
 ) -> LiveStartResponse:
-    session = await get_owned_session(db, current_user)
+    session = await get_owned_session(db, current_user, session_id=session_id)
     return _snapshot_response(_manager_for(session))
 
 
@@ -150,8 +155,9 @@ async def list_live_chats(
     limit: int = Query(DEFAULT_CHAT_LIMIT, ge=1, le=200),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session's chats"),
 ) -> LiveChatListResponse:
-    manager = await _require_running(db, current_user)
+    manager = await _require_running(db, current_user, session_id)
 
     chats = await manager.list_chats(filter_text=q, limit=limit)
     items = [LiveChatItem(**c) for c in chats]
@@ -170,8 +176,9 @@ async def open_live_chat(
     payload: LiveOpenChatRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session's chats"),
 ) -> LiveOpenChatResponse:
-    manager = await _require_running(db, current_user)
+    manager = await _require_running(db, current_user, session_id)
     result = await manager.open_chat(payload.chat_id)
     if not result.get("ok"):
         return LiveOpenChatResponse(ok=False, error=result.get("error"))
@@ -186,8 +193,9 @@ async def open_live_chat(
 async def close_live_chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session's chat"),
 ) -> LiveOpenChatResponse:
-    manager = await _require_running(db, current_user)
+    manager = await _require_running(db, current_user, session_id)
     result = await manager.close_active_chat()
     return LiveOpenChatResponse(**result)
 
@@ -200,8 +208,9 @@ async def get_live_messages(
     limit: int = Query(DEFAULT_MESSAGE_LIMIT, ge=1, le=200),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session's chat"),
 ) -> LiveMessagesResponse:
-    manager = await _require_running(db, current_user)
+    manager = await _require_running(db, current_user, session_id)
     if not manager.active_chat_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -238,8 +247,9 @@ async def send_live_message(
     payload: LiveSendRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session's chat"),
 ) -> LiveSendResponse:
-    manager = await _require_running(db, current_user)
+    manager = await _require_running(db, current_user, session_id)
     if not manager.active_chat_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

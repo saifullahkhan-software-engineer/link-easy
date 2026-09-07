@@ -11,6 +11,7 @@ os.environ.setdefault("JWT_SECRET", "test-secret")
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from api.dependencies import get_current_user, get_db
@@ -93,6 +94,93 @@ class InboxApiTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.get("/api/v1/inbox/messenger/conversations")
             self.assertEqual(response.status_code, 409)
             upstream.assert_not_called()
+
+    async def test_account_picker_lists_and_selects_among_the_callers_accounts(self):
+        async with self.Session() as db:
+            db.add(SocialPlatformConnection(
+                owner_email=self.owner, platform="facebook", account_id="page-second",
+                account_name="Second Page", encrypted_access_token=encrypt_credential("second-token"),
+            ))
+            # Pin distinct created_at values — SQLite's CURRENT_TIMESTAMP is
+            # second-precision, so without this the "first-connected" default
+            # would be picked by uuid tie-break and the default-selection
+            # assertion below would be flaky. page-owner is the older one.
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            first_row = (
+                await db.execute(select(SocialPlatformConnection).where(
+                    SocialPlatformConnection.owner_email == self.owner,
+                    SocialPlatformConnection.account_id == "page-owner",
+                ))
+            ).scalar_one()
+            second_row = (
+                await db.execute(select(SocialPlatformConnection).where(
+                    SocialPlatformConnection.owner_email == self.owner,
+                    SocialPlatformConnection.account_id == "page-second",
+                ))
+            ).scalar_one()
+            first_row.created_at = now - timedelta(hours=2)
+            second_row.created_at = now - timedelta(hours=1)
+            await db.commit()
+            first_id = first_row.id
+            second_id = second_row.id
+
+        # The dropdown lists exactly the caller's accounts for that channel,
+        # with display details and no token material.
+        response = await self.client.get("/api/v1/inbox/accounts", params={"channel": "messenger"})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["platform"], "facebook")
+        self.assertEqual({a["id"] for a in payload["accounts"]}, {first_id, second_id})
+        self.assertEqual({a["account_name"] for a in payload["accounts"]}, {"Owner Page", "Second Page"})
+        self.assertNotIn("token", response.text)
+        # The instagram channel lists no owner accounts (the one ig row is
+        # another user's).
+        response = await self.client.get("/api/v1/inbox/accounts", params={"channel": "instagram"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["accounts"], [])
+        # Unknown channels 404.
+        self.assertEqual(
+            (await self.client.get("/api/v1/inbox/accounts", params={"channel": "whatsapp"})).status_code,
+            404,
+        )
+
+        # Selecting a specific account routes through that account's token.
+        async def list_for(service, after):
+            self.assertEqual(service.account_id, "page-second")
+            self.assertEqual(service.access_token, "second-token")
+            return {"conversations": [], "next_cursor": None}
+
+        with patch.object(MetaInboxService, "list_conversations", list_for):
+            response = await self.client.get(
+                "/api/v1/inbox/messenger/conversations", params={"account_id": second_id}
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        # Omitting the id keeps the legacy default (first-connected account).
+        async def default_for(service, after):
+            self.assertEqual(service.account_id, "page-owner")
+            return {"conversations": [], "next_cursor": None}
+
+        with patch.object(MetaInboxService, "list_conversations", default_for):
+            response = await self.client.get("/api/v1/inbox/messenger/conversations")
+        self.assertEqual(response.status_code, 200, response.text)
+
+        # A stale pick is a 404, never a fallback to someone else's account.
+        async def never_used(service, after):
+            self.fail("the inbox must not fall back when the pick is stale")
+            return {"conversations": [], "next_cursor": None}
+
+        with patch.object(MetaInboxService, "list_conversations", never_used):
+            response = await self.client.get(
+                "/api/v1/inbox/messenger/conversations", params={"account_id": "gone"}
+            )
+        self.assertEqual(response.status_code, 404)
+        # Another user's account id cannot be used either.
+        with patch.object(MetaInboxService, "list_conversations", never_used):
+            response = await self.client.get(
+                "/api/v1/inbox/messenger/conversations", params={"account_id": "other-ig"}
+            )
+        self.assertEqual(response.status_code, 404)
 
     async def test_expired_and_corrupt_connections_require_reconnect(self):
         for changes in (

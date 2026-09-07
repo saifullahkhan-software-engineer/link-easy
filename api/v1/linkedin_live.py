@@ -54,9 +54,12 @@ def _ensure_running(current_user: User) -> None:
 
 @router.post("/start", response_model=LiveStartResponse)
 async def start_live(
+    account_id: str | None = Query(default=None, description="Which LinkedIn profile to open live chat from"),
     current_user: User = Depends(get_current_user),
 ) -> LiveStartResponse:
-    result = await linkedin_live_browser.start(current_user.email)
+    """Start live chat. With several connected profiles, ``account_id`` picks
+    which one; without it the most recently active one is used."""
+    result = await linkedin_live_browser.start(current_user.email, account_id)
     response = LiveStartResponse(**result)
     if response.status == "error":
         raise HTTPException(

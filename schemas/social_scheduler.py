@@ -16,7 +16,7 @@ Ported from social_scheduler/schemas/__init__.py. Changes on the way in:
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from models.social_scheduler import SocialContentKind, SocialMediaKind, SocialPlatform, SocialPostStatus
 
@@ -70,6 +70,34 @@ def _validate_playlist_ids(values: list[str]) -> list[str]:
             cleaned.append(value)
     if len(cleaned) > MAX_PLAYLISTS_PER_POST:
         raise ValueError(f"Choose at most {MAX_PLAYLISTS_PER_POST} playlists")
+    return cleaned
+
+
+def _clean_platform_accounts(
+    values: dict[str, str], platforms: list[str]
+) -> dict[str, str]:
+    """Normalise the upload editor's account picks ({platform: connection id}).
+
+    Rules:
+      * only keys for *selected* platforms survive (a stale pick for an
+        unselected platform would be dead weight on the row);
+      * ids are trimmed, non-empty and capped (they are row uuids, so anything
+        long is a client bug, not an account);
+      * de-duplicated by key (dicts already are, but hand-built JSON could
+        carry a malformed shape through a proxy).
+    Ownership of every id (does this user really control that account?) is
+    checked in the route, not here — the schema sees no database.
+    """
+    cleaned: dict[str, str] = {}
+    selected = set(platforms or [])
+    for raw_platform, raw_id in (values or {}).items():
+        platform = str(raw_platform).strip().lower()
+        if platform not in selected:
+            continue
+        connection_id = str(raw_id or "").strip()
+        if not connection_id or len(connection_id) > 100:
+            raise ValueError(f"Invalid account selection for {platform}")
+        cleaned[platform] = connection_id
     return cleaned
 
 
@@ -161,6 +189,11 @@ class PostCreate(BaseModel):
     # Facebook Groups to share the Reel to *by hand* — Meta removed the Groups
     # API, so these become a post-publish checklist, never an API call.
     facebook_groups: list[FacebookGroup] = Field(default_factory=list)
+    # Which account of each selected platform should publish this post
+    # ({platform: social_platform_connections.id}). A user with two YouTube
+    # channels picks one in the upload editor; an omitted key falls back to
+    # the platform's first-connected account at publish time.
+    platform_accounts: dict[str, str] = Field(default_factory=dict)
     publish_now: bool = False
     # ``shorts`` (default, existing behaviour) vs a regular feed ``post``.
     # The server still infers ``media_kind`` from the uploaded file.
@@ -173,6 +206,13 @@ class PostCreate(BaseModel):
     @classmethod
     def _platforms(cls, v):
         return _validate_platforms(v)
+
+    @model_validator(mode="after")
+    def _normalize_platform_accounts(self) -> "PostCreate":
+        self.platform_accounts = _clean_platform_accounts(
+            self.platform_accounts, self.platforms
+        )
+        return self
 
     @field_validator("media_kind")
     @classmethod
@@ -292,6 +332,10 @@ class PostResponse(BaseModel):
     instagram_caption: str
     tiktok_caption: str
     platform_copy: dict[str, dict[str, str]] = Field(default_factory=dict)
+    # Platform → connection id chosen in the upload editor ({} on rows
+    # created before multi-account existed; the worker then publishes with
+    # the platform's first-connected account).
+    platform_accounts: dict[str, str] = Field(default_factory=dict)
     youtube_playlist_ids: list[str] = Field(default_factory=list)
     facebook_groups: list[FacebookGroup] = Field(default_factory=list)
     created_at: datetime
@@ -461,20 +505,54 @@ class YouTubePlaylistListResponse(BaseModel):
 # ── Platform connections ──────────────────────────────────────────────────────
 
 
+class PlatformAccountResponse(BaseModel):
+    """One connected account of a platform, as shown to its owner.
+
+    Never includes token material — only the identifiers and status the UI
+    needs to list, pick and disconnect individual accounts.
+    """
+
+    # Row id of the connection — what pickers (upload page, inbox) send back
+    # to address this exact account.
+    id: str
+    platform: str
+    # The platform-side identity (YouTube channel UC…, IG user id, TikTok
+    # open_id, Facebook account id) and its display name.
+    account_id: str = ""
+    account_name: str = ""
+    # Platform extras, e.g. {"google_email": …} for YouTube or
+    # {"page_id": …} for Instagram — display only.
+    extra_data: dict[str, Any] = Field(default_factory=dict)
+    expires_at: Optional[datetime] = None
+    # True when the access token is past expiry and no refresh token is held,
+    # so publishing with this account would fail — the UI asks for a
+    # reconnect.
+    reconnect_required: bool = False
+    connected_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
 class PlatformConnectionResponse(BaseModel):
-    """A connection as shown to its owner — never includes token material."""
+    """A platform's connection summary for one user.
+
+    ``accounts`` holds every connected account (possibly several of the same
+    platform); the flat ``account_*``/``expires_at`` fields mirror the
+    *first* (oldest) account so clients predating multi-account keep working.
+    """
 
     platform: str
     label: str
+    # True when at least one account of this platform is connected.
     connected: bool
     # False when the operator has not set this platform's OAuth app
     # credentials; the UI disables the connect button and says why.
     configured: bool
+    accounts: list[PlatformAccountResponse] = Field(default_factory=list)
     account_name: str = ""
     account_id: str = ""
     expires_at: Optional[datetime] = None
-    # True when the access token is past expiry and no refresh token is held,
-    # so the next publish would fail — the UI asks for a reconnect.
+    # True when ANY connected account's token is past expiry and cannot be
+    # renewed unattended.
     reconnect_required: bool = False
     connected_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

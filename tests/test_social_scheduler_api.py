@@ -557,6 +557,349 @@ class SocialSchedulerApiTests(unittest.TestCase):
         self.run_async(run)
 
 
+class SocialMultiAccountTests(unittest.TestCase):
+    """Several accounts of the same platform: connect, list, pick, disconnect.
+
+    The unique key is (owner, platform, account_id): a second channel of the
+    same platform adds a row, reconnecting the same channel replaces its
+    tokens, and every lookup stays inside the caller's own rows.
+    """
+
+    def setUp(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        self.Session = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.upload_dir = tempfile.mkdtemp(prefix="le-social-multi-")
+        self._settings_patch = patch.multiple(
+            settings,
+            UPLOAD_DIR=self.upload_dir,
+            MAX_UPLOAD_SIZE=1024 * 1024,
+            YOUTUBE_CLIENT_ID="yt-id",
+            YOUTUBE_CLIENT_SECRET="yt-secret",
+            YOUTUBE_REDIRECT_URI="http://localhost:8000/api/v1/social-scheduler/platforms/youtube/callback",
+            INSTAGRAM_APP_ID="",
+            INSTAGRAM_APP_SECRET="",
+            TIKTOK_CLIENT_KEY="tt-key",
+            TIKTOK_CLIENT_SECRET="tt-secret",
+            PUBLIC_API_URL="https://api.example.com",
+            SOCIAL_OAUTH_RETURN_URL="http://localhost:5173/app/social-scheduler/settings",
+        )
+        self._settings_patch.start()
+
+        app = FastAPI()
+        app.include_router(router)
+        self.current_email = OWNER
+
+        async def override_get_db():
+            async with self.Session() as session:
+                yield session
+
+        async def override_user():
+            async with self.Session() as session:
+                return (await session.execute(select(User).where(User.email == self.current_email))).scalar_one()
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = override_user
+        self.app = app
+        self.loop.run_until_complete(self._seed())
+
+    def tearDown(self):
+        self._settings_patch.stop()
+        shutil.rmtree(self.upload_dir, ignore_errors=True)
+        self.loop.run_until_complete(self.engine.dispose())
+        self.loop.close()
+
+    async def _seed(self):
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with self.Session() as s:
+            s.add_all([_user(OWNER), _user(OTHER)])
+            await s.commit()
+
+    def run_async(self, fn):
+        async def runner():
+            async with AsyncClient(transport=ASGITransport(app=self.app), base_url="http://test") as client:
+                return await fn(client)
+
+        return self.loop.run_until_complete(runner())
+
+    def _connect_youtube(self, account_id, name):
+        """Run one OAuth callback for a YouTube channel (tokens mocked out)."""
+        state = module._mint_oauth_state(OWNER, "youtube")
+        tokens = {"access_token": f"at-{account_id}", "refresh_token": f"rt-{account_id}", "expires_in": 3600}
+        info = {"account_id": account_id, "account_name": name, "extra_data": {}}
+        return (
+            patch.object(_youtube_cls(), "exchange_code", AsyncMock(return_value=tokens)),
+            patch.object(_youtube_cls(), "get_account_info", AsyncMock(return_value=info)),
+        )
+
+    async def _backdate_connection(self, account_id, hours_ago):
+        """Give a connection a distinct created_at.
+
+        SQLite's CURRENT_TIMESTAMP has second precision, so two callbacks in
+        the same second would tie on created_at and the id tie-break would
+        make the listing order arbitrary. Backdating pins "oldest first".
+        """
+        # Naive UTC: SQLite stores/returns naive datetimes; the API layer
+        # re-attaches the timezone on read.
+        stamp = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours_ago)
+        async with self.Session() as s:
+            conn = (
+                await s.execute(
+                    select(SocialPlatformConnection).where(
+                        SocialPlatformConnection.owner_email == OWNER,
+                        SocialPlatformConnection.account_id == account_id,
+                    )
+                )
+            ).scalar_one()
+            conn.created_at = stamp
+            await s.commit()
+
+    async def _connect_two_channels(self, client):
+        """Channel A (older), then Channel B; returns their row ids in age order."""
+        for account_id, name, hours_ago in (("UC-A", "Channel A", 2), ("UC-B", "Channel B", 1)):
+            exchange, info = self._connect_youtube(account_id, name)
+            with exchange, info:
+                res = await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/callback",
+                    params={"code": "c", "state": module._mint_oauth_state(OWNER, "youtube")},
+                    follow_redirects=False,
+                )
+            self.assertEqual(res.status_code, 302)
+            await self._backdate_connection(account_id, hours_ago)
+        by_name = {p["platform"]: p for p in (await client.get("/api/v1/social-scheduler/platforms")).json()}
+        return {a["account_id"]: a["id"] for a in by_name["youtube"]["accounts"]}
+
+    def test_two_channels_of_one_platform_are_two_rows_and_listing_shows_both(self):
+        async def run(client):
+            exchange, info = self._connect_youtube("UC-A", "Channel A")
+            with exchange, info:
+                res = await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/callback",
+                    params={"code": "c1", "state": module._mint_oauth_state(OWNER, "youtube")},
+                    follow_redirects=False,
+                )
+            self.assertEqual(res.status_code, 302)
+            await self._backdate_connection("UC-A", hours_ago=2)
+
+            exchange2, info2 = self._connect_youtube("UC-B", "Channel B")
+            with exchange2, info2:
+                res = await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/callback",
+                    params={"code": "c2", "state": module._mint_oauth_state(OWNER, "youtube")},
+                    follow_redirects=False,
+                )
+            self.assertEqual(res.status_code, 302)
+            await self._backdate_connection("UC-B", hours_ago=1)
+
+            by_name = {p["platform"]: p for p in (await client.get("/api/v1/social-scheduler/platforms")).json()}
+            youtube = by_name["youtube"]
+            self.assertTrue(youtube["connected"])
+            self.assertEqual(len(youtube["accounts"]), 2)
+            self.assertEqual([a["account_id"] for a in youtube["accounts"]], ["UC-A", "UC-B"])
+            self.assertEqual([a["account_name"] for a in youtube["accounts"]], ["Channel A", "Channel B"])
+            # Legacy flat fields mirror the first (oldest) account.
+            self.assertEqual(youtube["account_name"], "Channel A")
+            self.assertEqual(youtube["account_id"], "UC-A")
+            for key in ("access_token", "encrypted_access_token", "refresh_token"):
+                self.assertNotIn(key, res.text)
+
+            async with self.Session() as s:
+                rows = (await s.execute(select(SocialPlatformConnection))).scalars().all()
+                self.assertEqual(len(rows), 2)
+
+        self.run_async(run)
+
+    def test_reconnecting_the_same_channel_updates_the_existing_row(self):
+        async def run(client):
+            exchange, info = self._connect_youtube("UC-A", "Channel A")
+            with exchange, info:
+                await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/callback",
+                    params={"code": "c1", "state": module._mint_oauth_state(OWNER, "youtube")},
+                    follow_redirects=False,
+                )
+
+            # Second sign-in of the SAME channel: refreshes tokens, no new row.
+            with patch.object(_youtube_cls(), "exchange_code", AsyncMock(return_value={"access_token": "at-2", "refresh_token": "rt-2", "expires_in": 3600})), \
+                 patch.object(_youtube_cls(), "get_account_info", AsyncMock(return_value={"account_id": "UC-A", "account_name": "Channel A renamed", "extra_data": {}})):
+                res = await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/callback",
+                    params={"code": "c2", "state": module._mint_oauth_state(OWNER, "youtube")},
+                    follow_redirects=False,
+                )
+            self.assertEqual(res.status_code, 302)
+
+            async with self.Session() as s:
+                rows = (await s.execute(select(SocialPlatformConnection))).scalars().all()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].account_name, "Channel A renamed")
+                self.assertEqual(decrypt_credential(rows[0].encrypted_access_token), "at-2")
+
+        self.run_async(run)
+
+    def test_callback_never_leaks_tokens_or_crashes_on_an_empty_account_id(self):
+        async def run(client):
+            # A provider that returns no account id must still store the row
+            # (auto- id keeps the unique constraint satisfiable).
+            state = module._mint_oauth_state(OWNER, "youtube")
+            with patch.object(_youtube_cls(), "exchange_code", AsyncMock(return_value={"access_token": "at-x", "refresh_token": None, "expires_in": None})), \
+                 patch.object(_youtube_cls(), "get_account_info", AsyncMock(return_value={"account_id": "", "account_name": "No Id", "extra_data": {}})):
+                res = await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/callback",
+                    params={"code": "c", "state": state},
+                    follow_redirects=False,
+                )
+            self.assertEqual(res.status_code, 302, res.text)
+            async with self.Session() as s:
+                rows = (await s.execute(select(SocialPlatformConnection))).scalars().all()
+                self.assertEqual(len(rows), 1)
+                self.assertTrue(rows[0].account_id.startswith("auto-"))
+                self.assertNotIn("at-x", rows[0].encrypted_access_token)
+
+        self.run_async(run)
+
+    def test_disconnect_removes_one_account_or_all(self):
+        async def run(client):
+            ids = await self._connect_two_channels(client)
+            first_id, second_id = ids["UC-A"], ids["UC-B"]
+
+            # A foreign connection id must not be deletable through the route.
+            res = await client.delete(
+                "/api/v1/social-scheduler/platforms/youtube", params={"connection_id": "not-mine"}
+            )
+            self.assertEqual(res.status_code, 404)
+
+            # Disconnect exactly one account.
+            res = await client.delete(
+                "/api/v1/social-scheduler/platforms/youtube", params={"connection_id": first_id}
+            )
+            self.assertEqual(res.status_code, 200)
+            by_name = {p["platform"]: p for p in (await client.get("/api/v1/social-scheduler/platforms")).json()}
+            self.assertEqual([a["id"] for a in by_name["youtube"]["accounts"]], [second_id])
+
+            # Without the id, everything remaining goes.
+            res = await client.delete("/api/v1/social-scheduler/platforms/youtube")
+            self.assertEqual(res.status_code, 200)
+            by_name = {p["platform"]: p for p in (await client.get("/api/v1/social-scheduler/platforms")).json()}
+            self.assertFalse(by_name["youtube"]["connected"])
+            self.assertEqual((await client.delete("/api/v1/social-scheduler/platforms/youtube")).status_code, 404)
+
+        self.run_async(run)
+
+    def test_posts_record_the_picked_account_and_reject_stale_picks(self):
+        async def run(client):
+            exchange, info = self._connect_youtube("UC-A", "Channel A")
+            with exchange, info:
+                await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/callback",
+                    params={"code": "c1", "state": module._mint_oauth_state(OWNER, "youtube")},
+                    follow_redirects=False,
+                )
+            by_name = {p["platform"]: p for p in (await client.get("/api/v1/social-scheduler/platforms")).json()}
+            conn_id = by_name["youtube"]["accounts"][0]["id"]
+            upload_id = (await client.post(
+                "/api/v1/social-scheduler/upload",
+                files={"file": ("clip.mp4", b"\x00" * 2048, "video/mp4")},
+            )).json()["upload_id"]
+
+            # A pick for the caller's own account is stored on the post.
+            res = await client.post("/api/v1/social-scheduler/posts", json={
+                "title": "Two channels",
+                "upload_id": upload_id,
+                "platforms": ["youtube"],
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                                "platform_accounts": {"youtube": conn_id},
+            })
+            self.assertEqual(res.status_code, 201, res.text)
+            self.assertEqual(res.json()["platform_accounts"], {"youtube": conn_id})
+
+            # Another user's connection id is a 400, not a stored post.
+            res = await client.post("/api/v1/social-scheduler/posts", json={
+                "title": "Sneaky",
+                "upload_id": upload_id,
+                "platforms": ["youtube"],
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                                "platform_accounts": {"youtube": "forged-id"},
+            })
+            self.assertEqual(res.status_code, 400)
+            self.assertIn("no longer connected", res.json()["detail"])
+
+            # A pick for an unselected platform is dropped, not stored.
+            res = await client.post("/api/v1/social-scheduler/posts", json={
+                "title": "Dropped",
+                "upload_id": upload_id,
+                "platforms": ["youtube"],
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                                "platform_accounts": {"youtube": conn_id, "tiktok": conn_id},
+            })
+            self.assertEqual(res.status_code, 201)
+            self.assertEqual(res.json()["platform_accounts"], {"youtube": conn_id})
+
+            # No pick at all: legacy behaviour, empty map.
+            res = await client.post("/api/v1/social-scheduler/posts", json={
+                "title": "Legacy",
+                "upload_id": upload_id,
+                "platforms": ["youtube"],
+                "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                            })
+            self.assertEqual(res.status_code, 201)
+            self.assertEqual(res.json()["platform_accounts"], {})
+
+        self.run_async(run)
+
+    def test_playlists_accept_a_channel_pick(self):
+        async def run(client):
+            ids = await self._connect_two_channels(client)
+
+            with patch.object(
+                _youtube_cls(), "list_playlists",
+                AsyncMock(return_value=[{"id": "PL1", "title": "Tutorials", "privacy": "public", "item_count": 3}]),
+            ):
+                # A valid pick lists that channel's playlists (channel name comes back).
+                res = await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/playlists",
+                    params={"connection_id": ids["UC-B"]},
+                )
+                self.assertEqual(res.status_code, 200, res.text)
+                self.assertEqual(res.json()["channel"], "Channel B")
+                self.assertEqual(res.json()["playlists"][0]["id"], "PL1")
+
+                # Without a pick, the first-connected channel is the default.
+                res = await client.get("/api/v1/social-scheduler/platforms/youtube/playlists")
+                self.assertEqual(res.status_code, 200, res.text)
+                self.assertEqual(res.json()["channel"], "Channel A")
+
+                # A stale pick is a 404 with an actionable message.
+                res = await client.get(
+                    "/api/v1/social-scheduler/platforms/youtube/playlists",
+                    params={"connection_id": "gone"},
+                )
+                self.assertEqual(res.status_code, 404)
+                self.assertIn("no longer connected", res.json()["detail"])
+
+        self.run_async(run)
+
+    def test_stats_count_each_platform_once_per_user(self):
+        async def run(client):
+            async with self.Session() as s:
+                for account_id in ("UC-A", "UC-B"):
+                    s.add(SocialPlatformConnection(
+                        owner_email=OWNER, platform="youtube", account_id=account_id,
+                        encrypted_access_token=encrypt_credential("t"),
+                    ))
+                await s.commit()
+            stats = (await client.get("/api/v1/social-scheduler/stats")).json()
+            self.assertEqual(stats["connected_platforms"], ["youtube"])
+
+        self.run_async(run)
+
+
 def _tiktok_cls():
     from services.social.tiktok import TikTokService
 

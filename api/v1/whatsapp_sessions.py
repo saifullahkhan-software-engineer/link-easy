@@ -31,40 +31,82 @@ async def get_owned_session(
     current_user: User,
     *,
     require_connected: bool = False,
+    session_id: Optional[int] = None,
 ) -> Optional[WhatsAppSession]:
-    """Return the caller's WhatsApp session row, adopting the legacy row.
+    """Return one of the caller's WhatsApp session rows.
+
+    ``session_id`` selects a specific device/session (a user may be logged
+    into more than one — e.g. personal and work). When omitted, the newest of
+    the caller's sessions is returned (legacy installs adopt the unowned row),
+    so single-session users and older clients are unchanged.
 
     When ``require_connected`` is set, raises 400 instead of returning a
     missing/disconnected session so endpoints can share the same guard.
     """
-    result = await db.execute(
-        select(WhatsAppSession)
-        .where(WhatsAppSession.owner_email == current_user.email)
-        .order_by(WhatsAppSession.id.desc())
-    )
-    session = result.scalars().first()
+    # FastAPI resolves the ``Query`` default to None when a request omits the
+    # param, but unit tests call these handlers directly and then the literal
+    # ``Query(...)`` object lands here. Treat anything that is not an int as
+    # "no pick" so both paths behave identically.
+    if not isinstance(session_id, int):
+        session_id = None
 
-    if session is None:
-        legacy_result = await db.execute(
+    if session_id is not None:
+        # Resolve the pick inside the caller's own rows: a foreign or deleted
+        # session id is simply "not found", never someone else's session.
+        result = await db.execute(
+            select(WhatsAppSession).where(
+                WhatsAppSession.id == session_id,
+                WhatsAppSession.owner_email == current_user.email,
+            )
+        )
+        session = result.scalars().first()
+    else:
+        result = await db.execute(
             select(WhatsAppSession)
-            .where(WhatsAppSession.owner_email.is_(None))
+            .where(WhatsAppSession.owner_email == current_user.email)
             .order_by(WhatsAppSession.id.desc())
         )
-        legacy = legacy_result.scalars().first()
-        if legacy is not None:
-            legacy.owner_email = current_user.email
-            await db.commit()
-            await db.refresh(legacy)
-            session = legacy
+        session = result.scalars().first()
+
+        if session is None:
+            legacy_result = await db.execute(
+                select(WhatsAppSession)
+                .where(WhatsAppSession.owner_email.is_(None))
+                .order_by(WhatsAppSession.id.desc())
+            )
+            legacy = legacy_result.scalars().first()
+            if legacy is not None:
+                legacy.owner_email = current_user.email
+                await db.commit()
+                await db.refresh(legacy)
+                session = legacy
 
     if require_connected and (
         session is None or session.status != "connected" or not session.is_active
     ):
+        if session_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="That WhatsApp session is no longer connected — pick another one.",
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=NOT_CONNECTED_DETAIL,
         )
     return session
+
+
+async def list_owned_sessions(
+    db: AsyncSession,
+    current_user: User,
+) -> list:
+    """Every WhatsApp session the caller owns, newest first (for listing)."""
+    result = await db.execute(
+        select(WhatsAppSession)
+        .where(WhatsAppSession.owner_email == current_user.email)
+        .order_by(WhatsAppSession.id.desc())
+    )
+    return list(result.scalars().all())
 
 
 def session_profile_dir(session) -> str:

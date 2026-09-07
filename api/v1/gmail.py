@@ -73,6 +73,7 @@ from core.config import settings
 from models.gmail import GmailConnection
 from models.user import User
 from schemas.gmail import (
+    GmailAccount,
     GmailAuthUrlResponse,
     GmailLabel,
     GmailMessageDetail,
@@ -196,17 +197,49 @@ def _service(request: Request) -> GmailService:
 
 
 async def _owned_connection(
-    db: AsyncSession, owner_email: str
+    db: AsyncSession,
+    owner_email: str,
+    account_id: Optional[str] = None,
 ) -> Optional[GmailConnection]:
+    """The caller's mailbox connection(s) for one owner.
+
+    ``account_id`` selects one of several connected mailboxes; without it the
+    first-connected (oldest) mailbox is returned, so single-mailbox users and
+    older clients keep their exact previous behaviour.
+    """
+    query = select(GmailConnection).where(GmailConnection.owner_email == owner_email)
+    if account_id:
+        query = query.where(GmailConnection.id == account_id)
+    else:
+        query = query.order_by(GmailConnection.created_at.asc(), GmailConnection.id.asc())
+    result = await db.execute(query)
+    return result.scalars().first()
+
+
+async def _owned_connections(
+    db: AsyncSession, owner_email: str
+) -> list[GmailConnection]:
+    """Every mailbox the caller has connected, oldest first (for listing)."""
     result = await db.execute(
-        select(GmailConnection).where(GmailConnection.owner_email == owner_email)
+        select(GmailConnection)
+        .where(GmailConnection.owner_email == owner_email)
+        .order_by(GmailConnection.created_at.asc(), GmailConnection.id.asc())
     )
-    return result.scalar_one_or_none()
+    return list(result.scalars().all())
 
 
-async def _connection_or_409(db: AsyncSession, owner_email: str) -> GmailConnection:
-    conn = await _owned_connection(db, owner_email)
+async def _connection_or_409(
+    db: AsyncSession,
+    owner_email: str,
+    account_id: Optional[str] = None,
+) -> GmailConnection:
+    conn = await _owned_connection(db, owner_email, account_id)
     if conn is None:
+        if account_id:
+            raise HTTPException(
+                status_code=404,
+                detail="That Gmail account is no longer connected — pick another one.",
+            )
         raise HTTPException(status_code=409, detail="Gmail is not connected. Connect it first.")
     return conn
 
@@ -320,20 +353,44 @@ async def gmail_status(
     current_user: User = Depends(get_current_user),
 ):
     """Connection summary. Purely local — never calls Google, so the sidebar
-    and accounts page can poll it freely."""
-    conn = await _owned_connection(db, current_user.email)
-    if conn is None:
+    and accounts page can poll it freely.
+
+    ``accounts`` lists every connected mailbox (the UI shows one card per
+    mailbox and a picker where the user chooses which one to use); the flat
+    ``account_email`` fields mirror the first-connected mailbox for clients
+    predating multi-mailbox.
+    """
+    connections = await _owned_connections(db, current_user.email)
+    if not connections:
         return GmailStatus(connected=False, configured=settings.gmail_configured)
 
+    def _reconnect_required(conn: GmailConnection) -> bool:
+        expires_at = _aware(conn.expires_at)
+        expired = expires_at is not None and expires_at <= _now() + EXPIRY_SKEW
+        return bool(expired and not conn.encrypted_refresh_token)
+
+    accounts = [
+        GmailAccount(
+            id=conn.id,
+            account_email=conn.account_email,
+            expires_at=_aware(conn.expires_at),
+            reconnect_required=_reconnect_required(conn),
+            last_checked_at=_aware(conn.last_checked_at),
+        )
+        for conn in connections
+    ]
+    conn = connections[0]
     expires_at = _aware(conn.expires_at)
     expired = expires_at is not None and expires_at <= _now() + EXPIRY_SKEW
     return GmailStatus(
         connected=True,
         configured=settings.gmail_configured,
+        accounts=accounts,
         account_email=conn.account_email,
         scopes=[s for s in (conn.granted_scopes or "").split() if s],
         expires_at=expires_at,
-        reconnect_required=bool(expired and not conn.encrypted_refresh_token),
+        # Any mailbox whose token cannot be renewed degrades the connection.
+        reconnect_required=any(a.reconnect_required for a in accounts),
         messages_total=_int_or_none(conn.messages_total),
         last_checked_at=_aware(conn.last_checked_at),
         updated_at=_aware(conn.updated_at),
@@ -416,8 +473,20 @@ async def gmail_oauth_callback(
             error="That Gmail address is already connected to another LinkEasy account."
         )
 
-    conn = await _owned_connection(db, owner_email)
-    if conn is None:
+    # Upsert by mailbox: reconnecting the same Gmail address refreshes that
+    # mailbox's tokens, while signing in with a DIFFERENT Google account
+    # stores a second row — that is how a user ends up with personal + work
+    # mailboxes under one LinkEasy account.
+    conn = (
+        await db.execute(
+            select(GmailConnection).where(
+                GmailConnection.owner_email == owner_email,
+                GmailConnection.account_email == account_email,
+            )
+        )
+    ).scalar_one_or_none()
+    is_new_mailbox = conn is None
+    if is_new_mailbox:
         conn = GmailConnection(owner_email=owner_email, encrypted_access_token="")
         db.add(conn)
     try:
@@ -439,26 +508,34 @@ async def gmail_oauth_callback(
     try:
         await db.commit()
     except IntegrityError:
-        # A parallel callback for the same user won the insert race. If the
-        # surviving row is ours, treat the flow as connected; otherwise the
-        # loser must retry (their row was rolled back).
+        # Two callbacks raced for the same mailbox — the other write won.
         await db.rollback()
-        winner = await _owned_connection(db, owner_email)
-        if winner is not None and winner.account_email == account_email:
-            return _frontend_redirect(connected=True)
-        return _frontend_redirect(error="Sign-in raced with another attempt — try again.")
+        return _frontend_redirect(connected=True)
 
-    logger.info("Gmail connected for %s (%s)", owner_email, account_email)
+    logger.info(
+        "Gmail %s for %s (%s)",
+        "connected" if is_new_mailbox else "reconnected",
+        owner_email,
+        account_email,
+    )
     return _frontend_redirect(connected=True)
 
 
 @router.delete("/connection", response_model=GmailMessageResponse)
 async def gmail_disconnect(
+    account_id: Optional[str] = Query(default=None, description="One mailbox; omit to disconnect every mailbox"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    conn = await _owned_connection(db, current_user.email)
+    """Disconnect one mailbox (or all, when no id is given).
+
+    The id is resolved inside the caller's own rows, so a foreign mailbox id
+    404s exactly like a missing connection.
+    """
+    conn = await _owned_connection(db, current_user.email, account_id)
     if conn is None:
+        if account_id:
+            raise HTTPException(status_code=404, detail="That Gmail account is no longer connected")
         raise HTTPException(status_code=404, detail="Gmail is not connected")
 
     # Best-effort revoke at Google so the refresh token dies server-side too.
@@ -482,9 +559,10 @@ async def gmail_disconnect(
 async def gmail_profile(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
     """Live mailbox profile from users/me/profile (address + totals)."""
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     try:
@@ -512,13 +590,14 @@ async def gmail_profile(
 async def gmail_labels(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
     """Every label with per-label message/unread totals.
 
     Counts come from one labels.get per label; a label that vanishes between
     the list and its get is omitted rather than failing the request.
     """
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     try:
@@ -561,9 +640,10 @@ async def gmail_list_messages(
     page_token: str = Query(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
     """Search / list messages (no bodies — click one for the full thread)."""
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
 
@@ -613,11 +693,12 @@ async def gmail_list_messages(
 async def gmail_unread(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
     _rate: None = Depends(rate_limit("gmail:check")),
 ):
     """Inbox totals + the newest unread messages — the "checking mail" tick
     the UI polls while the inbox is open."""
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     try:
@@ -650,8 +731,9 @@ async def gmail_get_message(
     message_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     message_id = _valid_gmail_id(message_id, "message id")
@@ -668,10 +750,11 @@ async def gmail_modify_message(
     payload: GmailModifyRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
     """Add/remove labels on one message — mark read/unread (UNREAD), star
     (STARRED), archive (remove INBOX), move to a custom label, etc."""
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     message_id = _valid_gmail_id(message_id, "message id")
@@ -692,8 +775,9 @@ async def gmail_trash_message(
     message_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     message_id = _valid_gmail_id(message_id, "message id")
@@ -710,8 +794,9 @@ async def gmail_untrash_message(
     message_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     message_id = _valid_gmail_id(message_id, "message id")
@@ -729,10 +814,11 @@ async def gmail_download_attachment(
     attachment_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
     """Proxy an attachment out of Gmail so the browser never needs the OAuth
     token. The filename/mime come from the message's own attachment list."""
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     message_id = _valid_gmail_id(message_id, "message id")
@@ -766,9 +852,10 @@ async def gmail_get_thread(
     thread_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
     """Full thread for the reading pane: every message, oldest → newest."""
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     access_token = await _access_token(db, conn)
     service = GmailService()
     thread_id = _valid_gmail_id(thread_id, "thread id")
@@ -819,10 +906,11 @@ async def gmail_send(
     payload: GmailSendRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    account_id: Optional[str] = Query(default=None),
 ):
     """Compose and send. From is always the connected mailbox — Gmail refuses
     to send from another address, so no From is accepted from the client."""
-    conn = await _connection_or_409(db, current_user.email)
+    conn = await _connection_or_409(db, current_user.email, account_id)
     if not conn.account_email:
         raise HTTPException(
             status_code=409,

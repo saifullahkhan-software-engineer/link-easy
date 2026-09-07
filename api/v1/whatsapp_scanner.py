@@ -47,7 +47,11 @@ from api.dependencies import (
     get_current_user,
     require_whatsapp_scheduled_jobs_enabled,
 )
-from api.v1.whatsapp_sessions import get_owned_session, session_profile_dir
+from api.v1.whatsapp_sessions import (
+    get_owned_session,
+    list_owned_sessions,
+    session_profile_dir,
+)
 from models.user import User
 from schemas.whatsapp import (
     WhatsAppConnectResponse,
@@ -65,6 +69,8 @@ from schemas.whatsapp import (
     WhatsAppMessageResponse,
     WhatsAppMessageListResponse,
     WhatsAppStatsResponse,
+    WhatsAppSessionItem,
+    WhatsAppSessionListResponse,
 )
 from models.whatsapp import (
     WhatsAppSession,
@@ -530,6 +536,7 @@ async def _ensure_browser_view_ready(browser_view, url: str, wait_seconds: int =
 async def connect_whatsapp(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: int | None = Query(None, ge=1, description="Which session to (re)connect"),
 ) -> WhatsAppConnectResponse:
     """Launch the embedded browser view for WhatsApp QR login.
 
@@ -539,13 +546,16 @@ async def connect_whatsapp(
 
     The browser is ONLY opened for QR scan and 2FA entry. After successful
     connection, the browser is stopped. Logs are written to the terminal.
+
+    Without ``session_id`` this connects the caller's default (newest)
+    session; pass one to add/reconnect a specific device.
     """
     from services.browser_view import WHATSAPP_URL, get_browser_view
     from services.whatsapp_live_browser import get_live_browser
 
     # Per-user rollout: every user gets their own session row + profile dir.
     # Legacy installs with a single unowned row are adopted on first visit.
-    session = await get_owned_session(db, current_user)
+    session = await get_owned_session(db, current_user, session_id=session_id)
     if session is None:
         session = WhatsAppSession(
             status="waiting_qr",
@@ -693,6 +703,7 @@ async def capture_whatsapp_session(
     ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: int | None = Query(None, ge=1, description="Which session to capture"),
 ) -> WhatsAppCaptureResponse:
     """Manually capture the WhatsApp session from the open browser view.
 
@@ -832,9 +843,14 @@ async def capture_whatsapp_session(
 async def get_whatsapp_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: int | None = Query(None, ge=1, description="Which session's status"),
 ) -> WhatsAppStatusResponse:
-    """Return the caller's WhatsApp connection status (per-user sessions)."""
-    session = await get_owned_session(db, current_user)
+    """Return one of the caller's WhatsApp connection statuses.
+
+    Without ``session_id`` this is the default (newest) session, so existing
+    single-session clients are unchanged.
+    """
+    session = await get_owned_session(db, current_user, session_id=session_id)
 
     if not session:
         return WhatsAppStatusResponse(status="disconnected", is_active=False)
@@ -860,6 +876,36 @@ async def get_whatsapp_status(
     )
 
 
+# ── GET /sessions ────────────────────────────────────────────────────────────
+
+
+@router.get("/sessions", response_model=WhatsAppSessionListResponse)
+async def list_whatsapp_sessions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppSessionListResponse:
+    """List every WhatsApp session the caller has (one per connected device).
+
+    Feeds the account cards (Accounts → WhatsApp) and the per-page session
+    pickers (scanner, live chat). Newest first; ``is_default`` marks the one
+    the UI pre-selects (the same row the single-session endpoints use).
+    """
+    sessions = await list_owned_sessions(db, current_user)
+    items = [
+        WhatsAppSessionItem(
+            id=s.id,
+            status=s.status,
+            is_active=s.is_active,
+            connected=bool(s.status == "connected" and s.is_active),
+            is_default=(i == 0),
+            created_at=s.created_at,
+            updated_at=s.updated_at,
+        )
+        for i, s in enumerate(sessions)
+    ]
+    return WhatsAppSessionListResponse(sessions=items, count=len(items))
+
+
 # ── DELETE /connection ───────────────────────────────────────────────────────
 
 
@@ -867,8 +913,15 @@ async def get_whatsapp_status(
 async def disconnect_whatsapp(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: int | None = Query(
+        None, ge=1, description="One session; omit to disconnect the default (newest)"
+    ),
 ) -> WhatsAppDisconnectResponse:
-    """Disconnect the caller's WhatsApp and remove its durable credentials.
+    """Disconnect one WhatsApp session and remove its durable credentials.
+
+    With several connected devices, ``session_id`` targets exactly one — the
+    other sessions of the same user stay connected. Without it the default
+    (newest) session is disconnected, matching the single-session behaviour.
 
     Merely changing the database status is not sufficient: WhatsApp's device
     keys live in the persistent Chromium profile (IndexedDB), so a later
@@ -886,8 +939,16 @@ async def disconnect_whatsapp(
         release_profile_lock,
     )
 
-    session = await get_owned_session(db, current_user)
+    # Direct (non-FastAPI) calls pass the literal Query default; normalise.
+    if not isinstance(session_id, int):
+        session_id = None
+    session = await get_owned_session(db, current_user, session_id=session_id)
     if session is None:
+        if session_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="That WhatsApp session no longer exists.",
+            )
         return WhatsAppDisconnectResponse(
             message="WhatsApp is already disconnected.",
             status="disconnected",
@@ -917,9 +978,15 @@ async def disconnect_whatsapp(
         ) from exc
 
     try:
+        # Clear exactly THIS session's row. (It used to match the whole
+        # owner_email, which silently disconnected every other device the user
+        # had connected — wrong with multi-account.)
         await db.execute(
             sa_update(WhatsAppSession)
-            .where(WhatsAppSession.owner_email == current_user.email)
+            .where(
+                WhatsAppSession.id == session.id,
+                WhatsAppSession.owner_email == current_user.email,
+            )
             .values(
                 status="disconnected",
                 is_active=False,
@@ -963,6 +1030,7 @@ async def list_whatsapp_groups(
     filter_id: int | None = Query(None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_id: int | None = Query(None, ge=1, description="Which session's groups to read"),
 ) -> WhatsAppGroupListResponse:
     """Get the list of WhatsApp groups from the caller's sidebar.
 
@@ -981,7 +1049,9 @@ async def list_whatsapp_groups(
         await _load_owned_filter(filter_id, current_user, db)
 
     # Per-user rollout: only the caller's own session drives their groups.
-    session = await get_owned_session(db, current_user, require_connected=True)
+    session = await get_owned_session(
+        db, current_user, require_connected=True, session_id=session_id
+    )
 
     from services.browser_view import get_browser_view
     from services.whatsapp_browser import (
@@ -1294,11 +1364,24 @@ async def create_whatsapp_filter_job(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppScanFilterResponse:
-    """Create a draft WhatsApp filter job."""
+    """Create a draft WhatsApp filter job.
+
+    ``session_id`` binds the filter to one of the caller's connected devices;
+    a missing/foreign id is a 404 (the session list is what the picker offers).
+    """
+    session_id = payload.session_id
+    if session_id is not None:
+        bound = await get_owned_session(db, current_user, session_id=session_id)
+        if bound is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="That WhatsApp session no longer exists — pick another one.",
+            )
     filter_row = WhatsAppScanFilter(
         owner_email=current_user.email,
         name=payload.name.strip(),
         status="draft",
+        session_id=session_id,
         role=payload.role,
         job_title=payload.job_title,
         keywords=payload.keywords,
@@ -1335,7 +1418,16 @@ async def update_whatsapp_filter_job(
 ) -> WhatsAppScanFilterResponse:
     """Update filter criteria without changing its lifecycle state."""
     filter_row = await _load_owned_filter(filter_id, current_user, db)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changed = payload.model_dump(exclude_unset=True)
+    if changed.get("session_id") is not None:
+        # A re-bound session must be one of the caller's own.
+        bound = await get_owned_session(db, current_user, session_id=changed["session_id"])
+        if bound is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="That WhatsApp session no longer exists — pick another one.",
+            )
+    for field, value in changed.items():
         if field == "name" and value is not None:
             value = value.strip()
         setattr(filter_row, field, value)
@@ -1618,6 +1710,7 @@ async def save_whatsapp_filters(
             filters.owner_email = current_user.email
         filters.status = "active"
         filters.name = filters.name or "WhatsApp Filter"
+        filters.session_id = payload.session_id
         filters.role = payload.role
         filters.job_title = payload.job_title
         filters.keywords = payload.keywords
@@ -1632,6 +1725,7 @@ async def save_whatsapp_filters(
             owner_email=current_user.email,
             name="WhatsApp Filter",
             status="active",
+            session_id=payload.session_id,
             role=payload.role,
             job_title=payload.job_title,
             keywords=payload.keywords,

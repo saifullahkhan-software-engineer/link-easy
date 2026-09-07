@@ -209,6 +209,10 @@ class LinkedInLiveBrowserManager:
             "error": self.error,
             "active_chat_id": self.active_chat_id,
             "active_chat_name": self.active_chat_name,
+            # Which connected profile this live session runs from (so the UI
+            # can label the session and warn when switching accounts).
+            "account_id": getattr(self._account, "id", None),
+            "account_email": getattr(self._account, "linkedin_email", None),
         }
 
     @property
@@ -239,7 +243,9 @@ class LinkedInLiveBrowserManager:
         finally:
             self._profile_lock = None
 
-    async def start(self, owner_email: Optional[str] = None) -> dict:
+    async def start(
+        self, owner_email: Optional[str] = None, account_id: Optional[str] = None
+    ) -> dict:
         async with self._lifecycle_lock:
             if self.status == "running":
                 if owner_email and not self.is_owned_by(owner_email):
@@ -268,12 +274,22 @@ class LinkedInLiveBrowserManager:
                     )
                     if owner_email:
                         query = query.where(LinkedInAccount.owner_email == owner_email)
-                    result = await db.execute(
-                        query.order_by(desc(LinkedInAccount.updated_at)).limit(1)
-                    )
-                    self._account = result.scalars().first()
+                    if account_id:
+                        # The live-chat picker named a specific profile — use
+                        # exactly that one (still gated on owner + active).
+                        query = query.where(LinkedInAccount.id == account_id)
+                    elif owner_email:
+                        # No pick: the most recently active profile, so a user
+                        # with several accounts gets a deterministic default.
+                        query = query.order_by(desc(LinkedInAccount.updated_at)).limit(1)
+                    self._account = (await db.execute(query)).scalars().first()
 
                 if self._account is None:
+                    if account_id:
+                        raise RuntimeError(
+                            "The selected LinkedIn account is not active or is no longer connected. "
+                            "Pick another account or reconnect it."
+                        )
                     raise RuntimeError(
                         "No active LinkedIn account found. Connect and verify LinkedIn first."
                     )
