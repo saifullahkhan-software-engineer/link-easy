@@ -9,6 +9,10 @@ __pycache__/
 *.pyd
 
 *.png
+
+# Frontend public assets are served verbatim (favicon, social/OG preview images)
+!frontend/public/*.png
+
 /.postman
 /.venv
 /postman
