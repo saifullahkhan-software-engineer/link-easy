@@ -100,9 +100,16 @@ def _tokens(text: str) -> list[str]:
 
 def _score(section: Section, query_tokens: list[str], query_lower: str) -> int:
     """Overlap score: keyword hits weigh most, then title, then body."""
-    if not query_tokens:
-        return 0
     score = 0
+    # A keyword phrase appearing verbatim ("whatsapp group scan") is the
+    # strongest signal the corpus can give. Checked before the token guard:
+    # a query made entirely of stopwords ("what can you do") has no tokens
+    # but is exactly one of the corpus's keyword phrases.
+    for phrase in section.keywords:
+        if len(phrase.split()) > 1 and phrase in query_lower:
+            score += 4
+    if not query_tokens:
+        return score
     keyword_blob = " ".join(section.keywords)
     for token in query_tokens:
         if token in keyword_blob:
@@ -111,11 +118,6 @@ def _score(section: Section, query_tokens: list[str], query_lower: str) -> int:
             score += 2
         elif token in section.body.lower():
             score += 1
-    # A keyword phrase appearing verbatim ("whatsapp group scan") is the
-    # strongest signal the corpus can give.
-    for phrase in section.keywords:
-        if len(phrase.split()) > 1 and phrase in query_lower:
-            score += 4
     return score
 
 

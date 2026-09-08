@@ -43,6 +43,12 @@ class KnowledgeTests(unittest.TestCase):
     def test_retrieval_drops_weak_matches(self):
         self.assertEqual(knowledge.retrieve("zzzz qqqq"), [])
 
+    def test_stopword_only_query_still_phrase_matches(self):
+        # "what can you do" is every-stopword tokens but an exact keyword
+        # phrase of a guide section — it must still retrieve.
+        titles = [s.title for s in knowledge.retrieve("what can you do?")]
+        self.assertIn("What the assistant can do", titles)
+
     def test_resolve_route_accepts_app_prefixed_shortcuts(self):
         path, label = knowledge.resolve_route("/gmail")
         self.assertEqual(path, "/app/gmail")
