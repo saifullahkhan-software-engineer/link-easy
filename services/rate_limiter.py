@@ -103,6 +103,10 @@ DEFAULT_RULES: dict[str, RateLimitRule] = {
         # call fans out into a handful of Gmail API requests, so it is capped
         # per user per hour.
         RateLimitRule("gmail:check", 300, 3600, "Gmail check calls per hour"),
+        # Each assistant message spends third-party AI tokens, and may fan out
+        # into Meta/WhatsApp/Gmail reads when the model checks messages.
+        # 60/hour is a busy chat session, and stops a runaway loop.
+        RateLimitRule("assistant:chat", 60, 3600, "AI assistant messages per hour"),
     )
 }
 
