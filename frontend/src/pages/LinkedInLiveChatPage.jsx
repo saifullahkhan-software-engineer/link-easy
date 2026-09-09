@@ -107,38 +107,6 @@ export default function LinkedInLiveChatPage() {
     }
   }, []);
 
-  const refreshMessages = useCallback(async () => {
-    if (!activeChatId) return;
-    const requestedChatId = activeChatId;
-    const requestId = ++messagesRequestRef.current;
-    try {
-      setMsgsLoading(true);
-      const { data } = await linkedinLiveApi.getMessages({ limit: 50 });
-      // A response from the previously selected chat must never overwrite the
-      // newly opened conversation.
-      if (
-        requestId === messagesRequestRef.current &&
-        activeChatRef.current === requestedChatId
-      ) {
-        setMessages(data.messages || []);
-      }
-    } catch (err) {
-      if (requestId !== messagesRequestRef.current) return;
-      const detail = getErrorMessage(err, '');
-      if (!detail.includes('No chat')) {
-        const message = detail || 'The server did not return an error description.';
-        toast.error(
-          message.startsWith('Could not read LinkedIn messages:')
-            ? message
-            : `Could not read LinkedIn messages: ${message}`,
-          { id: 'linkedin-live-msgs' },
-        );
-      }
-    } finally {
-      if (requestId === messagesRequestRef.current) setMsgsLoading(false);
-    }
-  }, [activeChatId]);
-
   useEffect(() => {
     if (filterTimerRef.current) clearTimeout(filterTimerRef.current);
     filterTimerRef.current = setTimeout(
@@ -171,19 +139,98 @@ export default function LinkedInLiveChatPage() {
     const serverChatId = isRunning ? status?.active_chat_id || null : null;
     if (activeChatRef.current === serverChatId) return;
 
-    messagesRequestRef.current += 1;
     activeChatRef.current = serverChatId;
     setActiveChatId(serverChatId);
     setMessages([]);
     if (!serverChatId) setMsgsLoading(false);
   }, [isRunning, status?.active_chat_id]);
 
+  // ── SSE Stream for Live Messages (Replaces 3s HTTP polling) ────────────────
+  const fetchMessages = useCallback(async (chatId) => {
+    if (!chatId) return;
+    const requestedChatId = chatId;
+    const requestId = ++messagesRequestRef.current;
+    try {
+      setMsgsLoading(true);
+      const { data } = await linkedinLiveApi.getMessages({ limit: 50 });
+      if (
+        requestId === messagesRequestRef.current &&
+        activeChatRef.current === requestedChatId
+      ) {
+        setMessages(data.messages || []);
+      }
+    } catch (err) {
+      if (requestId !== messagesRequestRef.current) return;
+      const detail = getErrorMessage(err, '');
+      if (!detail.includes('No chat')) {
+        const message = detail || 'The server did not return an error description.';
+        toast.error(
+          message.startsWith('Could not read messages:')
+            ? message
+            : `Could not read messages: ${message}`,
+          { id: 'linkedin-live-msgs' },
+        );
+      }
+    } finally {
+      if (requestId === messagesRequestRef.current) setMsgsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    if (!isRunning || !activeChatId) return undefined;
-    refreshMessages();
-    const id = setInterval(refreshMessages, MESSAGES_POLL_MS);
-    return () => clearInterval(id);
-  }, [isRunning, activeChatId, refreshMessages]);
+    if (!isRunning || !activeChatId) {
+      setMessages([]);
+      setMsgsLoading(false);
+      return undefined;
+    }
+
+    fetchMessages(activeChatId);
+
+    const url = linkedinLiveApi.messagesStreamUrl({ limit: 50 });
+    const es = new EventSource(url);
+
+    es.addEventListener('snapshot', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (activeChatRef.current === data.chat_id) {
+          setMessages(data.messages || []);
+          setMsgsLoading(false);
+        }
+      } catch {}
+    });
+
+    es.addEventListener('append', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (activeChatRef.current === data.chat_id) {
+          const newItems = data.messages || [];
+          if (newItems.length > 0) {
+            setMessages((prev) => {
+              const seen = new Set(prev.map((m) => m.message_id));
+              const toAdd = newItems.filter((m) => m.message_id && !seen.has(m.message_id));
+              return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+            });
+          }
+        }
+      } catch {}
+    });
+
+    es.addEventListener('status', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data && typeof data === 'object') {
+          setStatus((prev) => (prev ? { ...prev, ...data } : data));
+        }
+      } catch {}
+    });
+
+    es.onerror = () => {
+      // Automatic reconnect with backoff by EventSource
+    };
+
+    return () => {
+      es.close();
+    };
+  }, [isRunning, activeChatId, fetchMessages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -373,7 +420,7 @@ export default function LinkedInLiveChatPage() {
               type="search"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filter conversations…"
+              placeholder="Search loaded conversations…"
               disabled={!isRunning}
               className="w-full rounded-md border border-surface-700 bg-surface-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-500 focus:border-accent-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
               data-testid="linkedin-chat-filter"
@@ -450,7 +497,7 @@ export default function LinkedInLiveChatPage() {
                     {status?.active_chat_name || 'Conversation'}
                   </p>
                   <p className="truncate text-xs text-zinc-500">
-                    {msgsLoading ? 'Refreshing…' : 'Polling every 3s'}
+                    {msgsLoading ? 'Loading conversation…' : 'Live'}
                   </p>
                 </div>
                 <button

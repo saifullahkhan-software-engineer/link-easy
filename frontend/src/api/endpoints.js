@@ -311,9 +311,14 @@ export const whatsappLiveApi = {
     api.get('/whatsapp/live/status', {
       params: sessionId ? { session_id: sessionId } : {},
     }),
-  listChats: ({ q = '', limit = 10, sessionId = null } = {}) =>
+  listChats: ({ q = '', limit = 10, scroll = false, sessionId = null } = {}) =>
     api.get('/whatsapp/live/chats', {
-      params: { ...(q ? { q } : {}), limit, ...(sessionId ? { session_id: sessionId } : {}) },
+      params: {
+        ...(q ? { q } : {}),
+        limit,
+        ...(scroll ? { scroll: true } : {}),
+        ...(sessionId ? { session_id: sessionId } : {}),
+      },
       timeout: WHATSAPP_LIVE_TIMEOUT,
     }),
   openChat: (chatId, sessionId = null) =>
@@ -338,6 +343,13 @@ export const whatsappLiveApi = {
       params: { limit, ...(sessionId ? { session_id: sessionId } : {}) },
       timeout: WHATSAPP_LIVE_TIMEOUT,
     }),
+  messagesStreamUrl: ({ limit = 50, sessionId = null } = {}) => {
+    const params = new URLSearchParams();
+    if (limit) params.set('limit', String(limit));
+    if (sessionId) params.set('session_id', String(sessionId));
+    const qs = params.toString();
+    return liveStreamUrl(`/whatsapp/live/messages/stream${qs ? `?${qs}` : ''}`);
+  },
   sendMessage: (text, sessionId = null) =>
     api.post(
       '/whatsapp/live/messages/send',
@@ -371,6 +383,12 @@ export const linkedinLiveApi = {
     api.post('/linkedin/live/chats/close', null, { timeout: LINKEDIN_LIVE_TIMEOUT }),
   getMessages:  ({ limit = 50 } = {}) =>
     api.get('/linkedin/live/messages', { params: { limit } }),
+  messagesStreamUrl: ({ limit = 50 } = {}) => {
+    const params = new URLSearchParams();
+    if (limit) params.set('limit', String(limit));
+    const qs = params.toString();
+    return liveStreamUrl(`/linkedin/live/messages/stream${qs ? `?${qs}` : ''}`);
+  },
   sendMessage:  (text) =>
     api.post(
       '/linkedin/live/messages/send',

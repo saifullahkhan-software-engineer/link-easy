@@ -105,6 +105,7 @@ def test_fastapi_smoke_for_new_routes():
         "POST /api/v1/linkedin/live/chats/open",
         "POST /api/v1/linkedin/live/chats/close",
         "GET  /api/v1/linkedin/live/messages",
+        "GET  /api/v1/linkedin/live/messages/stream",
         "POST /api/v1/linkedin/live/messages/send",
         "POST /api/v1/linkedin/profile/scan",
     ]

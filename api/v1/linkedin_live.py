@@ -1,12 +1,15 @@
 """Authenticated REST surface for the serialized LinkedIn live browser."""
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from api.dependencies import get_current_user
 from api.v1.linkedin import require_linkedin_enabled
+from api.v1.live import sse, sse_response, sse_user
 from core.logging_config import get_logger
 from models.user import User
 from schemas.linkedin_live import (
@@ -144,6 +147,123 @@ async def close_chat(
 ) -> LiveOpenChatResponse:
     _ensure_running(current_user)
     return LiveOpenChatResponse(**(await linkedin_live_browser.close_active_chat()))
+
+
+@router.get("/messages/stream")
+async def stream_messages(
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(sse_user),
+):
+    """Server-Sent Events (SSE) stream for real-time live LinkedIn messages.
+
+    Emits an initial `snapshot` of the open conversation, followed by `append`
+    events when new incoming or outgoing messages appear.
+    """
+    _ensure_running(current_user)
+    if not linkedin_live_browser.active_chat_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No chat is currently open. Open a conversation first.",
+        )
+
+    async def event_generator():
+        current_chat_id = linkedin_live_browser.active_chat_id
+        current_chat_name = linkedin_live_browser.active_chat_name
+        try:
+            messages = await linkedin_live_browser.read_messages(limit=limit)
+        except Exception as exc:
+            logger.debug("Initial live LinkedIn stream read failed: %s", exc)
+            messages = []
+
+        known_ids = {
+            m.get("message_id")
+            for m in messages
+            if m.get("message_id")
+        }
+
+        yield sse(
+            "snapshot",
+            {
+                "chat_id": current_chat_id,
+                "chat_name": current_chat_name,
+                "messages": messages,
+                "count": len(messages),
+            },
+        )
+
+        last_ping = time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+
+                if linkedin_live_browser.status != "running":
+                    yield sse("status", linkedin_live_browser.snapshot())
+                    break
+
+                if not linkedin_live_browser.is_owned_by(current_user.email):
+                    yield sse("status", {"status": "idle", "message": "Session no longer owned"})
+                    break
+
+                if linkedin_live_browser.active_chat_id != current_chat_id:
+                    if not linkedin_live_browser.active_chat_id:
+                        yield sse("status", linkedin_live_browser.snapshot())
+                        break
+                    current_chat_id = linkedin_live_browser.active_chat_id
+                    current_chat_name = linkedin_live_browser.active_chat_name
+                    try:
+                        messages = await linkedin_live_browser.read_messages(limit=limit)
+                    except Exception:
+                        messages = []
+                    known_ids = {
+                        m.get("message_id")
+                        for m in messages
+                        if m.get("message_id")
+                    }
+                    yield sse(
+                        "snapshot",
+                        {
+                            "chat_id": current_chat_id,
+                            "chat_name": current_chat_name,
+                            "messages": messages,
+                            "count": len(messages),
+                        },
+                    )
+                    continue
+
+                try:
+                    curr = await linkedin_live_browser.read_messages(limit=limit)
+                except Exception:
+                    curr = []
+
+                new_messages = [
+                    m
+                    for m in curr
+                    if m.get("message_id")
+                    and m.get("message_id") not in known_ids
+                ]
+
+                if new_messages:
+                    for m in new_messages:
+                        known_ids.add(m["message_id"])
+                    yield sse(
+                        "append",
+                        {
+                            "chat_id": current_chat_id,
+                            "messages": new_messages,
+                        },
+                    )
+
+                if time.monotonic() - last_ping >= 15.0:
+                    last_ping = time.monotonic()
+                    yield ": ping\n\n"
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("LinkedIn live stream ended with error: %s", exc)
+            yield sse("error", {"detail": str(exc)})
+
+    return sse_response(event_generator())
 
 
 @router.get("/messages", response_model=LiveMessagesResponse)

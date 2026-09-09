@@ -475,6 +475,10 @@ export default function AssistantWidget() {
     stop: micStop,
     setPaused: setMicPaused,
   } = useSpeechRecognition({
+    onSpeechStart: () => {
+      // Stop explaining / reading aloud immediately as soon as the user starts speaking
+      stopSpeaking();
+    },
     onFinal: (finalText) => {
       // A finished voice capture (1–2s of quiet) sends immediately, and the
       // mic keeps listening for the next command — hands-free.
@@ -672,10 +676,12 @@ export default function AssistantWidget() {
           ))}
 
           {sending && (
-            <div className="flex items-center gap-1.5 rounded-2xl rounded-bl-md bg-surface-800 px-3.5 py-3 ring-1 ring-inset ring-surface-700 w-fit">
-              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent-400 [animation-delay:0ms]" />
-              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent-400 [animation-delay:120ms]" />
-              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent-400 [animation-delay:240ms]" />
+            <div className="flex items-center gap-2 rounded-2xl rounded-bl-md bg-surface-800 px-3.5 py-2.5 text-xs text-accent-200 ring-1 ring-inset ring-surface-700 w-fit">
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent-400 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-accent-400" />
+              </span>
+              <span className="font-medium animate-pulse">Thinking… processing…</span>
             </div>
           )}
 
@@ -703,8 +709,12 @@ export default function AssistantWidget() {
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent-400 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-accent-400" />
               </span>
-              <span className="min-w-0 flex-1 truncate">
-                {micPaused ? 'Paused while I read the reply…' : transcript || 'Listening… pause 1–2s to send'}
+              <span className="min-w-0 flex-1 truncate font-medium">
+                {sending
+                  ? 'Thinking… processing…'
+                  : micPaused
+                  ? 'Paused while I read the reply…'
+                  : transcript || 'Listening… pause 1–2s to send'}
               </span>
               <button
                 type="button"
@@ -727,8 +737,13 @@ export default function AssistantWidget() {
             <textarea
               rows={1}
               value={input}
-              onChange={(event) => setInput(event.target.value)}
+              onFocus={() => stopSpeaking()}
+              onChange={(event) => {
+                stopSpeaking();
+                setInput(event.target.value);
+              }}
               onKeyDown={(event) => {
+                stopSpeaking();
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault();
                   send();

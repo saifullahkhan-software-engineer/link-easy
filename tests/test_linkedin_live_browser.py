@@ -399,6 +399,37 @@ class LinkedInLiveBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.queries, [MESSAGE_ROW_SELECTORS[0]])
         self.assertNotIn(MESSAGE_ROW_SELECTOR, page.queries)
 
+    async def test_messages_detect_image_type_without_text(self):
+        class _ImageRow(_Element):
+            def __init__(self, message_id):
+                super().__init__(attrs={"data-event-urn": message_id})
+                self.img = _Element()
+
+            async def query_selector(self, selector):
+                if "img" in selector:
+                    return self.img
+                return None
+
+        class _ImagePage:
+            def is_closed(self):
+                return False
+
+            async def wait_for_selector(self, _selector, timeout):
+                return object()
+
+            async def query_selector_all(self, _selector):
+                return [_ImageRow("img-event-1")]
+
+        manager = LinkedInLiveBrowserManager()
+        manager.status = "running"
+        manager._page = _ImagePage()
+        manager.active_chat_id = "thread-1"
+
+        messages = await manager.read_messages()
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["type"], "image")
+        self.assertEqual(messages[0]["text"], "")
+
     def test_live_timestamp_models_accept_browser_display_text(self):
         linkedin = LiveMessageItem(
             message_id="event-1",

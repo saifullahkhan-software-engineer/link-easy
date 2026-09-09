@@ -24,6 +24,7 @@ so a rapid-typing user does not trip WhatsApp's spam/blocking filter. The
 response surfaces ``throttled_seconds`` so the UI can show the wait.
 """
 import asyncio
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -31,8 +32,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_current_user, get_db
 from api.rate_limit_deps import rate_limit
+from api.v1.live import sse, sse_response, sse_user
 from api.v1.whatsapp_sessions import get_owned_session
 from core.logging_config import get_logger
+from database import async_session
 from models.user import User
 from models.whatsapp import WhatsAppSession
 from schemas.whatsapp_live import (
@@ -153,18 +156,20 @@ async def live_status(
 async def list_live_chats(
     q: Optional[str] = Query(None, description="Filter chats via WhatsApp search"),
     limit: int = Query(DEFAULT_CHAT_LIMIT, ge=1, le=200),
+    scroll: bool = Query(False, description="Scroll sidebar down to load next page of chats"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     session_id: Optional[int] = Query(None, ge=1, description="Which session's chats"),
 ) -> LiveChatListResponse:
     manager = await _require_running(db, current_user, session_id)
 
-    chats = await manager.list_chats(filter_text=q, limit=limit)
+    chats = await manager.list_chats(filter_text=q, limit=limit, scroll=scroll)
     items = [LiveChatItem(**c) for c in chats]
     return LiveChatListResponse(
         chats=items,
         count=len(items),
         query=q,
+        has_more=len(items) > 0 if scroll else True,
     )
 
 
@@ -201,6 +206,129 @@ async def close_live_chat(
 
 
 # ── Reading / writing ────────────────────────────────────────────────────────
+
+
+@router.get("/messages/stream")
+async def stream_live_messages(
+    limit: int = Query(DEFAULT_MESSAGE_LIMIT, ge=1, le=200),
+    session_id: Optional[int] = Query(None, ge=1, description="Which session's chat stream"),
+    current_user: User = Depends(sse_user),
+):
+    """Server-Sent Events (SSE) stream for real-time live WhatsApp messages.
+
+    Emits an initial `snapshot` of the open conversation, followed by `append`
+    events when new incoming or outgoing messages appear. Periodic ping
+    heartbeats keep the socket alive.
+    """
+    async with async_session() as db:
+        session = await get_owned_session(db, current_user, session_id=session_id)
+        manager = _manager_for(session)
+
+    if manager.status != "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Live chat is not running. Call POST /live/start first.",
+        )
+    if not manager.active_chat_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No chat is currently open. POST /live/chats/open first.",
+        )
+
+    async def event_generator():
+        current_chat_id = manager.active_chat_id
+        current_chat_name = manager.active_chat_name
+        try:
+            messages = await manager.read_live_messages_fast(limit=limit)
+        except Exception as exc:
+            logger.debug("Initial live WhatsApp stream read failed: %s", exc)
+            messages = []
+
+        known_ids = {
+            m.get("whatsapp_message_id")
+            for m in messages
+            if m.get("whatsapp_message_id")
+        }
+
+        yield sse(
+            "snapshot",
+            {
+                "chat_id": current_chat_id,
+                "chat_name": current_chat_name,
+                "messages": messages,
+                "count": len(messages),
+            },
+        )
+
+        last_ping = time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+
+                if manager.status != "running":
+                    yield sse("status", manager.snapshot())
+                    break
+
+                if manager.active_chat_id != current_chat_id:
+                    if not manager.active_chat_id:
+                        yield sse("status", manager.snapshot())
+                        break
+                    current_chat_id = manager.active_chat_id
+                    current_chat_name = manager.active_chat_name
+                    try:
+                        messages = await manager.read_live_messages_fast(limit=limit)
+                    except Exception:
+                        messages = []
+                    known_ids = {
+                        m.get("whatsapp_message_id")
+                        for m in messages
+                        if m.get("whatsapp_message_id")
+                    }
+                    yield sse(
+                        "snapshot",
+                        {
+                            "chat_id": current_chat_id,
+                            "chat_name": current_chat_name,
+                            "messages": messages,
+                            "count": len(messages),
+                        },
+                    )
+                    continue
+
+                try:
+                    curr = await manager.read_live_messages_fast(limit=limit)
+                except Exception:
+                    curr = []
+
+                new_messages = [
+                    m
+                    for m in curr
+                    if m.get("whatsapp_message_id")
+                    and m.get("whatsapp_message_id") not in known_ids
+                ]
+
+                if new_messages:
+                    for m in new_messages:
+                        known_ids.add(m["whatsapp_message_id"])
+                    yield sse(
+                        "append",
+                        {
+                            "chat_id": current_chat_id,
+                            "messages": new_messages,
+                        },
+                    )
+
+                if time.monotonic() - last_ping >= 15.0:
+                    last_ping = time.monotonic()
+                    yield ": ping\n\n"
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("WhatsApp live stream ended with error: %s", exc)
+            yield sse("error", {"detail": str(exc)})
+
+    return sse_response(event_generator())
 
 
 @router.get("/messages", response_model=LiveMessagesResponse)
