@@ -250,13 +250,13 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
     if (!youtubeSelected || !youtubeConnected || playlistFetchStarted.current) return;
     playlistFetchStarted.current = true;
     setPlaylistState({ status: 'loading', items: null, error: '' });
-    const accounts = (youtubeConnection?.accounts || []).filter((account) =>
-      selectedYoutubeAccountIds.includes(account.id),
-    );
-    Promise.all(accounts.map(async (account) => {
+    const rawAccounts = Array.isArray(youtubeConnection?.accounts) && youtubeConnection.accounts.length
+      ? youtubeConnection.accounts.filter((account) => selectedYoutubeAccountIds.length === 0 || selectedYoutubeAccountIds.includes(account.id))
+      : [{ id: youtubeConnection?.account_id || null, account_name: youtubeConnection?.account_name || 'YouTube channel' }];
+    Promise.all(rawAccounts.map(async (account) => {
       const { data } = await socialSchedulerApi.listYouTubePlaylists(account.id);
       return {
-        accountId: account.id,
+        accountId: account.id || 'default',
         accountName: account.account_name || account.account_id || 'YouTube channel',
         playlists: data?.playlists || [],
       };
@@ -271,7 +271,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
           error: getErrorMessage(err, 'Could not load your YouTube playlists'),
         });
       });
-  }, [youtubeSelected, youtubeConnected, playlistReload, selectedAccounts.youtube, connections]);
+  }, [youtubeSelected, youtubeConnected, playlistReload, selectedAccounts.youtube, connections, selectedYoutubeAccountIds]);
 
   const reloadPlaylists = () => {
     playlistFetchStarted.current = false;
@@ -699,7 +699,9 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
                     <span className="block text-sm font-medium text-zinc-100">{platformLabel(p.id, kind)}</span>
                     <span className={`block text-xs ${conn?.connected ? 'text-emerald-400' : 'text-zinc-500'}`}>
                       {connections === null ? '…' : conn?.connected
-                        ? (conn.accounts || []).map((account) => account.account_name || account.account_id).filter(Boolean).join(', ') || 'Connected'
+                        ? (Array.isArray(conn.accounts) && conn.accounts.length
+                            ? conn.accounts.map((account) => account.account_name || account.account_id).filter(Boolean).join(', ')
+                            : conn.account_name || conn.account_id) || 'Connected'
                         : 'Not connected'}
                     </span>
                   </span>
@@ -840,7 +842,7 @@ export default function SocialSchedulePage({ kind = 'shorts' }) {
                       const checked = (form.youtube_playlists_by_account[account.accountId] || []).includes(playlist.id);
                       return (
                         <label key={`${account.accountId}-${playlist.id}`} className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 transition ${checked ? 'border-accent-500/60 bg-accent-500/10' : 'border-surface-600 bg-surface-800 hover:border-surface-500'}`}>
-                          <input type="checkbox" checked={checked} onChange={() => togglePlaylist(account.accountId, playlist.id)} data-testid={`playlist-${account.accountId}-${playlist.id}`} className="h-4 w-4 rounded border-surface-500 bg-surface-700 text-accent-500 focus:ring-accent-500/40" />
+                          <input type="checkbox" checked={checked} onChange={() => togglePlaylist(account.accountId, playlist.id)} data-testid={`playlist-${playlist.id}`} className="h-4 w-4 rounded border-surface-500 bg-surface-700 text-accent-500 focus:ring-accent-500/40" />
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-sm text-zinc-100">{playlist.title}</span>
                             <span className="block truncate text-xs text-zinc-500">{playlist.item_count} {playlist.item_count === 1 ? 'video' : 'videos'}{playlist.privacy && playlist.privacy !== 'public' ? ` · ${playlist.privacy}` : ''}</span>

@@ -82,6 +82,7 @@ class _Page:
         self.search = _SearchLocator()
         self.waited_for = []
         self.global_rows_queried = False
+        self.evaluated = []
 
     def locator(self, _selector):
         return self.search
@@ -102,6 +103,10 @@ class _Page:
             self.global_rows_queried = True
             return self.sidebar.rows
         return []
+
+    async def evaluate(self, script, *args):
+        self.evaluated.append((script, args))
+        return None
 
 
 class _FailingPlaywrightFactory:
@@ -133,6 +138,48 @@ class WhatsAppLiveBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chats[0]["name"], "Chat 0")
         self.assertEqual(chats[-1]["name"], "Chat 9")
         self.assertFalse(manager._page.global_rows_queried)
+
+    async def test_list_chats_scroll_more_invokes_sidebar_scroll(self):
+        manager = LiveBrowserManager()
+        manager.status = "running"
+        manager._page = _Page([_ChatRow(f"Chat {i}") for i in range(15)])
+
+        with patch("services.whatsapp_live_browser._scroll_sidebar_down", AsyncMock(return_value=True)) as scroll_down:
+            chats = await manager.list_chats(scroll=True, limit=10)
+
+        self.assertEqual(len(chats), 10)
+        scroll_down.assert_called_once()
+
+    async def test_read_live_messages_fast_returns_extracted_items(self):
+        manager = LiveBrowserManager()
+        manager.status = "running"
+        manager._page = _Page([])
+        manager.active_chat_id = "chat-1"
+
+        expected = [
+            {
+                "whatsapp_message_id": "m-1",
+                "sender": "Alice",
+                "text": "Hello",
+                "type": "text",
+                "is_outgoing": False,
+                "timestamp": "10:00 AM",
+            },
+            {
+                "whatsapp_message_id": "m-2",
+                "sender": None,
+                "text": "",
+                "type": "image",
+                "is_outgoing": True,
+                "timestamp": "10:01 AM",
+            },
+        ]
+        with patch.object(manager._page, "evaluate", AsyncMock(return_value=expected)):
+            messages = await manager.read_live_messages_fast(limit=50)
+
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0]["text"], "Hello")
+        self.assertEqual(messages[1]["type"], "image")
 
     async def test_open_chat_uses_visible_row_and_current_main_selector(self):
         row = _ChatRow("Customer support")

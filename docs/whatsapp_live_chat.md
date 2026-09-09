@@ -28,13 +28,18 @@ WhatsApp account at the same time.
   `⚠️ WhatsApp profile in use by live chat`, skipping the run.
 * **Database gates**: `POST /live/start` returns 400 if there is no
   connected `WhatsAppSession`; the existing connect flow is reused.
-* **Polling**: the frontend polls every 5s for status, every 8s for the chat
-  list and every 3s while a chat is open. Lifecycle responses and the backend's
-  `active_chat_id` / `active_chat_name` are applied directly, so delayed polls
-  cannot revert a newer start, stop, or selection in the UI.
-* **Top-ten default**: an unfiltered chat-list request returns the 10 most
-  recent sidebar conversations. Searching still uses WhatsApp's own search box
-  and can expose older conversations without increasing the default list.
+* **Streaming & Real-Time Updates**: live messages use Server-Sent Events (SSE)
+  via `GET /api/v1/whatsapp/live/messages/stream`. An initial `snapshot` event is
+  emitted on open, followed by `append` events whenever new inbound or outgoing
+  messages appear in the DOM. Heavy 3s polling is eliminated.
+* **Top-ten default & Scroll Pagination**: an unfiltered chat-list request returns
+  the 10 most recent sidebar conversations. Scrolling down the sidebar triggers
+  bounded scrolling of `#pane-side` (`GET /api/v1/whatsapp/live/chats?scroll=true`)
+  to load the next batch of virtualized rows (capped at 100). Searching still uses
+  WhatsApp's native search box.
+* **Light message snapshot**: live message extraction is text-only (with image bubble
+  detection as `type: "image"` placeholder), avoiding heavy blob downloads, screenshot
+  captures, and OCR parsing during live chat.
 * **Sidebar-safe selection**: list and open operations share an async lock and
   inspect rows only under `#pane-side`. A filtered result remains in place until
   it is clicked, avoiding detached virtualized rows and selector injection.
@@ -46,20 +51,21 @@ WhatsApp account at the same time.
 
 `api/v1/whatsapp_live.py` — `tags=["whatsapp-live"]`
 
-| Method | Path                                       | Purpose                        |
-| ------ | ------------------------------------------ | ------------------------------ |
-| POST   | `/api/v1/whatsapp/live/start`              | Acquire the WhatsApp profile    |
-| POST   | `/api/v1/whatsapp/live/stop`               | Release the profile            |
-| GET    | `/api/v1/whatsapp/live/status`             | `idle`/`starting`/`running`/... |
-| GET    | `/api/v1/whatsapp/live/chats?q=&limit=10` | Side panel (10 most recent by default) |
-| POST   | `/api/v1/whatsapp/live/chats/open`          | Set the active chat            |
-| POST   | `/api/v1/whatsapp/live/chats/close`         | Return to the side panel       |
-| GET    | `/api/v1/whatsapp/live/messages?limit=`    | Read the open chat              |
-| POST   | `/api/v1/whatsapp/live/messages/send`      | Type + click send              |
+| Method | Path                                                | Purpose                        |
+| ------ | --------------------------------------------------- | ------------------------------ |
+| POST   | `/api/v1/whatsapp/live/start`                       | Acquire the WhatsApp profile    |
+| POST   | `/api/v1/whatsapp/live/stop`                        | Release the profile            |
+| GET    | `/api/v1/whatsapp/live/status`                      | `idle`/`starting`/`running`/... |
+| GET    | `/api/v1/whatsapp/live/chats?q=&limit=10&scroll=`   | Side panel (10 most recent; scroll to load more) |
+| POST   | `/api/v1/whatsapp/live/chats/open`                   | Set the active chat            |
+| POST   | `/api/v1/whatsapp/live/chats/close`                  | Return to the side panel       |
+| GET    | `/api/v1/whatsapp/live/messages?limit=`             | Read the open chat (one-shot snapshot) |
+| GET    | `/api/v1/whatsapp/live/messages/stream?limit=`      | SSE stream of live messages (snapshot + append) |
+| POST   | `/api/v1/whatsapp/live/messages/send`               | Type + click send              |
 
-All endpoints require `Bearer` auth via `get_current_user`. Chat and message
-operations return 409 if the browser is not currently running (or if a message
-operation has no active chat), so the client can show the right empty state.
+All endpoints require `Bearer` auth or `?token=` query param for SSE via `sse_user`.
+Chat and message operations return 409 if the browser is not currently running (or
+if a message operation has no active chat), so the client can show the right empty state.
 
 ## Anti-block pacing
 
