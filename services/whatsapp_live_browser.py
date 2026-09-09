@@ -311,11 +311,15 @@ class LiveBrowserManager:
         self,
         filter_text: Optional[str] = None,
         limit: int = DEFAULT_CHAT_LIMIT,
+        scroll: bool = False,
     ) -> list[dict]:
         """Return the most recent chats from WhatsApp's sidebar.
 
-        Sidebar polling and chat selection share a lock because both operations
-        touch WhatsApp's virtualized chat rows and search box.
+        When scroll=False and no filter_text, returns the top `limit` (default 10)
+        chats from the top of the sidebar.
+        When scroll=True, scrolls the virtualized sidebar (#pane-side) down a bounded
+        amount and returns visible rows.
+        Sidebar operations share _page_lock so they stay serialized with open/send.
         """
         async with self._page_lock:
             page = await self._require_page()
@@ -329,10 +333,16 @@ class LiveBrowserManager:
                 except Exception as exc:
                     logger.warning("Could not use WhatsApp search box: %s", exc)
             else:
-                # Clearing the app's filter must also clear WhatsApp's own
-                # search state. Keep a non-empty search in place so a result
-                # remains clickable after it has been returned to the client.
-                await _clear_search(search_box)
+                if scroll:
+                    # Scroll down boundedly to load the next virtualized chunk
+                    await _scroll_sidebar_down(page)
+                    await asyncio.sleep(0.4)
+                else:
+                    # Clearing the app's filter must also clear WhatsApp's own
+                    # search state and return to top
+                    await _clear_search(search_box)
+                    await _scroll_sidebar_top(page)
+                    await asyncio.sleep(0.2)
 
             try:
                 await page.wait_for_selector(CHAT_LIST_SELECTOR, timeout=10000)
@@ -475,6 +485,91 @@ class LiveBrowserManager:
             out.reverse()
             return out
 
+    async def read_live_messages_fast(self, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[dict]:
+        """Cheap, text-only message extraction for live SSE streaming.
+
+        Does not download blobs, does not capture screenshots or trigger OCR.
+        Holds _page_lock for only a few milliseconds during page.evaluate.
+        """
+        async with self._page_lock:
+            page = await self._require_page()
+            if not self.active_chat_id:
+                return []
+
+            try:
+                messages = await page.evaluate(
+                    """({ limit, selector, fallbackSelector }) => {
+                        let nodes = Array.from(document.querySelectorAll(selector));
+                        if (nodes.length <= 1 && fallbackSelector) {
+                            const fallbacks = Array.from(document.querySelectorAll(fallbackSelector));
+                            if (fallbacks.length > nodes.length) {
+                                nodes = fallbacks;
+                            }
+                        }
+                        const slice = nodes.slice(-limit);
+                        return slice.map((el, index) => {
+                            const msgId = el.getAttribute('data-id') || el.id || '';
+                            const className = (el.className || '').toLowerCase();
+                            const isOutgoing = className.includes('message-out') ||
+                                el.getAttribute('data-testid') === 'msg-container-outgoing' ||
+                                Boolean(el.querySelector('[data-icon="msg-dblcheck"], [data-icon="msg-check"], [data-icon="msg-time"]'));
+
+                            const textEl = el.querySelector('span.selectable-text, span._ao3e, div.copyable-text span, span[dir="ltr"], span[dir="auto"]');
+                            let text = textEl ? (textEl.innerText || '').trim() : '';
+
+                            let sender = null;
+                            if (!isOutgoing) {
+                                const senderEl = el.querySelector('span[data-testid="author"], span._am_8, div[data-pre-plain-text]');
+                                if (senderEl) {
+                                    sender = (senderEl.innerText || '').trim();
+                                    if (!sender && senderEl.getAttribute('data-pre-plain-text')) {
+                                        const match = senderEl.getAttribute('data-pre-plain-text').match(/]\\s*([^:]+):/);
+                                        if (match) sender = match[1].trim();
+                                    }
+                                }
+                            }
+
+                            const hasImage = Boolean(el.querySelector('img[src*="blob:"], span[data-icon="image"], div[data-testid="image-thumb"], div[role="button"] img'));
+                            const msgType = hasImage ? 'image' : 'text';
+
+                            let timestamp = null;
+                            const timeEl = el.querySelector('div[data-pre-plain-text], span[data-testid="msg-meta"], div.copyable-text');
+                            if (timeEl && timeEl.getAttribute('data-pre-plain-text')) {
+                                const pre = timeEl.getAttribute('data-pre-plain-text');
+                                const match = pre.match(/\\[([^\\]]+)\\]/);
+                                if (match) timestamp = match[1].trim();
+                            }
+                            if (!timestamp) {
+                                const metaTime = el.querySelector('span[dir="auto"], span.x1rg5ohu, span[data-testid="msg-time"]');
+                                if (metaTime) {
+                                    const t = (metaTime.innerText || '').trim();
+                                    if (/\\d+:\\d+/.test(t)) timestamp = t;
+                                }
+                            }
+
+                            const finalId = msgId || `dom-wa-${index}-${sender || ''}-${isOutgoing ? 'out' : 'in'}-${timestamp || ''}-${text.slice(0, 16)}`;
+
+                            return {
+                                whatsapp_message_id: finalId,
+                                sender: sender,
+                                text: text,
+                                type: msgType,
+                                is_outgoing: isOutgoing,
+                                timestamp: timestamp,
+                            };
+                        });
+                    }""",
+                    {
+                        "limit": limit,
+                        "selector": MSG_CONTAINER_SELECTOR,
+                        "fallbackSelector": MSG_CONTAINER_FALLBACK_SELECTOR,
+                    },
+                )
+                return messages or []
+            except Exception as exc:
+                logger.debug("Failed fast live message extraction: %s", exc)
+                return []
+
     async def send_message(self, text: str) -> dict:
         """Type ``text`` into the active composer with anti-block pacing."""
         text = (text or "").strip()
@@ -578,6 +673,40 @@ class LiveBrowserManager:
         self.status = status
         self.status_message = message
         logger.info("📱 live chat status: %s — %s", status, message)
+
+
+async def _scroll_sidebar_down(page, distance: int = 600) -> bool:
+    """Scroll WhatsApp's virtualized sidebar downward to load the next chunk of chats."""
+    try:
+        result = await page.evaluate(
+            """(scrollAmount) => {
+                const pane = document.querySelector('#pane-side') || document.querySelector('#side') || document.querySelector("div[aria-label='Chat list']");
+                if (!pane) return false;
+                const before = pane.scrollTop;
+                pane.scrollTop += scrollAmount;
+                return pane.scrollTop > before;
+            }""",
+            distance,
+        )
+        return bool(result)
+    except Exception as exc:
+        logger.debug("Could not scroll WhatsApp sidebar down: %s", exc)
+        return False
+
+
+async def _scroll_sidebar_top(page) -> None:
+    """Reset WhatsApp's virtualized sidebar to the top so the 10 most recent chats are visible."""
+    try:
+        await page.evaluate(
+            """() => {
+                const pane = document.querySelector('#pane-side') || document.querySelector('#side') || document.querySelector("div[aria-label='Chat list']");
+                if (pane && pane.scrollTop > 0) {
+                    pane.scrollTop = 0;
+                }
+            }"""
+        )
+    except Exception:
+        pass
 
 
 async def _scroll_message_history_to_bottom(page) -> bool:

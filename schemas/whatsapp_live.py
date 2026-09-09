@@ -44,6 +44,7 @@ class LiveChatListResponse(BaseModel):
     chats: list[LiveChatItem]
     count: int
     query: Optional[str] = None
+    has_more: bool = True
 
 
 # ── Open chat ────────────────────────────────────────────────────────────────

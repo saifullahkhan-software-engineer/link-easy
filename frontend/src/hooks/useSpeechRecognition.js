@@ -42,7 +42,7 @@ function resolveRecognition() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 }
 
-export default function useSpeechRecognition({ onFinal } = {}) {
+export default function useSpeechRecognition({ onFinal, onSpeechStart } = {}) {
   const Recognition = resolveRecognition();
   const supported = Boolean(Recognition);
 
@@ -60,10 +60,15 @@ export default function useSpeechRecognition({ onFinal } = {}) {
   const silenceTimerRef = useRef(null);
   const restartTimerRef = useRef(null);
   const onFinalRef = useRef(onFinal);
+  const onSpeechStartRef = useRef(onSpeechStart);
 
   useEffect(() => {
     onFinalRef.current = onFinal;
   }, [onFinal]);
+
+  useEffect(() => {
+    onSpeechStartRef.current = onSpeechStart;
+  }, [onSpeechStart]);
 
   const clearSilenceTimer = () => {
     if (silenceTimerRef.current) {
@@ -104,6 +109,8 @@ export default function useSpeechRecognition({ onFinal } = {}) {
       recognition.onresult = null;
       recognition.onerror = null;
       recognition.onend = null;
+      recognition.onspeechstart = null;
+      recognition.onsoundstart = null;
       try {
         recognition.stop();
       } catch {
@@ -124,7 +131,16 @@ export default function useSpeechRecognition({ onFinal } = {}) {
     // 'auto' leaves recognition.lang at the browser default, which follows
     // the user's locale — English/Urdu mixing works there too.
 
+    recognition.onspeechstart = () => {
+      onSpeechStartRef.current?.();
+    };
+
+    recognition.onsoundstart = () => {
+      onSpeechStartRef.current?.();
+    };
+
     recognition.onresult = (event) => {
+      onSpeechStartRef.current?.();
       if (pausedRef.current) return; // ignore our own read-aloud
       let interim = '';
       for (let i = event.resultIndex; i < event.results.length; i += 1) {

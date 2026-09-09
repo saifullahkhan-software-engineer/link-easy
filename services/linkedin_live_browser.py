@@ -475,7 +475,8 @@ class LinkedInLiveBrowserManager:
             fallback_occurrences: dict[str, int] = {}
             for row in rows[-limit:]:
                 text = await _short_text(await _first(row, MESSAGE_TEXT_SELECTOR), 4000)
-                if not text:
+                has_image = bool(await _first(row, "img[src*='media'], img[src*='dms'], .msg-s-message-listitem__image, [data-view-name='message-image']"))
+                if not text and not has_image:
                     continue
                 sender = await _short_text(await _first(row, MESSAGE_SENDER_SELECTOR), 160)
                 timestamp = await _short_text(await _first(row, MESSAGE_TIME_SELECTOR), 80)
@@ -514,7 +515,7 @@ class LinkedInLiveBrowserManager:
                         "sender": sender or None,
                         "is_outgoing": is_outgoing,
                         "timestamp": timestamp or None,
-                        "type": "text",
+                        "type": "image" if has_image and not text else "text",
                     }
                 )
             return messages

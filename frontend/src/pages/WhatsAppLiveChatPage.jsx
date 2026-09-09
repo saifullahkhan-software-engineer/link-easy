@@ -37,7 +37,6 @@ import { InboxPageHeader } from '../components/inbox/InboxBits';
 // ── Constants ────────────────────────────────────────────────────────────────
 const STATUS_POLL_MS = 5_000;
 const CHATS_POLL_MS = 8_000;
-const MESSAGES_POLL_MS = 3_000;
 const FILTER_DEBOUNCE_MS = 300;
 const DEFAULT_CHAT_LIMIT = 10;
 // Mirror of the server's WHATSAPP_FORWARD_DELAY_SECONDS (configured in
@@ -59,16 +58,6 @@ function describeStatus(snap) {
   return { label: snap.message || 'Stopped', tone: 'idle' };
 }
 
-function formatRelativeTime(seconds) {
-  if (seconds == null || Number.isNaN(seconds)) return null;
-  if (seconds <= 0) return 'now';
-  if (seconds < 60) return `in ${Math.ceil(seconds)}s`;
-  const minutes = Math.floor(seconds / 60);
-  const secs = Math.ceil(seconds % 60);
-  if (minutes < 60) return `in ${minutes}m ${secs}s`;
-  return `in ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
 export default function WhatsAppLiveChatPage() {
   // ── Lifecycle state ──────────────────────────────────────────────────────
   const [status, setStatus] = useState(null); // LiveBrowserManager snapshot
@@ -80,6 +69,8 @@ export default function WhatsAppLiveChatPage() {
   const [filter, setFilter] = useState('');
   const [filterDebounced, setFilterDebounced] = useState('');
   const [listLoading, setListLoading] = useState(false);
+  const [loadingMoreChats, setLoadingMoreChats] = useState(false);
+  const [hasMoreChats, setHasMoreChats] = useState(true);
   const [activeChatId, setActiveChatId] = useState(null);
   const [openingChatId, setOpeningChatId] = useState(null);
 
@@ -89,6 +80,11 @@ export default function WhatsAppLiveChatPage() {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [sendCountdown, setSendCountdown] = useState(0); // > 0 -> waiting
+  const [assistantDraftFor, setAssistantDraftFor] = useState('');
+
+  // Assistant handoff
+  const [searchParams, setSearchParams] = useSearchParams();
+  const composeHandled = useRef(false);
 
   // Refs for cleanup-stable callbacks + auto-scroll.
   const messagesEndRef = useRef(null);
@@ -96,7 +92,6 @@ export default function WhatsAppLiveChatPage() {
   const freezeStatusRef = useRef(false);
   const filterTimerRef = useRef(null);
   const activeChatRef = useRef(null);
-  const messagesRequestRef = useRef(0);
   const statusRequestRef = useRef(0);
 
   // Snapshot of the running state for derived views (avoids stale closures).
@@ -135,20 +130,17 @@ export default function WhatsAppLiveChatPage() {
     setSelectedSessionId(id);
   }, []);
 
-  // ── Pollers ───────────────────────────────────────────────────────────────
+  // ── Pollers & Data Fetchers ───────────────────────────────────────────────
 
   const refreshStatus = useCallback(async () => {
-    if (freezeStatusRef.current) return; // don't clobber an in-flight action
+    if (freezeStatusRef.current) return;
     const requestId = ++statusRequestRef.current;
     try {
       const { data } = await whatsappLiveApi.getStatus(sessionRef.current || null);
-      // Ignore a request that began before start/stop/open/close changed the
-      // authoritative browser state.
       if (requestId !== statusRequestRef.current || freezeStatusRef.current) return;
       setStatus(data);
-    } catch (err) {
-      // Backend hiccup — keep the last known status visible to the user.
-      // Surfacing as a toast would be noisy while they try to chat.
+    } catch {
+      // Backend hiccup — keep last known status
     }
   }, []);
 
@@ -158,15 +150,13 @@ export default function WhatsAppLiveChatPage() {
       const { data } = await whatsappLiveApi.listChats({
         q: rawFilter || '',
         limit: DEFAULT_CHAT_LIMIT,
+        scroll: false,
         sessionId: sessionRef.current || null,
       });
-      // The backend returns `{ chats, count, query }` — see schema.
-      setChats(data.chats || []);
+      const rows = data.chats || [];
+      setChats(rows);
+      setHasMoreChats(rows.length >= DEFAULT_CHAT_LIMIT);
     } catch (err) {
-      // 409 = "live not running" (transitioning to idle mid-poll) — benign,
-      // and background polls must never spam toasts. Anything else on a
-      // user-initiated load is a real failure: surfacing it beats rendering an
-      // empty sidebar that looks like "WhatsApp has no chats".
       const status = err?.response?.status;
       if (!silent && status !== 409) {
         toast.error(getErrorMessage(err, 'Could not load your chats.'), {
@@ -180,15 +170,99 @@ export default function WhatsAppLiveChatPage() {
     }
   }, []);
 
-  const refreshMessages = useCallback(async () => {
+  const handleLoadMoreChats = useCallback(async () => {
+    if (loadingMoreChats || !hasMoreChats || filterDebounced || listLoading || !isRunning || chats.length >= 100) {
+      return;
+    }
+    setLoadingMoreChats(true);
+    try {
+      const { data } = await whatsappLiveApi.listChats({
+        q: '',
+        limit: DEFAULT_CHAT_LIMIT,
+        scroll: true,
+        sessionId: sessionRef.current || null,
+      });
+      const newRows = data.chats || [];
+      setChats((prev) => {
+        const seen = new Set(prev.map((c) => c.chat_id));
+        const toAdd = newRows.filter((c) => !seen.has(c.chat_id));
+        if (toAdd.length === 0 || prev.length + toAdd.length >= 100 || data.has_more === false) {
+          setHasMoreChats(false);
+        }
+        return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+      });
+    } catch {
+      setHasMoreChats(false);
+    } finally {
+      setLoadingMoreChats(false);
+    }
+  }, [chats.length, filterDebounced, hasMoreChats, isRunning, listLoading, loadingMoreChats]);
+
+  const handleSidebarScroll = (e) => {
+    const el = e.currentTarget;
+    if (!el || filterDebounced || !hasMoreChats || loadingMoreChats || !isRunning) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) {
+      handleLoadMoreChats();
+    }
+  };
+
+  // Debounce the chat filter input so we don't hammer /chats on every keystroke.
+  useEffect(() => {
+    if (filterTimerRef.current) clearTimeout(filterTimerRef.current);
+    filterTimerRef.current = setTimeout(() => setFilterDebounced(filter), FILTER_DEBOUNCE_MS);
+    return () => filterTimerRef.current && clearTimeout(filterTimerRef.current);
+  }, [filter]);
+
+  // Run a /chats fetch whenever (a) we're running and (b) the filter text settled.
+  useEffect(() => {
+    if (!isRunning) {
+      setChats([]);
+      return undefined;
+    }
+    // Do not poll when a conversation is open, when filter is active, or when scrolled past first page
+    if (activeChatId) return undefined;
+    refreshChats(filterDebounced, { silent: false });
+    if (filterDebounced) return undefined;
+
+    const id = setInterval(() => {
+      // Only idle-poll at first page without filter or open chat
+      if (!activeChatRef.current && !filterDebounced) {
+        refreshChats('');
+      }
+    }, CHATS_POLL_MS);
+    return () => clearInterval(id);
+  }, [isRunning, activeChatId, filterDebounced, refreshChats]);
+
+  // Status poller
+  useEffect(() => {
+    refreshStatus();
+    const id = setInterval(refreshStatus, STATUS_POLL_MS);
+    return () => clearInterval(id);
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    const serverChatId = isRunning ? status?.active_chat_id || null : null;
+    if (activeChatRef.current === serverChatId) return;
+
+    activeChatRef.current = serverChatId;
+    setActiveChatId(serverChatId);
+    setMessages([]);
+    if (!serverChatId) setMsgsLoading(false);
+  }, [isRunning, status?.active_chat_id]);
+
+  // ── Messages fetcher & SSE Stream for Live Messages ──────────────────────
+  const messagesRequestRef = useRef(0);
+
+  const fetchMessages = useCallback(async () => {
     if (!activeChatId) return;
     const requestedChatId = activeChatId;
     const requestId = ++messagesRequestRef.current;
     try {
       setMsgsLoading(true);
-      const { data } = await whatsappLiveApi.getMessages({ limit: 50, sessionId: sessionRef.current || null });
-      // Backend returns oldest→newest. Apply it only if the user is still on
-      // the conversation that initiated this request.
+      const { data } = await whatsappLiveApi.getMessages({
+        limit: 50,
+        sessionId: sessionRef.current || null,
+      });
       if (
         requestId === messagesRequestRef.current &&
         activeChatRef.current === requestedChatId
@@ -199,8 +273,6 @@ export default function WhatsAppLiveChatPage() {
       if (requestId !== messagesRequestRef.current) return;
       const detail = getErrorMessage(err, '');
       if (!detail.includes('No chat')) {
-        // 409 "No chat is currently open" gets swallowed silently while
-        // the user navigates back to the list.
         const message = detail || 'The server did not return an error description.';
         toast.error(
           message.startsWith('Could not read messages:')
@@ -214,65 +286,72 @@ export default function WhatsAppLiveChatPage() {
     }
   }, [activeChatId]);
 
-  // Debounce the chat filter input so we don't hammer /chats on every keystroke.
-  useEffect(() => {
-    if (filterTimerRef.current) clearTimeout(filterTimerRef.current);
-    filterTimerRef.current = setTimeout(() => setFilterDebounced(filter), FILTER_DEBOUNCE_MS);
-    return () => filterTimerRef.current && clearTimeout(filterTimerRef.current);
-  }, [filter]);
-
-  // Run a /chats fetch whenever (a) we're running and (b) the filter text
-  // settled. Initial fetch plus on-mount.
-  useEffect(() => {
-    if (!isRunning) {
-      setChats([]);
-      return undefined;
-    }
-    // Sidebar search/filtering mutates WhatsApp's shared page. Keep the loaded
-    // list visible, but do not poll it while message reads/sends own the pane.
-    if (activeChatId) return undefined;
-    refreshChats(filterDebounced, { silent: false });
-    const id = setInterval(() => refreshChats(filterDebounced), CHATS_POLL_MS);
-    return () => clearInterval(id);
-  }, [isRunning, activeChatId, filterDebounced, refreshChats]);
-
-  // Status poller — always on while the page is mounted so we detect
-  // externally-stopped sessions (e.g. server restart).
-  useEffect(() => {
-    refreshStatus();
-    const id = setInterval(refreshStatus, STATUS_POLL_MS);
-    return () => clearInterval(id);
-  }, [refreshStatus]);
-
-  useEffect(() => {
-    const serverChatId = isRunning ? status?.active_chat_id || null : null;
-    if (activeChatRef.current === serverChatId) return;
-
-    messagesRequestRef.current += 1;
-    activeChatRef.current = serverChatId;
-    setActiveChatId(serverChatId);
-    setMessages([]);
-    if (!serverChatId) setMsgsLoading(false);
-  }, [isRunning, status?.active_chat_id]);
-
-  // Messages poller — only while a chat is active.
   useEffect(() => {
     if (!isRunning || !activeChatId) {
       setMessages([]);
+      setMsgsLoading(false);
       return undefined;
     }
-    refreshMessages();
-    const id = setInterval(refreshMessages, MESSAGES_POLL_MS);
-    return () => clearInterval(id);
-  }, [isRunning, activeChatId, refreshMessages]);
+
+    fetchMessages();
+
+    const url = whatsappLiveApi.messagesStreamUrl({
+      limit: 50,
+      sessionId: selectedSessionId || null,
+    });
+
+    const es = new EventSource(url);
+
+    es.addEventListener('snapshot', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (activeChatRef.current === data.chat_id) {
+          setMessages(data.messages || []);
+          setMsgsLoading(false);
+        }
+      } catch {}
+    });
+
+    es.addEventListener('append', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (activeChatRef.current === data.chat_id) {
+          const newItems = data.messages || [];
+          if (newItems.length > 0) {
+            setMessages((prev) => {
+              const seen = new Set(prev.map((m) => m.whatsapp_message_id));
+              const toAdd = newItems.filter((m) => m.whatsapp_message_id && !seen.has(m.whatsapp_message_id));
+              return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+            });
+          }
+        }
+      } catch {}
+    });
+
+    es.addEventListener('status', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data && typeof data === 'object') {
+          setStatus((prev) => (prev ? { ...prev, ...data } : data));
+        }
+      } catch {}
+    });
+
+    es.onerror = () => {
+      // EventSource reconnects automatically
+    };
+
+    return () => {
+      es.close();
+    };
+  }, [isRunning, activeChatId, selectedSessionId, fetchMessages]);
 
   // Auto-scroll the message pane to the bottom when new messages arrive.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages]);
 
-  // Countdown ticker — drives the "Sending in Ns..." label while the server's
-  // anti-block throttle is in effect. Decrement every 250ms.
+  // Countdown ticker for anti-block pacing
   useEffect(() => {
     if (sendCountdown <= 0) return undefined;
     const id = setInterval(() => {
@@ -290,9 +369,6 @@ export default function WhatsAppLiveChatPage() {
     statusRequestRef.current += 1;
     try {
       const { data } = await whatsappLiveApi.start(sessionRef.current || null);
-      // Apply the action response directly. Previously refreshStatus was called
-      // while frozen, so it returned early and the UI looked stopped for up to
-      // the next five-second poll even though Chromium was already running.
       const serverChatId = data.active_chat_id || null;
       activeChatRef.current = serverChatId;
       setStatus(data);
@@ -312,7 +388,6 @@ export default function WhatsAppLiveChatPage() {
     setIsStopping(true);
     freezeStatusRef.current = true;
     statusRequestRef.current += 1;
-    messagesRequestRef.current += 1;
     try {
       const { data } = await whatsappLiveApi.stop(sessionRef.current || null);
       activeChatRef.current = null;
@@ -332,7 +407,6 @@ export default function WhatsAppLiveChatPage() {
     setOpeningChatId(chatId);
     freezeStatusRef.current = true;
     statusRequestRef.current += 1;
-    messagesRequestRef.current += 1;
     try {
       const { data } = await whatsappLiveApi.openChat(chatId, sessionRef.current || null);
       if (!data.ok) {
@@ -358,7 +432,6 @@ export default function WhatsAppLiveChatPage() {
   const handleBackToList = async () => {
     freezeStatusRef.current = true;
     statusRequestRef.current += 1;
-    messagesRequestRef.current += 1;
     try {
       await whatsappLiveApi.closeChat(sessionRef.current || null);
       activeChatRef.current = null;
@@ -382,15 +455,10 @@ export default function WhatsAppLiveChatPage() {
     if (!text || !isRunning || !activeChatId) return;
     if (sending) return;
 
-    // Client-side throttle: surface the wait so the user sees the
-    // anti-block pace before the server-side delay kicks in.
     const elapsed = (Date.now() - lastSendTsRef.current) / 1000;
     const remaining = Math.max(0, SEND_THROTTLE_SECONDS - elapsed);
     if (remaining > 0) {
       setSendCountdown(Math.ceil(remaining));
-      // Don't return — wait, then send. The server mirrors the wait, so
-      // the result never comes back before the client has finished its
-      // visual countdown.
       await new Promise((resolve) => setTimeout(resolve, remaining * 1000));
     }
 
@@ -399,11 +467,6 @@ export default function WhatsAppLiveChatPage() {
       const { data } = await whatsappLiveApi.sendMessage(text, sessionRef.current || null);
       setDraft('');
       lastSendTsRef.current = Date.now();
-      // Force a refresh so the message appears immediately (the next 3s poll
-      // would also pick it up, but a real-time UX feels snappier).
-      await refreshMessages();
-      // toast.success is intentionally omitted — the message bubble itself is
-      // the success signal, and chaining toasts with rapid sends is noisy.
       if (data?.throttled_seconds > 0.5) {
         toast(`Sent (server waited ~${data.throttled_seconds.toFixed(1)}s)`, {
           icon: '⏳',
@@ -418,12 +481,10 @@ export default function WhatsAppLiveChatPage() {
     }
   };
 
-  // Assistant handoff: "?compose=1" + a sessionStorage payload means the AI
-  // was asked to message someone — open that chat and type the draft so the
-  // user only has to review (and confirm in the assistant) before sending.
+  // Assistant handoff
   useEffect(() => {
     if (composeHandled.current || searchParams.get('compose') !== '1') return;
-    if (!isRunning) return; // wait until the user starts the live browser
+    if (!isRunning) return;
     if (listLoading || chats.length === 0 || openingChatId) return;
     composeHandled.current = true;
     const payload = readAssistantCompose();
@@ -464,7 +525,7 @@ export default function WhatsAppLiveChatPage() {
       {/* Header */}
       <InboxPageHeader
         channel="whatsapp"
-        description="Click a chat, read messages, and reply below. While live, the scheduled scanner is paused."
+        description="Click a chat, read messages, and reply below. 10 most recent chats are loaded; scroll for more. While live, the scheduled scanner is paused."
         action={<>
           {sessions.length > 1 && (
             <AccountPicker
@@ -511,8 +572,10 @@ export default function WhatsAppLiveChatPage() {
         <aside className={`${activeChatId ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-surface-700 bg-surface-850 md:w-72`}>
           <div className="border-b border-surface-700 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <p className="text-xs font-medium text-zinc-300">10 most recent chats</p>
-              <span className="text-[10px] uppercase tracking-wide text-zinc-600">Live</span>
+              <p className="text-xs font-medium text-zinc-300">
+                {filter ? 'Search results' : 'Recent chats'}
+              </p>
+              <span className="text-[10px] uppercase tracking-wide text-zinc-500">Live</span>
             </div>
             <input
               type="search"
@@ -525,7 +588,11 @@ export default function WhatsAppLiveChatPage() {
               data-testid="live-chat-filter"
             />
           </div>
-          <div className="flex-1 overflow-y-auto" data-testid="live-chat-list">
+          <div
+            className="flex-1 overflow-y-auto"
+            data-testid="live-chat-list"
+            onScroll={handleSidebarScroll}
+          >
             {!isRunning ? (
               <EmptyChatsState
                 title="Start live chat to see your conversations"
@@ -538,46 +605,59 @@ export default function WhatsAppLiveChatPage() {
               </div>
             ) : chats.length === 0 ? (
               <EmptyChatsState
-                title="No chats match"
+                title={filter ? 'No search results' : 'No chats found'}
                 subtitle={
                   filter
-                    ? 'Try a shorter filter or clear the search.'
+                    ? 'Try another search or clear the search box.'
                     : 'Make sure WhatsApp is connected in this account.'
                 }
               />
             ) : (
-              <ul>
-                {chats.map((chat) => (
-                  <li key={chat.chat_id}>
-                    <button
-                      type="button"
-                      onClick={() => handlePickChat(chat.chat_id)}
-                      disabled={Boolean(openingChatId)}
-                      data-testid={`live-chat-row-${chat.chat_id}`}
-                      className={`flex w-full items-start gap-3 border-b border-surface-800 px-3 py-3 text-left transition hover:bg-surface-800 disabled:cursor-wait disabled:opacity-60 ${
-                        activeChatId === chat.chat_id ? 'bg-surface-800' : ''
-                      }`}
-                    >
-                      <Avatar name={chat.name} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="truncate text-sm font-medium text-zinc-100">
-                            {chat.name}
+              <>
+                <ul>
+                  {chats.map((chat) => (
+                    <li key={chat.chat_id}>
+                      <button
+                        type="button"
+                        onClick={() => handlePickChat(chat.chat_id)}
+                        disabled={Boolean(openingChatId)}
+                        data-testid={`live-chat-row-${chat.chat_id}`}
+                        className={`flex w-full items-start gap-3 border-b border-surface-800 px-3 py-3 text-left transition hover:bg-surface-800 disabled:cursor-wait disabled:opacity-60 ${
+                          activeChatId === chat.chat_id ? 'bg-surface-800' : ''
+                        }`}
+                      >
+                        <Avatar name={chat.name} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="truncate text-sm font-medium text-zinc-100">
+                              {chat.name}
+                            </p>
+                            {chat.unread_count > 0 && (
+                              <span className="shrink-0 rounded-full bg-accent-500 px-2 py-0.5 text-[10px] font-semibold text-surface-950">
+                                {chat.unread_count}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-0.5 truncate text-xs text-zinc-500">
+                            {chat.preview || <span className="italic text-zinc-600">no preview</span>}
                           </p>
-                          {chat.unread_count > 0 && (
-                            <span className="shrink-0 rounded-full bg-accent-500 px-2 py-0.5 text-[10px] font-semibold text-surface-950">
-                              {chat.unread_count}
-                            </span>
-                          )}
                         </div>
-                        <p className="mt-0.5 truncate text-xs text-zinc-500">
-                          {chat.preview || <span className="italic text-zinc-600">no preview</span>}
-                        </p>
-                      </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                {loadingMoreChats && (
+                  <div className="flex items-center justify-center gap-2 py-3 text-xs text-zinc-500">
+                    <Spinner className="h-3.5 w-3.5" />
+                    Loading more chats…
+                  </div>
+                )}
+                {!hasMoreChats && chats.length >= 10 && !filterDebounced && (
+                  <div className="py-3 text-center text-[11px] text-zinc-600">
+                    End of conversations
+                  </div>
+                )}
+              </>
             )}
           </div>
         </aside>
@@ -602,7 +682,7 @@ export default function WhatsAppLiveChatPage() {
                     {status?.active_chat_name || 'Chat'}
                   </p>
                   <p className="truncate text-xs text-zinc-500">
-                    {msgsLoading ? 'Refreshing…' : 'Polling every 3s'}
+                    {msgsLoading ? 'Loading conversation…' : 'Live'}
                   </p>
                 </div>
                 <button
@@ -705,8 +785,6 @@ function StatusBadge({ status }) {
 }
 
 function Avatar({ name }) {
-  // Stable color derived from the first character of the chat name so the same
-  // chat produces the same hue across renders (helps recognise groups).
   const initial = (name || '?').trim().charAt(0).toUpperCase() || '?';
   const hue = ((initial.charCodeAt(0) || 0) * 47) % 360;
   return (
