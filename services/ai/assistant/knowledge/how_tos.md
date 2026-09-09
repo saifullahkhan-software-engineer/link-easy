@@ -61,5 +61,9 @@ avoid blocks).
 - Keywords: what can you do, help, capabilities, assistant, who are you
 
 The assistant checks messages across channels, explains any page, walks
-through how-tos, and takes the user straight to the right screen. Coming
-later: analytics summaries and drafting replies.
+through how-tos, and takes the user straight to the right screen. It can also
+send messages on Instagram, Messenger and WhatsApp: it finds the chat, opens
+it with the message typed as a draft, asks "Ready to send?", and only sends
+after the user confirms. It understands and replies in English, Urdu and
+Roman Urdu, and its replies can be read aloud. Coming later: analytics
+summaries.

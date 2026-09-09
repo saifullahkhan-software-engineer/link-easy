@@ -64,17 +64,27 @@ class AssistantConversationsResponse(BaseModel):
 
 
 class AssistantAction(BaseModel):
-    """Something the widget should offer/do. Only navigation for now."""
+    """Something the widget should offer/do.
+
+    ``navigate`` moves to a page; ``open_chat`` additionally opens one chat
+    and types a draft into its message box (the inbox page consumes
+    ``conversation_id``/``draft``) so the user reviews before anything sends.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["navigate"]
+    type: Literal["navigate", "open_chat"]
     path: str
     label: str = ""
     reason: str = ""
     # True → the user explicitly asked to go there; the widget auto-navigates
     # (unless the user switched auto-navigation off). False → render a button.
     auto: bool = False
+    # open_chat only: which chat to open and what to pre-fill.
+    channel: Optional[str] = None
+    conversation_id: Optional[str] = None
+    conversation_name: str = ""
+    draft: str = ""
 
 
 class AssistantChannelConversation(BaseModel):

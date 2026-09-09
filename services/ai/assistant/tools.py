@@ -443,6 +443,332 @@ async def tool_navigate(ctx: ToolContext, arguments: dict[str, Any]) -> dict[str
     }
 
 
+# ── tools: find_conversation / prepare_message / send_channel_message ──────────
+#
+# The guided send flow: the user says "message Sara on Instagram that I'll be
+# late" → find_conversation resolves Sara's chat → prepare_message records an
+# `open_chat` action (the widget opens the chat AND types the draft into the
+# message box) → the assistant asks "Ready to send?" → after an explicit yes,
+# send_channel_message delivers it. Nothing sends without confirmation, and
+# every step re-validates ownership (the model only ever sees ids that came
+# back from find_conversation in the same conversation).
+
+MESSAGE_CHANNELS = ("instagram", "messenger", "whatsapp")
+MESSAGE_PATHS = {
+    "instagram": "/app/inbox/instagram",
+    "messenger": "/app/inbox/messenger",
+    "whatsapp": "/app/inbox/whatsapp",
+}
+MESSAGE_LABELS = {"instagram": "Instagram", "messenger": "Messenger", "whatsapp": "WhatsApp"}
+#: Same cap as the inbox reply route (schemas/inbox.py InboxReplyRequest).
+META_SEND_BYTES = 1000
+#: WhatsApp Web accepts long messages; keep the assistant's sends bounded.
+WHATSAPP_SEND_CHARS = 4000
+
+
+def _require_message_channel(channel: Any) -> str:
+    value = str(channel or "").strip().lower()
+    if value not in MESSAGE_CHANNELS:
+        raise ToolError(
+            f"channel must be one of {', '.join(MESSAGE_CHANNELS)} (got {str(channel or '')[:40]!r})"
+        )
+    return value
+
+
+def _match_score(name: str, query: str) -> int:
+    """Fuzzy score for chat-name matching. Higher is better; 0 is no match."""
+    candidate, wanted = name.strip().lower(), query.strip().lower()
+    if not candidate or not wanted:
+        return 0
+    if candidate == wanted:
+        return 100
+    if candidate.startswith(wanted):
+        return 80
+    if wanted in candidate:
+        return 60
+    # Every query word appears somewhere ("sai fullah" matches "sai.fullah716").
+    words = [w for w in wanted.replace(".", " ").split() if w]
+    if words and all(w in candidate.replace(".", " ").replace("_", " ") for w in words):
+        return 40
+    return 0
+
+
+async def _meta_messaging_service(ctx: ToolContext, channel: str):
+    """First-connected Meta inbox service for a channel (or a ToolError)."""
+    from services.social.connections import read_tokens
+    from services.social.inbox import InboxError, MetaInboxService
+
+    platform = "instagram" if channel == "instagram" else "facebook"
+    connection = (
+        await ctx.db.execute(
+            select(SocialPlatformConnection)
+            .where(
+                SocialPlatformConnection.owner_email == ctx.user.email,
+                SocialPlatformConnection.platform == platform,
+            )
+            .order_by(SocialPlatformConnection.created_at.asc())
+        )
+    ).scalars().first()
+    if connection is None:
+        raise ToolError(
+            f"{MESSAGE_LABELS[channel]} is not connected. Ask the user to connect it in Accounts → Socials first."
+        )
+    try:
+        tokens = read_tokens(connection)
+    except ValueError:
+        raise ToolError(
+            f"The {MESSAGE_LABELS[channel]} connection expired. Ask the user to reconnect it in Accounts → Socials."
+        ) from None
+    if tokens.is_expired:
+        raise ToolError(
+            f"The {MESSAGE_LABELS[channel]} connection expired. Ask the user to reconnect it in Accounts → Socials."
+        )
+    try:
+        return MetaInboxService(
+            channel,
+            connection.account_id or "",
+            tokens.access_token,
+            page_id=(connection.extra_data or {}).get("page_id", ""),
+        )
+    except InboxError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+async def _whatsapp_live_manager(ctx: ToolContext):
+    """The caller's running WhatsApp live browser (or a ToolError)."""
+    from api.v1.whatsapp_sessions import get_owned_session
+
+    try:
+        from services.whatsapp_live_browser import get_live_browser
+    except ImportError:
+        raise ToolError("WhatsApp live chat is not available on this instance.") from None
+    session = await get_owned_session(ctx.db, ctx.user, require_connected=False)
+    if session is None or session.status != "connected" or not session.is_active:
+        raise ToolError(
+            "WhatsApp is not connected. Ask the user to connect it in the WhatsApp pages first."
+        )
+    manager = get_live_browser(session.id)
+    if manager.status != "running":
+        raise ToolError(
+            "The WhatsApp live browser is not running. Use navigate to take the user to "
+            "/app/inbox/whatsapp so they can start it, then try again."
+        )
+    return manager
+
+
+async def tool_find_conversation(ctx: ToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Find a chat by person name on Instagram, Messenger or WhatsApp."""
+    channel = _require_message_channel(arguments.get("channel"))
+    name = str(arguments.get("name") or "").strip()
+    if not name:
+        raise ToolError("name is required — whose chat should I look for?")
+
+    if channel in ("instagram", "messenger"):
+        from services.social.inbox import InboxError
+
+        service = await _meta_messaging_service(ctx, channel)
+        try:
+            result = await service.list_conversations()
+        except InboxError as exc:
+            raise ToolError(f"Could not read {MESSAGE_LABELS[channel]} chats: {exc}") from exc
+        scored = sorted(
+            (
+                (conversation, _match_score(str(conversation.get("name") or ""), name))
+                for conversation in result.get("conversations") or []
+                if conversation.get("id")
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        matches = [
+            {
+                "conversation_id": str(conversation["id"]),
+                "name": _preview(conversation.get("name"), 80),
+                "preview": _preview(conversation.get("preview")),
+            }
+            for conversation, score in scored[:3]
+            if score > 0
+        ]
+    else:
+        manager = await _whatsapp_live_manager(ctx)
+        try:
+            chats = await manager.list_chats(filter_text=name, limit=10)
+        except Exception as exc:
+            logger.info("assistant: whatsapp chat search failed: %s", exc)
+            raise ToolError("The live WhatsApp browser could not be read.") from exc
+        scored = sorted(
+            (
+                (chat, _match_score(str(chat.get("name") or ""), name))
+                for chat in chats
+                if chat.get("chat_id") and chat.get("name")
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        matches = [
+            {
+                "conversation_id": str(chat["chat_id"]),
+                "name": _preview(chat.get("name"), 80),
+                "preview": _preview(chat.get("preview")),
+            }
+            for chat, score in scored[:3]
+            if score > 0
+        ]
+
+    if not matches:
+        return {
+            "matches": [],
+            "note": (
+                f"No {MESSAGE_LABELS[channel]} chat matches {name!r} in the recent list. "
+                "Ask the user to open that chat once in the inbox (or check the spelling), "
+                "then try again."
+            ),
+        }
+    return {"matches": matches, "channel": channel}
+
+
+def _validate_send_text(channel: str, text: Any) -> str:
+    message = str(text or "").strip()
+    if not message:
+        raise ToolError("text is required — what should the message say?")
+    if channel in ("instagram", "messenger"):
+        if len(message.encode("utf-8")) > META_SEND_BYTES:
+            raise ToolError(
+                f"The message is too long for {MESSAGE_LABELS[channel]} "
+                f"(max {META_SEND_BYTES} bytes). Ask the user to shorten it."
+            )
+    elif len(message) > WHATSAPP_SEND_CHARS:
+        raise ToolError(
+            f"The message is too long for WhatsApp (max {WHATSAPP_SEND_CHARS} characters). "
+            "Ask the user to shorten it."
+        )
+    return message
+
+
+async def tool_prepare_message(ctx: ToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Verify a chat and record an `open_chat` action (open + pre-fill draft).
+
+    ``explicit`` mirrors navigate: true when the user asked for this message,
+    so the widget opens the chat immediately; the draft is only typed, never
+    sent — sending always waits for the user's confirmation.
+    """
+    channel = _require_message_channel(arguments.get("channel"))
+    conversation_id = str(arguments.get("conversation_id") or "").strip()
+    if not conversation_id:
+        raise ToolError("conversation_id is required — call find_conversation first")
+    text = _validate_send_text(channel, arguments.get("text"))
+    explicit = bool(arguments.get("explicit", True))
+
+    # Re-validate the chat belongs to the caller (ids are model-supplied).
+    if channel in ("instagram", "messenger"):
+        from services.social.inbox import InboxError
+
+        service = await _meta_messaging_service(ctx, channel)
+        try:
+            await service.list_messages(conversation_id)
+        except InboxError as exc:
+            raise ToolError(f"That {MESSAGE_LABELS[channel]} chat could not be opened: {exc}") from exc
+        chat_name = str(arguments.get("conversation_name") or "").strip() or "chat"
+    else:
+        manager = await _whatsapp_live_manager(ctx)
+        try:
+            chats = await manager.list_chats(limit=10)
+        except Exception as exc:
+            logger.info("assistant: whatsapp chat verify failed: %s", exc)
+            raise ToolError("The live WhatsApp browser could not be read.") from exc
+        # Deliberately NOT opening the chat here: opening moves the shared
+        # live browser the user may be looking at. The inbox page opens it
+        # when the user lands there.
+        match = next(
+            (c for c in chats if str(c.get("chat_id")) == conversation_id), None
+        )
+        if match is None:
+            raise ToolError(
+                "That WhatsApp chat is not in the recent list. Ask the user to open it "
+                "once in /app/inbox/whatsapp, then try again."
+            )
+        chat_name = str(match.get("name") or "").strip() or "chat"
+
+    label = f"{chat_name} ({MESSAGE_LABELS[channel]})"
+    ctx.actions.append(
+        {
+            "type": "open_chat",
+            "path": MESSAGE_PATHS[channel],
+            "label": label,
+            "reason": _preview(arguments.get("reason"), 140),
+            "auto": explicit,
+            "channel": channel,
+            "conversation_id": conversation_id,
+            "conversation_name": chat_name,
+            "draft": text,
+        }
+    )
+    return {
+        "prepared": True,
+        "channel": channel,
+        "chat_name": chat_name,
+        "path": MESSAGE_PATHS[channel],
+        "note": (
+            "The chat will open with the draft typed in. Now ASK the user "
+            "'Ready to send?' and wait — only call send_channel_message after "
+            "an explicit yes, re-resolving the id with find_conversation first."
+        ),
+    }
+
+
+async def tool_send_channel_message(ctx: ToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Send a message — ONLY after the user explicitly confirmed.
+
+    ``confirmed`` must be true, and the model may only set it after a clear
+    yes in this conversation. Every send is logged with the caller's email.
+    """
+    channel = _require_message_channel(arguments.get("channel"))
+    if arguments.get("confirmed") is not True:
+        raise ToolError(
+            "confirmed=true is required — ask the user 'Ready to send this?' and "
+            "only call again after they say yes."
+        )
+    conversation_id = str(arguments.get("conversation_id") or "").strip()
+    if not conversation_id:
+        raise ToolError("conversation_id is required — call find_conversation first")
+    text = _validate_send_text(channel, arguments.get("text"))
+
+    if channel in ("instagram", "messenger"):
+        from services.social.inbox import InboxError
+
+        service = await _meta_messaging_service(ctx, channel)
+        try:
+            sent = await service.send_reply(conversation_id, text)
+        except InboxError as exc:
+            raise ToolError(f"{MESSAGE_LABELS[channel]} could not send it: {exc}") from exc
+        logger.info(
+            "assistant send: channel=%s user=%s message_id=%s",
+            channel,
+            ctx.user.email,
+            sent.get("message_id"),
+        )
+        return {
+            "sent": True,
+            "channel": channel,
+            "message_id": sent.get("message_id"),
+            "note": "Tell the user it was sent, quoting the message briefly.",
+        }
+
+    manager = await _whatsapp_live_manager(ctx)
+    opened = await manager.open_chat(conversation_id)
+    if not opened.get("ok"):
+        raise ToolError(f"WhatsApp could not open that chat: {opened.get('error') or 'unknown error'}")
+    result = await manager.send_message(text)
+    if not result.get("ok"):
+        raise ToolError(f"WhatsApp could not send it: {result.get('error') or 'unknown error'}")
+    logger.info("assistant send: channel=whatsapp user=%s chat=%s", ctx.user.email, conversation_id)
+    return {
+        "sent": True,
+        "channel": channel,
+        "note": "Tell the user it was sent, quoting the message briefly.",
+    }
+
+
 # ── registry ─────────────────────────────────────────────────────────────────
 
 TOOL_IMPLEMENTATIONS: dict[
@@ -453,6 +779,9 @@ TOOL_IMPLEMENTATIONS: dict[
     "get_user_overview": tool_get_user_overview,
     "search_app_guide": tool_search_app_guide,
     "navigate": tool_navigate,
+    "find_conversation": tool_find_conversation,
+    "prepare_message": tool_prepare_message,
+    "send_channel_message": tool_send_channel_message,
 }
 
 TOOL_SPECS: list[dict[str, Any]] = [
@@ -528,6 +857,70 @@ TOOL_SPECS: list[dict[str, Any]] = [
                     "explicit": {"type": "boolean", "description": "Did the user explicitly ask to go there?"},
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_conversation",
+            "description": (
+                "Find a chat by person name on instagram, messenger or whatsapp. "
+                "Step 1 of sending a message: call this first, then prepare_message. "
+                "Returns up to 3 matching chats with conversation ids — use those exact ids."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string", "description": "One of: instagram, messenger, whatsapp"},
+                    "name": {"type": "string", "description": "Name of the person/chat to find"},
+                },
+                "required": ["channel", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "prepare_message",
+            "description": (
+                "Step 2 of sending: verify the chat and open it in the app with the message "
+                "typed as a draft for the user to review. NEVER sends — after this, ASK the user "
+                "'Ready to send?' and wait for confirmation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string", "description": "One of: instagram, messenger, whatsapp"},
+                    "conversation_id": {"type": "string", "description": "Exact id from find_conversation"},
+                    "conversation_name": {"type": "string", "description": "Chat name from find_conversation (for the button label)"},
+                    "text": {"type": "string", "description": "The message to type as a draft"},
+                    "reason": {"type": "string", "description": "Short reason shown to the user"},
+                    "explicit": {"type": "boolean", "description": "True when the user asked for this message (opens the chat immediately)"},
+                },
+                "required": ["channel", "conversation_id", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_channel_message",
+            "description": (
+                "Step 3 of sending: deliver the message. ONLY call after the user explicitly "
+                "confirmed ('yes', 'send it') in this conversation, and re-resolve the "
+                "conversation_id with find_conversation first (ids from earlier turns are stale). "
+                "Set confirmed=true only after that explicit yes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string", "description": "One of: instagram, messenger, whatsapp"},
+                    "conversation_id": {"type": "string", "description": "Fresh id from find_conversation"},
+                    "text": {"type": "string", "description": "The exact confirmed message text"},
+                    "confirmed": {"type": "boolean", "description": "Must be true; only set after the user's explicit yes"},
+                },
+                "required": ["channel", "conversation_id", "text", "confirmed"],
             },
         },
     },

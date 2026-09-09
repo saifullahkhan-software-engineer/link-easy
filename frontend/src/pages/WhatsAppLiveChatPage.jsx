@@ -24,8 +24,10 @@
  * hits Send, the response carries ``throttled_seconds`` we surface as a hint.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { whatsappApi, whatsappLiveApi } from '../api/endpoints';
+import { consumeAssistantCompose, matchComposeChat, readAssistantCompose } from '../utils/assistantCompose';
 import { getErrorMessage } from '../api/client';
 import { Spinner } from '../components/Spinner';
 import AccountPicker from '../components/accounts/AccountPicker';
@@ -415,6 +417,42 @@ export default function WhatsAppLiveChatPage() {
       setSendCountdown(0);
     }
   };
+
+  // Assistant handoff: "?compose=1" + a sessionStorage payload means the AI
+  // was asked to message someone — open that chat and type the draft so the
+  // user only has to review (and confirm in the assistant) before sending.
+  useEffect(() => {
+    if (composeHandled.current || searchParams.get('compose') !== '1') return;
+    if (!isRunning) return; // wait until the user starts the live browser
+    if (listLoading || chats.length === 0 || openingChatId) return;
+    composeHandled.current = true;
+    const payload = readAssistantCompose();
+    consumeAssistantCompose();
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('compose');
+      next.delete('convo');
+      return next;
+    }, { replace: true });
+    if (!payload) return;
+    const match = matchComposeChat(chats, payload);
+    if (!match) {
+      toast.error(
+        payload.conversationName
+          ? `Couldn't find "${payload.conversationName}" in the recent chats — search for it in the list.`
+          : 'The assistant chat is not in the recent list — search for it.'
+      );
+      return;
+    }
+    handlePickChat(match.chat_id).then(() => {
+      if (payload.draft) {
+        setDraft(String(payload.draft).replace(/\s*\n+\s*/g, ' '));
+        setAssistantDraftFor(match.name || payload.conversationName);
+        toast.success(`Assistant typed a draft for ${match.name} — review it below.`, { duration: 3500 });
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning, chats, listLoading, searchParams]);
 
   // ── Render ────────────────────────────────────────────────────────────────
 

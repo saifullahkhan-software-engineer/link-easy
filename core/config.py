@@ -241,10 +241,21 @@ class Settings(BaseSettings):
     # never in a request/response body, never in a log line. With provider=groq
     # an unset AI_ASSISTANT_API_KEY falls back to GROQ_API_KEY so an instance
     # that already runs copy extraction needs zero new secrets.
-    AI_ASSISTANT_PROVIDER: str = "groq"  # groq|openai|openrouter|together|gemini|custom
+    AI_ASSISTANT_PROVIDER: str = "groq"  # groq|openai|openrouter|together|gemini|cerebras|pollinations|custom
     AI_ASSISTANT_API_KEY: str = ""
     AI_ASSISTANT_BASE_URL: str = ""
     AI_ASSISTANT_MODEL: str = ""
+    # Fallback providers, tried in order when the primary is rate-limited or
+    # erroring (HTTP 429/502/503/504): e.g. "gemini,cerebras". Each fallback
+    # needs its own key below (or, for pollinations, none at all). Models and
+    # base URLs fall back to the provider preset unless overridden.
+    AI_ASSISTANT_FALLBACKS: str = ""
+    AI_ASSISTANT_GEMINI_API_KEY: str = ""
+    AI_ASSISTANT_GEMINI_MODEL: str = ""
+    AI_ASSISTANT_CEREBRAS_API_KEY: str = ""
+    AI_ASSISTANT_CEREBRAS_MODEL: str = ""
+    AI_ASSISTANT_OPENROUTER_API_KEY: str = ""
+    AI_ASSISTANT_OPENROUTER_MODEL: str = ""
     # One model round-trip (non-streaming). The tool loop makes up to
     # AI_ASSISTANT_MAX_TOOL_ROUNDS of these per chat message.
     AI_ASSISTANT_TIMEOUT_SECONDS: float = 45.0

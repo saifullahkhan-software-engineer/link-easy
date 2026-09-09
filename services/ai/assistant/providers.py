@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     "groq": {"base_url": "https://api.groq.com/openai/v1", "model": "qwen/qwen3.6-27b"},
     "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+    # OpenRouter's free models carry a ``:free`` suffix
+    # (e.g. ``meta-llama/llama-3.3-70b-instruct:free``) — set AI_ASSISTANT_MODEL
+    # (or AI_ASSISTANT_OPENROUTER_MODEL for a fallback) to use one.
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-4o-mini"},
     "together": {"base_url": "https://api.together.xyz/v1", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo"},
     # Google's OpenAI-compatible endpoint for Gemini.
@@ -42,8 +45,23 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "model": "gemini-2.0-flash",
     },
+    # Cerebras' OpenAI-compatible endpoint (free tier, no card).
+    "cerebras": {
+        "base_url": "https://api.cerebras.ai/v1",
+        "model": "llama-3.3-70b",
+    },
+    # Pollinations is keyless (no signup at all). Tool/function calling is
+    # unreliable there, so it only fits as a last-resort fallback for plain
+    # answers — never as the primary provider.
+    "pollinations": {
+        "base_url": "https://text.pollinations.ai/openai",
+        "model": "openai",
+    },
     "custom": {"base_url": "", "model": ""},
 }
+
+#: Providers that work without any API key (the client sends a placeholder).
+KEYLESS_PROVIDERS = frozenset({"pollinations"})
 
 
 class AssistantProviderError(Exception):
@@ -138,6 +156,65 @@ def resolve_provider_config() -> ProviderConfig:
         api_key=api_key,
         timeout=float(settings.AI_ASSISTANT_TIMEOUT_SECONDS or 45.0),
     )
+
+
+def _resolve_fallback_config(name: str) -> Optional[ProviderConfig]:
+    """Resolve one fallback provider from its dedicated settings.
+
+    Keys live in ``AI_ASSISTANT_<NAME>_API_KEY`` (e.g. AI_ASSISTANT_GEMINI_API_KEY)
+    with an optional ``AI_ASSISTANT_<NAME>_MODEL`` override; base URL and the
+    model default come from the preset. Returns ``None`` when the fallback is
+    not usable (unknown name, no preset, or no key for a provider that needs
+    one) so the chain simply skips it.
+    """
+    provider = (name or "").strip().lower()
+    preset = PROVIDER_PRESETS.get(provider)
+    if preset is None or provider == "custom":
+        if provider:
+            logger.warning("AI assistant: ignoring unknown fallback provider %r", name)
+        return None
+
+    prefix = f"AI_ASSISTANT_{provider.upper()}"
+    api_key = str(getattr(settings, f"{prefix}_API_KEY", "") or "").strip()
+    if not api_key:
+        if provider in KEYLESS_PROVIDERS:
+            api_key = "not-needed"  # keyless endpoint; the header is ignored
+        else:
+            logger.info("AI assistant: fallback %s has no API key — skipped", provider)
+            return None
+
+    model = str(getattr(settings, f"{prefix}_MODEL", "") or "").strip() or preset["model"]
+    base_url = (preset["base_url"] or "").strip()
+    if not base_url or not model:
+        return None
+    return ProviderConfig(
+        provider=provider,
+        base_url=base_url.rstrip("/"),
+        model=model,
+        api_key=api_key,
+        timeout=float(settings.AI_ASSISTANT_TIMEOUT_SECONDS or 45.0),
+    )
+
+
+def resolve_provider_chain() -> list[ProviderConfig]:
+    """Primary config plus every usable fallback, in try order.
+
+    The primary behaves exactly like :func:`resolve_provider_config` (raising
+    :class:`AssistantProviderUnavailable` when unusable); fallbacks that lack
+    keys are skipped silently. Duplicate provider names are dropped — retrying
+    the same backend twice in one turn only burns the rate budget faster.
+    """
+    chain = [resolve_provider_config()]
+    seen = {chain[0].provider}
+    for name in str(settings.AI_ASSISTANT_FALLBACKS or "").split(","):
+        name = name.strip().lower()
+        if not name or name in seen:
+            continue
+        config = _resolve_fallback_config(name)
+        if config is not None:
+            seen.add(config.provider)
+            chain.append(config)
+    return chain
 
 
 def _parse_completion(payload: dict[str, Any]) -> ChatResult:
