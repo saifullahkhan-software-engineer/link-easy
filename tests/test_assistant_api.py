@@ -481,5 +481,181 @@ class RateLimitBucketTests(unittest.TestCase):
         self.assertTrue(callable(dependency))
 
 
+# ── language mirroring ───────────────────────────────────────────────────────
+
+
+class LanguageHintTests(unittest.TestCase):
+    def test_urdu_script_requests_urdu(self):
+        from services.ai.assistant.service import detect_language_hint
+
+        hint = detect_language_hint("میرے نئے پیغامات چیک کرو")
+        self.assertIn("Urdu", hint)
+        self.assertIn("Urdu script", hint)
+
+    def test_roman_urdu_requests_roman_urdu(self):
+        from services.ai.assistant.service import detect_language_hint
+
+        hint = detect_language_hint("meray naye messages mujhe batao kya aaya hai")
+        self.assertIn("Roman Urdu", hint)
+
+    def test_english_requests_english(self):
+        from services.ai.assistant.service import detect_language_hint
+
+        self.assertIn("English", detect_language_hint("check my new messages"))
+        # One stray marker word is not enough to flip languages.
+        self.assertIn("English", detect_language_hint("is the inbox mai updated?"))
+
+
+# ── provider fallback chain ──────────────────────────────────────────────────
+
+
+class ProviderChainTests(unittest.TestCase):
+    def test_chain_skips_fallbacks_without_keys(self):
+        from services.ai.assistant.providers import resolve_provider_chain
+
+        with patch.multiple(
+            settings,
+            AI_ASSISTANT_PROVIDER="groq",
+            AI_ASSISTANT_API_KEY="groq-key",
+            AI_ASSISTANT_BASE_URL="",
+            AI_ASSISTANT_MODEL="groq-model",
+            AI_ASSISTANT_FALLBACKS="gemini,cerebras",
+            AI_ASSISTANT_GEMINI_API_KEY="",
+            AI_ASSISTANT_CEREBRAS_API_KEY="",
+            AI_ASSISTANT_OPENROUTER_API_KEY="",
+        ):
+            chain = resolve_provider_chain()
+        self.assertEqual([c.provider for c in chain], ["groq"])
+
+    def test_chain_orders_configured_fallbacks(self):
+        from services.ai.assistant.providers import resolve_provider_chain
+
+        with patch.multiple(
+            settings,
+            AI_ASSISTANT_PROVIDER="groq",
+            AI_ASSISTANT_API_KEY="groq-key",
+            AI_ASSISTANT_BASE_URL="",
+            AI_ASSISTANT_MODEL="groq-model",
+            AI_ASSISTANT_FALLBACKS="gemini,groq,pollinations,bogus",
+            AI_ASSISTANT_GEMINI_API_KEY="gemini-key",
+            AI_ASSISTANT_GEMINI_MODEL="",
+            AI_ASSISTANT_CEREBRAS_API_KEY="",
+            AI_ASSISTANT_OPENROUTER_API_KEY="",
+        ):
+            chain = resolve_provider_chain()
+        # Duplicate primary + unknown names drop out; keyless pollinations stays.
+        self.assertEqual([c.provider for c in chain], ["groq", "gemini", "pollinations"])
+        self.assertEqual(chain[1].api_key, "gemini-key")
+        self.assertEqual(chain[1].model, "gemini-2.0-flash")
+
+    def test_turn_fails_over_to_next_provider(self):
+        import asyncio
+
+        from services.ai.assistant.providers import (
+            AssistantProviderError,
+            ProviderConfig,
+        )
+        from services.ai.assistant.service import _chat_down_chain
+
+        calls = []
+
+        class Flaky:
+            def __init__(self, config):
+                self.config = config
+
+            async def chat(self, messages, tools=None):
+                calls.append(self.config.provider)
+                if self.config.provider == "groq":
+                    raise AssistantProviderError("busy", http_status=429)
+                return ChatResult(content="ok")
+
+        chain = [
+            ProviderConfig("groq", "https://x", "m", "k", 5.0),
+            ProviderConfig("gemini", "https://y", "m2", "k2", 5.0),
+        ]
+        with patch("services.ai.assistant.service.AssistantChatProvider", Flaky):
+            result = asyncio.run(_chat_down_chain(chain, [{"role": "user", "content": "hi"}], None))
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(calls, ["groq", "gemini"])
+
+    def test_last_provider_error_propagates(self):
+        import asyncio
+
+        from services.ai.assistant.providers import (
+            AssistantProviderError,
+            ProviderConfig,
+        )
+        from services.ai.assistant.service import _chat_down_chain
+
+        class Down:
+            def __init__(self, config):
+                pass
+
+            async def chat(self, messages, tools=None):
+                raise AssistantProviderError("down", http_status=502)
+
+        chain = [ProviderConfig("groq", "https://x", "m", "k", 5.0)]
+        with patch("services.ai.assistant.service.AssistantChatProvider", Down):
+            with self.assertRaises(AssistantProviderError):
+                asyncio.run(_chat_down_chain(chain, [{"role": "user", "content": "hi"}], None))
+
+
+# ── messaging tools ──────────────────────────────────────────────────────────
+
+
+class MessagingToolTests(unittest.TestCase):
+    def test_match_score_orders_exact_first(self):
+        from services.ai.assistant.tools import _match_score
+
+        self.assertGreater(_match_score("Sara Khan", "Sara Khan"), _match_score("Sara Ahmed", "Sara Khan"))
+        self.assertGreater(_match_score("Sara Ahmed", "Sara"), 0)
+        self.assertEqual(_match_score("Jacob", "Sara"), 0)
+        self.assertGreater(_match_score("sai.fullah716", "sai fullah"), 0)
+
+    def test_send_requires_explicit_confirmation(self):
+        import asyncio
+
+        from services.ai.assistant.tools import ToolContext, ToolError, tool_send_channel_message
+
+        ctx = ToolContext(db=None, user=SimpleNamespace(email="u@example.com"))
+        with self.assertRaises(ToolError) as raised:
+            asyncio.run(
+                tool_send_channel_message(
+                    ctx,
+                    {"channel": "instagram", "conversation_id": "c1", "text": "hi"},
+                )
+            )
+        self.assertIn("confirmed", str(raised.exception))
+
+    def test_send_rejects_unknown_channel(self):
+        import asyncio
+
+        from services.ai.assistant.tools import ToolContext, ToolError, tool_send_channel_message
+
+        ctx = ToolContext(db=None, user=SimpleNamespace(email="u@example.com"))
+        with self.assertRaises(ToolError):
+            asyncio.run(
+                tool_send_channel_message(
+                    ctx,
+                    {"channel": "sms", "conversation_id": "c1", "text": "hi", "confirmed": True},
+                )
+            )
+
+    def test_send_rejects_oversize_meta_text(self):
+        import asyncio
+
+        from services.ai.assistant.tools import ToolContext, ToolError, tool_send_channel_message
+
+        ctx = ToolContext(db=None, user=SimpleNamespace(email="u@example.com"))
+        with self.assertRaises(ToolError) as raised:
+            asyncio.run(
+                tool_send_channel_message(
+                    ctx,
+                    {"channel": "messenger", "conversation_id": "c1", "text": "x" * 2000, "confirmed": True},
+                )
+            )
+        self.assertIn("too long", str(raised.exception))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

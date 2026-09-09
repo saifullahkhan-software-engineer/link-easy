@@ -30,6 +30,9 @@ export default function MetaChatPage({ channel }) {
   const [messagesError, setMessagesError] = useState(null);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [assistantDraftFor, setAssistantDraftFor] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const composeHandled = useRef(false);
   const listRequest = useRef(null);
   const messagesRequest = useRef(null);
   const activeConversation = useRef(null);
@@ -157,7 +160,45 @@ export default function MetaChatPage({ channel }) {
     setMessagesError(null);
     setMessagesLoading(Boolean(conversation));
     setDraft('');
+    setAssistantDraftFor('');
   }
+
+  // Assistant handoff: "?compose=1" + a sessionStorage payload means the AI
+  // was asked to message someone — open that chat and type the draft so the
+  // user only has to review (and confirm in the assistant) before sending.
+  useEffect(() => {
+    if (composeHandled.current || searchParams.get('compose') !== '1') return;
+    if (!available || listLoading || conversations.length === 0) return;
+    composeHandled.current = true;
+    const payload = readAssistantCompose();
+    consumeAssistantCompose();
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('compose');
+      next.delete('convo');
+      return next;
+    }, { replace: true });
+    if (!payload) return;
+    const match = matchComposeChat(conversations, payload);
+    if (!match) {
+      toast.error(
+        payload.conversationName
+          ? `Couldn't find "${payload.conversationName}" in the loaded chats — try "Load more" first.`
+          : 'The assistant chat is not in the loaded list — try "Load more" first.'
+      );
+      return;
+    }
+    activeConversation.current = match.id;
+    setSelected(match);
+    setMessages([]);
+    setMessagesError(null);
+    setMessagesLoading(true);
+    if (payload.draft) {
+      setDraft(payload.draft);
+      setAssistantDraftFor(match.name || payload.conversationName);
+      toast.success(`Assistant typed a draft for ${match.name} — review it below.`, { duration: 3500 });
+    }
+  }, [available, conversations, listLoading, searchParams, setSearchParams]);
 
   function refresh() {
     loadConversations();

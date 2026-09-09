@@ -2,27 +2,33 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { assistantApi } from '../../api/assistant';
-import useSpeechRecognition from '../../hooks/useSpeechRecognition';
+import useSpeechRecognition, { RECOGNITION_LANGS } from '../../hooks/useSpeechRecognition';
+import { containsUrduScript, detectSpeechLang, pickVoice, toSpeakableText } from '../../utils/speakable';
+import { COMPOSE_KEY as LS_COMPOSE } from '../../utils/assistantCompose';
 
 /**
  * The floating AI Assistant — available on every /app page.
  *
  * One chat surface for: checking messages across the connected channels,
- * "where do I…?" questions answered from the backend's app guide, and being
- * walked to the right screen. Navigation arrives as actions on the reply:
- * `auto` ones (the user clearly asked "open my gmail") run immediately —
- * unless the user flipped the auto-navigate toggle off — the rest render as
- * buttons.
+ * "where do I…?" questions answered from the backend's app guide, being
+ * walked to the right screen, and — with confirmation — sending messages
+ * (the assistant opens the chat, fills the draft, asks, then sends).
  *
  * Voice: the mic button uses the browser's Web Speech API (Chrome/Edge/Safari);
- * on unsupported browsers it simply stays hidden. Read-aloud uses
- * speechSynthesis the same way. Both run locally in the browser.
+ * on unsupported browsers it simply stays hidden. The mic stays open once
+ * tapped: a 1–2s pause ends one command (it is sent automatically) and
+ * listening continues for the next command. Read-aloud uses speechSynthesis
+ * with sanitised, markdown-free text and an Urdu voice when the reply is in
+ * Urdu. Both run locally in the browser.
  */
 
 const LS_CONVERSATION = 'le.assistant.conversation_id';
 const LS_OPEN = 'le.assistant.open';
 const LS_AUTO_NAV = 'le.assistant.auto_navigate';
 const LS_READ_ALOUD = 'le.assistant.read_aloud';
+const LS_MIC_LANG = 'le.assistant.mic_lang';
+// Cross-page handoff key (COMPOSE_KEY, imported above): an `open_chat` action
+// stores the draft, the inbox page consumes it on mount.
 
 const QUICK_PROMPTS = [
   'Check my new messages',
@@ -51,6 +57,86 @@ function writeFlag(key, value) {
   try {
     localStorage.setItem(key, value ? '1' : '0');
   } catch {}
+}
+
+/* ── tiny markdown renderer (no deps) ────────────────────────────────────────
+ * Assistant replies use **bold**, `code` and "- " bullets. Rendering them as
+ * text keeps the panel readable; read-aloud separately strips them via
+ * toSpeakableText. Built with React nodes only — never innerHTML.
+ */
+
+function renderInline(text, keyPrefix) {
+  const parts = [];
+  const pattern = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;
+  let last = 0;
+  let match;
+  let i = 0;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > last) parts.push(text.slice(last, match.index));
+    const token = match[0];
+    if (token.startsWith('**')) {
+      parts.push(
+        <strong key={`${keyPrefix}-${i}`} className="font-semibold text-zinc-100">
+          {token.slice(2, -2)}
+        </strong>
+      );
+    } else if (token.startsWith('`')) {
+      parts.push(
+        <code
+          key={`${keyPrefix}-${i}`}
+          className="rounded bg-surface-900 px-1 py-0.5 font-mono text-[12px] text-accent-200"
+        >
+          {token.slice(1, -1)}
+        </code>
+      );
+    } else {
+      parts.push(<em key={`${keyPrefix}-${i}`}>{token.slice(1, -1)}</em>);
+    }
+    i += 1;
+    last = match.index + token.length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+function RichText({ text }) {
+  const lines = String(text || '').split('\n');
+  const blocks = [];
+  let bullets = [];
+  const flushBullets = () => {
+    if (!bullets.length) return;
+    blocks.push(
+      <ul key={`ul-${blocks.length}`} className="list-disc space-y-1 pl-5">
+        {bullets.map((item, i) => (
+          <li key={i}>{renderInline(item, `li-${blocks.length}-${i}`)}</li>
+        ))}
+      </ul>
+    );
+    bullets = [];
+  };
+  lines.forEach((line, index) => {
+    const bullet = line.match(/^\s*[-*+•]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const heading = line.match(/^\s{0,3}#{1,6}\s+(.*)$/);
+    if (bullet || numbered) {
+      bullets.push(bullet ? bullet[1] : numbered[1]);
+    } else {
+      flushBullets();
+      if (line.trim() === '') {
+        blocks.push(<div key={`sp-${index}`} className="h-1.5" />);
+      } else if (heading) {
+        blocks.push(
+          <p key={`h-${index}`} className="font-semibold text-zinc-100">
+            {renderInline(heading[1], `h-${index}`)}
+          </p>
+        );
+      } else {
+        blocks.push(<p key={`p-${index}`}>{renderInline(line, `p-${index}`)}</p>);
+      }
+    }
+  });
+  flushBullets();
+  return <div className="space-y-1">{blocks}</div>;
 }
 
 /* ── small pieces ─────────────────────────────────────────────────────────── */
@@ -83,6 +169,18 @@ function SendIcon({ className = 'h-5 w-5' }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.269 20.875L5.999 12Zm0 0h7.5" />
+    </svg>
+  );
+}
+
+function SpeakerIcon({ className = 'h-3.5 w-3.5' }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z"
+      />
     </svg>
   );
 }
@@ -125,19 +223,33 @@ function ChannelCard({ channel, onOpen }) {
 }
 
 /** A message row. Assistant rows carry actions + channel cards. */
-function MessageBubble({ message, onNavigate }) {
+function MessageBubble({ message, onNavigate, onOpenChat, onReplay, replaying }) {
   const isUser = message.role === 'user';
+  const isUrdu = !isUser && containsUrduScript(message.content);
   return (
     <div className={`flex flex-col gap-2 ${isUser ? 'items-end' : 'items-start'}`}>
       <div
-        className={`max-w-[92%] whitespace-pre-wrap break-words rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
+        className={`max-w-[92%] break-words rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
           isUser
             ? 'rounded-br-md bg-accent-500/15 text-accent-50 ring-1 ring-inset ring-accent-500/25'
             : 'rounded-bl-md bg-surface-800 text-zinc-200 ring-1 ring-inset ring-surface-700'
         }`}
+        dir={isUrdu ? 'rtl' : 'auto'}
       >
-        {message.content}
+        {isUser ? <span className="whitespace-pre-wrap">{message.content}</span> : <RichText text={message.content} />}
       </div>
+
+      {!isUser && (
+        <button
+          type="button"
+          onClick={() => onReplay(message.content)}
+          title={replaying ? 'Stop reading' : 'Read this message aloud'}
+          className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-zinc-500 transition hover:bg-surface-800 hover:text-zinc-200"
+        >
+          <SpeakerIcon />
+          {replaying ? 'Stop' : 'Listen'}
+        </button>
+      )}
 
       {!isUser && message.channels?.length > 0 && (
         <div className="w-full space-y-1.5">
@@ -149,18 +261,27 @@ function MessageBubble({ message, onNavigate }) {
 
       {!isUser && message.actions?.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
-          {message.actions.map((action, index) => (
-            <button
-              key={index}
-              type="button"
-              onClick={() => onNavigate(action.path)}
-              className="flex items-center gap-1.5 rounded-full border border-accent-500/30 bg-accent-500/10 px-3 py-1.5 text-xs font-medium text-accent-200 transition hover:bg-accent-500/20"
-            >
-              {action.label || action.path}
-              <span aria-hidden="true">→</span>
-            </button>
-          ))}
+          {message.actions.map((action, index) => {
+            const isChat = action.type === 'open_chat';
+            return (
+              <button
+                key={index}
+                type="button"
+                onClick={() => (isChat ? onOpenChat(action) : onNavigate(action.path))}
+                className="flex items-center gap-1.5 rounded-full border border-accent-500/30 bg-accent-500/10 px-3 py-1.5 text-xs font-medium text-accent-200 transition hover:bg-accent-500/20"
+              >
+                {isChat ? `💬 ${action.label || 'Open chat'}` : action.label || action.path}
+                <span aria-hidden="true">→</span>
+              </button>
+            );
+          })}
         </div>
+      )}
+
+      {!isUser && message.actions?.some((a) => a.type === 'open_chat' && a.draft) && (
+        <p className="text-[11px] text-zinc-500">
+          The draft is typed in the chat box — review it there, then say “yes, send it” to confirm.
+        </p>
       )}
     </div>
   );
@@ -177,10 +298,12 @@ export default function AssistantWidget() {
   const [loaded, setLoaded] = useState(false); // has the initial resume happened
   const [autoNavigate, setAutoNavigate] = useState(() => readFlag(LS_AUTO_NAV, true));
   const [readAloud, setReadAloud] = useState(() => readFlag(LS_READ_ALOUD, false));
+  const [speaking, setSpeaking] = useState(false);
 
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const scrollRef = useRef(null);
+  const micControlsRef = useRef(null);
 
   // AppLayout remains mounted while React Router changes pages. Persisting
   // this flag also restores the panel after a full refresh, so opening the
@@ -189,23 +312,83 @@ export default function AssistantWidget() {
     writeFlag(LS_OPEN, open);
   }, [open]);
 
+  const stopSpeaking = useCallback(() => {
+    try {
+      window.speechSynthesis?.cancel();
+    } catch {}
+    setSpeaking(false);
+  }, []);
+
+  // Read-aloud: sanitise Markdown/emoji/URLs into plain sentences (otherwise
+  // the voice says "asterisk asterisk" and reads emoji names), pick an Urdu
+  // voice for Urdu replies, and freeze the mic while talking so it doesn't
+  // transcribe its own voice.
   const speak = useCallback(
-    (text) => {
-      if (!readAloud || typeof window === 'undefined' || !window.speechSynthesis) return;
+    (text, { force = false } = {}) => {
+      if ((!readAloud && !force) || typeof window === 'undefined' || !window.speechSynthesis) return;
+      const clean = toSpeakableText(text);
+      if (!clean) return;
       try {
         window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = utterance.lang || undefined; // follow the browser locale
+        const utterance = new SpeechSynthesisUtterance(clean);
+        const lang = detectSpeechLang(text);
+        utterance.lang = lang === 'ur' ? 'ur-PK' : 'en-US';
+        const voice = pickVoice(window.speechSynthesis.getVoices(), lang);
+        if (voice) utterance.voice = voice;
+        utterance.onstart = () => {
+          setSpeaking(true);
+          micControlsRef.current?.setPaused?.(true);
+        };
+        const done = () => {
+          setSpeaking(false);
+          micControlsRef.current?.setPaused?.(false);
+        };
+        utterance.onend = done;
+        utterance.onerror = done;
         window.speechSynthesis.speak(utterance);
       } catch {}
     },
     [readAloud]
   );
 
+  const navigateTo = useCallback(
+    (path) => {
+      if (!path) return;
+      navigate(path);
+    },
+    [navigate]
+  );
+
+  // An `open_chat` action: stash the draft for the inbox page, then go there.
+  // The panel stays open (it is a fixed overlay) so the user can confirm.
+  const openChatAction = useCallback(
+    (action) => {
+      if (!action?.path) return;
+      try {
+        sessionStorage.setItem(
+          LS_COMPOSE,
+          JSON.stringify({
+            channel: action.channel || null,
+            conversationId: action.conversation_id || null,
+            conversationName: action.conversation_name || '',
+            draft: action.draft || '',
+            ts: Date.now(),
+          })
+        );
+      } catch {}
+      const params = new URLSearchParams({ compose: '1' });
+      if (action.conversation_id) params.set('convo', action.conversation_id);
+      navigate(`${action.path}?${params.toString()}`);
+      toast.success(`Opening ${action.label || 'chat'} — draft is ready for review`, { duration: 2500 });
+    },
+    [navigate]
+  );
+
   const send = useCallback(
     async (text, { viaVoice = false } = {}) => {
       const message = (text ?? input).trim();
       if (!message || sending) return;
+      stopSpeaking();
       setInput('');
       setMessages((prev) => [...prev, { role: 'user', content: message }]);
       setSending(true);
@@ -231,12 +414,17 @@ export default function AssistantWidget() {
         speak(data.reply);
 
         // Auto-navigation: only for actions the model marked explicit ("open
-        // my gmail") and only while the user hasn't switched it off.
+        // my gmail", "message Sara on Instagram") and only while the user
+        // hasn't switched it off. open_chat actions also carry the draft.
         const auto = (data.actions || []).filter((a) => a.auto);
         if (auto.length && autoNavigate) {
           const target = auto[auto.length - 1];
-          toast.success(`Opening ${target.label || target.path}`, { duration: 2000 });
-          navigate(target.path);
+          if (target.type === 'open_chat') {
+            openChatAction(target);
+          } else {
+            toast.success(`Opening ${target.label || target.path}`, { duration: 2000 });
+            navigate(target.path);
+          }
         }
       } catch (error) {
         const status = error?.response?.status;
@@ -272,21 +460,60 @@ export default function AssistantWidget() {
         if (viaVoice) setInput('');
       }
     },
-    [autoNavigate, conversationId, input, navigate, pathname, sending, speak]
+    [autoNavigate, conversationId, input, navigate, openChatAction, pathname, sending, speak, stopSpeaking]
   );
 
-  const { supported: micSupported, listening, transcript, error: micError, start, stop } =
-    useSpeechRecognition({
-      onFinal: (finalText) => {
-        // A finished voice capture sends immediately — that is what "speak to
-        // the assistant" means. The user can always tap to type instead.
-        send(finalText, { viaVoice: true });
-      },
-    });
+  const {
+    supported: micSupported,
+    listening,
+    paused: micPaused,
+    transcript,
+    error: micError,
+    lang: micLang,
+    setLang: setMicLang,
+    start: micStart,
+    stop: micStop,
+    setPaused: setMicPaused,
+  } = useSpeechRecognition({
+    onFinal: (finalText) => {
+      // A finished voice capture (1–2s of quiet) sends immediately, and the
+      // mic keeps listening for the next command — hands-free.
+      send(finalText, { viaVoice: true });
+    },
+  });
+
+  micControlsRef.current = { setPaused: setMicPaused };
+
+  // Restore the mic language choice once.
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(LS_MIC_LANG);
+      if (stored && RECOGNITION_LANGS.some((l) => l.id === stored)) setMicLang(stored);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const cycleMicLang = () => {
+    const order = RECOGNITION_LANGS.map((l) => l.id);
+    const next = order[(order.indexOf(micLang) + 1) % order.length];
+    setMicLang(next);
+    try {
+      localStorage.setItem(LS_MIC_LANG, next);
+    } catch {}
+  };
 
   const handleMic = () => {
-    if (listening) stop();
-    else start();
+    if (listening) {
+      micStop();
+    } else {
+      stopSpeaking();
+      micStart();
+    }
+  };
+
+  const handleReplay = (text) => {
+    if (speaking) stopSpeaking();
+    else speak(text, { force: true });
   };
 
   const startNewChat = () => {
@@ -295,11 +522,6 @@ export default function AssistantWidget() {
     try {
       localStorage.removeItem(LS_CONVERSATION);
     } catch {}
-  };
-
-  const navigateTo = (path) => {
-    if (!path) return;
-    navigate(path);
   };
 
   // Resume the most recent conversation the first time the panel opens.
@@ -335,7 +557,11 @@ export default function AssistantWidget() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, sending]);
 
+  // Never leave speech running after the widget unmounts.
+  useEffect(() => () => stopSpeaking(), [stopSpeaking]);
+
   const empty = messages.length === 0;
+  const micLangLabel = RECOGNITION_LANGS.find((l) => l.id === micLang)?.label || 'Auto';
 
   const panel = useMemo(
     () => (
@@ -407,6 +633,16 @@ export default function AssistantWidget() {
           >
             {readAloud ? '🔊 Read-aloud on' : 'Read-aloud off'}
           </button>
+          {speaking && (
+            <button
+              type="button"
+              onClick={stopSpeaking}
+              className="rounded-full bg-red-500/15 px-2.5 py-1 text-[11px] font-medium text-red-200 ring-1 ring-inset ring-red-500/30 transition hover:bg-red-500/25"
+              title="Stop reading aloud"
+            >
+              ⏹ Stop
+            </button>
+          )}
           <span className="ml-auto text-[11px] text-zinc-600">LinkEasy AI</span>
         </div>
 
@@ -425,7 +661,14 @@ export default function AssistantWidget() {
           )}
 
           {messages.map((message, index) => (
-            <MessageBubble key={message.id || index} message={message} onNavigate={navigateTo} />
+            <MessageBubble
+              key={message.id || index}
+              message={message}
+              onNavigate={navigateTo}
+              onOpenChat={openChatAction}
+              onReplay={handleReplay}
+              replaying={speaking}
+            />
           ))}
 
           {sending && (
@@ -456,11 +699,21 @@ export default function AssistantWidget() {
         <div className="border-t border-surface-700 p-3">
           {listening && (
             <div className="mb-2 flex items-center gap-2 rounded-lg bg-accent-500/10 px-3 py-2 text-xs text-accent-200 ring-1 ring-inset ring-accent-500/25">
-              <span className="relative flex h-2 w-2">
+              <span className="relative flex h-2 w-2 shrink-0">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent-400 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-accent-400" />
               </span>
-              {transcript ? transcript : 'Listening…'}
+              <span className="min-w-0 flex-1 truncate">
+                {micPaused ? 'Paused while I read the reply…' : transcript || 'Listening… pause 1–2s to send'}
+              </span>
+              <button
+                type="button"
+                onClick={cycleMicLang}
+                title={`Voice language: ${micLangLabel} — tap to change (Auto / English / Urdu)`}
+                className="shrink-0 rounded-full bg-surface-800 px-2 py-0.5 text-[11px] font-medium text-zinc-300 ring-1 ring-inset ring-surface-700 transition hover:text-accent-200"
+              >
+                {micLangLabel}
+              </button>
             </div>
           )}
           {micError && !listening && <p className="mb-2 px-1 text-[11px] text-red-300">{micError}</p>}
@@ -481,14 +734,15 @@ export default function AssistantWidget() {
                   send();
                 }
               }}
-              placeholder={listening ? 'Listening…' : 'Ask about messages, pages, anything…'}
+              placeholder={listening ? 'Listening… pause to send, or type' : 'Ask about messages, pages, anything…'}
+              dir="auto"
               className="max-h-28 min-h-[42px] flex-1 resize-none rounded-xl border border-surface-700 bg-surface-800 px-3 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none transition focus:border-accent-500/50"
             />
             {micSupported && (
               <button
                 type="button"
                 onClick={handleMic}
-                title={listening ? 'Stop listening' : 'Speak'}
+                title={listening ? 'Stop listening (mic stays open until you tap)' : 'Speak — mic stays open'}
                 className={`flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl border transition ${
                   listening
                     ? 'border-accent-500/50 bg-accent-500/20 text-accent-200'
@@ -501,28 +755,42 @@ export default function AssistantWidget() {
             <button
               type="submit"
               disabled={!input.trim() || sending}
+              title="Send"
               className="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl bg-accent-500 text-surface-950 transition hover:bg-accent-400 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <SendIcon />
             </button>
           </form>
+          {listening && (
+            <p className="mt-1.5 px-1 text-[11px] text-zinc-500">
+              Mic stays open — pause 1–2s to send each command. Tap the mic to close it.
+            </p>
+          )}
         </div>
       </div>
-    ), [
+    ),
+    [
       autoNavigate,
       empty,
       handleMic,
+      cycleMicLang,
+      handleReplay,
       input,
       listening,
       messages,
       micError,
+      micLangLabel,
+      micPaused,
       micSupported,
       navigateTo,
+      openChatAction,
       open,
       readAloud,
       send,
       sending,
+      speaking,
       startNewChat,
+      stopSpeaking,
       transcript,
     ]
   );
@@ -531,20 +799,18 @@ export default function AssistantWidget() {
     <>
       {open && panel}
 
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-label={open ? 'Close assistant' : 'Open AI assistant'}
-        className="fixed bottom-5 right-5 z-[60] flex h-14 w-14 items-center justify-center rounded-full bg-accent-500 text-surface-950 shadow-lg shadow-accent-500/25 transition hover:bg-accent-400 hover:scale-105"
-      >
-        {open ? (
-          <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-          </svg>
-        ) : (
+      {/* The opener only renders while the panel is closed — previously the
+          floating close button sat on top of the panel's own send button. */}
+      {!open && (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          aria-label="Open AI assistant"
+          className="fixed bottom-5 right-5 z-[60] flex h-14 w-14 items-center justify-center rounded-full bg-accent-500 text-surface-950 shadow-lg shadow-accent-500/25 transition hover:bg-accent-400 hover:scale-105"
+        >
           <SparkleIcon className="h-6 w-6" />
-        )}
-      </button>
+        </button>
+      )}
     </>
   );
 }
