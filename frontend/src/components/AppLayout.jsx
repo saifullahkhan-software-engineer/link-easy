@@ -406,6 +406,10 @@ export default function AppLayout() {
           <Outlet />
         </main>
       </div>
+
+      {/* The floating AI assistant — on every app page. It knows the current
+          route (the "system overlay") and can navigate the user anywhere. */}
+      <AssistantWidget />
     </div>
   );
 }

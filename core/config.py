@@ -229,6 +229,32 @@ class Settings(BaseSettings):
     # worker slot.
     GROQ_TIMEOUT_SECONDS: float = 45.0
 
+    # ── AI Assistant (POST /api/v1/assistant/chat) ───────────────────────────
+    # The in-app assistant talks to any OpenAI-compatible /chat/completions
+    # endpoint (messages + tools). PROVIDER picks a preset base URL/model;
+    # every field also accepts an explicit override so the assistant can move
+    # providers (Groq → OpenAI → OpenRouter → Gemini's compat endpoint → a
+    # self-hosted vLLM) with environment changes only — the prompts, the tool
+    # loop and the tests are provider-independent.
+    #
+    # Key handling follows the copy parser's rules: read here at request time,
+    # never in a request/response body, never in a log line. With provider=groq
+    # an unset AI_ASSISTANT_API_KEY falls back to GROQ_API_KEY so an instance
+    # that already runs copy extraction needs zero new secrets.
+    AI_ASSISTANT_PROVIDER: str = "groq"  # groq|openai|openrouter|together|gemini|custom
+    AI_ASSISTANT_API_KEY: str = ""
+    AI_ASSISTANT_BASE_URL: str = ""
+    AI_ASSISTANT_MODEL: str = ""
+    # One model round-trip (non-streaming). The tool loop makes up to
+    # AI_ASSISTANT_MAX_TOOL_ROUNDS of these per chat message.
+    AI_ASSISTANT_TIMEOUT_SECONDS: float = 45.0
+    # History replayed to the model (user+assistant turns only; tool traffic
+    # from earlier turns is never replayed — tools re-run per message).
+    AI_ASSISTANT_MAX_HISTORY_MESSAGES: int = 20
+    # Hard cap on tool rounds per message. check_new_messages is one call;
+    # the budget exists so a model stuck in a call loop cannot spin.
+    AI_ASSISTANT_MAX_TOOL_ROUNDS: int = 4
+
     # ── Instagram Reels delivery ────────────────────────────────────────────
     # How the worker hands the video to Instagram.
     #

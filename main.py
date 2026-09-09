@@ -37,6 +37,7 @@ from api.v1.social_scheduler import router as social_scheduler_router, UPLOADS_U
 from api.v1.gmail import router as gmail_router
 from api.v1.inbox import router as inbox_router
 from api.v1.user_data import router as user_data_router
+from api.v1.assistant import router as assistant_router
 from core.config import settings
 from core.logging_config import get_logger
 try:
@@ -290,6 +291,9 @@ app.include_router(inbox_router)
 # email-confirmed, rate-limited, no account enumeration. Registered last so
 # every /api/v1/user-data/* path is served exactly by this router.
 app.include_router(user_data_router)
+
+# AI Assistant — the in-app helper (chat, history, conversations).
+app.include_router(assistant_router)
 
 # Uploaded videos for the social scheduler. Instagram's Graph API downloads
 # the video from a public URL rather than accepting an upload, so the files

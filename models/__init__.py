@@ -29,6 +29,7 @@ from .social_scheduler import (
     PlatformCredential,
 )
 from .gmail import GmailConnection
+from .assistant import AssistantConversation, AssistantMessage
 
 __all__ = [
     "User", "PasswordResetToken", "UserDeletionToken", "UserRole", "LinkedInAccount",
