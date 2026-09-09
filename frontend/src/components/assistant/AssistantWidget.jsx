@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { assistantApi } from '../../api/assistant';
@@ -20,6 +20,7 @@ import useSpeechRecognition from '../../hooks/useSpeechRecognition';
  */
 
 const LS_CONVERSATION = 'le.assistant.conversation_id';
+const LS_OPEN = 'le.assistant.open';
 const LS_AUTO_NAV = 'le.assistant.auto_navigate';
 const LS_READ_ALOUD = 'le.assistant.read_aloud';
 
@@ -168,7 +169,7 @@ function MessageBubble({ message, onNavigate }) {
 /* ── the widget ───────────────────────────────────────────────────────────── */
 
 export default function AssistantWidget() {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => readFlag(LS_OPEN, false));
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -180,6 +181,13 @@ export default function AssistantWidget() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const scrollRef = useRef(null);
+
+  // AppLayout remains mounted while React Router changes pages. Persisting
+  // this flag also restores the panel after a full refresh, so opening the
+  // assistant is not lost when moving between app sections.
+  useEffect(() => {
+    writeFlag(LS_OPEN, open);
+  }, [open]);
 
   const speak = useCallback(
     (text) => {
@@ -228,7 +236,6 @@ export default function AssistantWidget() {
         if (auto.length && autoNavigate) {
           const target = auto[auto.length - 1];
           toast.success(`Opening ${target.label || target.path}`, { duration: 2000 });
-          setOpen(false);
           navigate(target.path);
         }
       } catch (error) {
@@ -292,7 +299,6 @@ export default function AssistantWidget() {
 
   const navigateTo = (path) => {
     if (!path) return;
-    setOpen(false);
     navigate(path);
   };
 
@@ -502,7 +508,23 @@ export default function AssistantWidget() {
           </form>
         </div>
       </div>
-    </div>
+    ), [
+      autoNavigate,
+      empty,
+      handleMic,
+      input,
+      listening,
+      messages,
+      micError,
+      micSupported,
+      navigateTo,
+      open,
+      readAloud,
+      send,
+      sending,
+      startNewChat,
+      transcript,
+    ]
   );
 
   return (

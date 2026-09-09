@@ -6,6 +6,7 @@ import { useAdminAccess } from '../hooks/useAdminAccess';
 import { useFeatures } from '../hooks/useFeatures';
 import BetaBanner from './BetaBanner';
 import HostedDemoBanner from './HostedDemoBanner';
+import AssistantWidget from './assistant/AssistantWidget';
 import { INBOX_CHANNELS } from '../constants/inbox';
 
 /**
@@ -407,8 +408,7 @@ export default function AppLayout() {
         </main>
       </div>
 
-      {/* The floating AI assistant — on every app page. It knows the current
-          route (the "system overlay") and can navigate the user anywhere. */}
+      {/* The floating AI assistant is available throughout the app shell. */}
       <AssistantWidget />
     </div>
   );

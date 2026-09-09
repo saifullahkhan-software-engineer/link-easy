@@ -1,7 +1,7 @@
 """merge migration heads and add scheduling method
 
 Revision ID: h3i4j5k6l7m8
-Revises: f1a2b3c4d5e6, g2h3i4j5k6l7
+Revises: f1a2b3c4d5e6, g2h3i4j5k6l7, f2a3b4c5d6e7
 Create Date: 2026-09-08
 """
 from typing import Sequence, Union
@@ -11,7 +11,11 @@ import sqlalchemy as sa
 
 
 revision: str = "h3i4j5k6l7m8"
-down_revision: Union[str, Sequence[str], None] = ("f1a2b3c4d5e6", "g2h3i4j5k6l7")
+down_revision: Union[str, Sequence[str], None] = (
+    "f1a2b3c4d5e6",
+    "g2h3i4j5k6l7",
+    "f2a3b4c5d6e7",
+)
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -32,6 +36,16 @@ def upgrade() -> None:
                 sa.String(),
                 nullable=False,
                 server_default="linkeasy",
+            ),
+        )
+    if not _has_column(bind, "social_posts", "youtube_playlists_by_account"):
+        op.add_column(
+            "social_posts",
+            sa.Column(
+                "youtube_playlists_by_account",
+                sa.JSON(),
+                nullable=False,
+                server_default="{}",
             ),
         )
 
