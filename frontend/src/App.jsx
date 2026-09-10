@@ -37,6 +37,7 @@ import LinkedInLiveChatPage from './pages/LinkedInLiveChatPage';
 import LinkedInProfileScanPage from './pages/LinkedInProfileScanPage';
 import GmailPage from './pages/gmail/GmailPage';
 import GmailComposePage from './pages/gmail/GmailComposePage';
+import SystemQueuesPage from './pages/SystemQueuesPage';
 import DashboardPage from './pages/DashboardPage';
 import AdminAccountsPage from './pages/admin/AdminAccountsPage';
 import AdminUsersPage from './pages/admin/AdminUsersPage';
@@ -103,6 +104,7 @@ export default function App() {
           >
             <Route index element={<Navigate to="/admin/dashboard" replace />} />
             <Route path="dashboard" element={<DashboardPage basePath="/admin" />} />
+            <Route path="redis-queues" element={<SystemQueuesPage basePath="/admin" />} />
             <Route path="accounts" element={<AdminAccountsPage />} />
             <Route path="users" element={<AdminUsersPage />} />
             <Route path="linkedin" element={<AdminLinkedInPage />} />

@@ -80,6 +80,7 @@ from models.whatsapp import (
     WhatsAppScanFilter,
 )
 from core.logging_config import get_logger
+from worker.celery_app import celery_app
 
 logger = get_logger(__name__)
 
@@ -906,6 +907,93 @@ async def list_whatsapp_sessions(
     return WhatsAppSessionListResponse(sessions=items, count=len(items))
 
 
+async def _cancel_whatsapp_session_jobs(db: AsyncSession, session_id: int, owner_email: str) -> None:
+    """Cancel all Celery jobs associated with a WhatsApp session.
+    
+    When a WhatsApp session is disconnected, all associated Celery jobs
+    (both running and completed) should be deleted to prevent orphaned
+    tasks from continuing to run or accumulating in the result backend.
+    """
+    import redis
+    from celery.result import AsyncResult
+    
+    redis_client = redis.from_url(settings.REDIS_URL)
+    
+    # Find all filter jobs associated with this session
+    from models.whatsapp import WhatsAppScanFilter
+    
+    result = await db.execute(
+        select(WhatsAppScanFilter).where(
+            (WhatsAppScanFilter.session_id == session_id) | 
+            (WhatsAppScanFilter.owner_email == owner_email)
+        )
+    )
+    filters = result.scalars().all()
+    
+    cancelled_count = 0
+    deleted_results_count = 0
+    for filter_row in filters:
+        filter_id = filter_row.id
+        
+        # Cancel the dispatch lease to prevent new tasks from being queued
+        dispatch_key = f"linkeasy:scheduler:whatsapp:{filter_id}"
+        try:
+            redis_client.delete(dispatch_key)
+        except Exception as exc:
+            logger.warning("Could not delete dispatch lease for filter %s: %s", filter_id, exc)
+        
+        # Revoke any active Celery tasks for this filter
+        # We revoke by task name pattern since we don't have exact task IDs
+        try:
+            # Revoke all tasks for this filter by inspecting the worker
+            inspect = celery_app.control.inspect()
+            active_tasks = inspect.active()
+            if active_tasks:
+                for worker_name, tasks in active_tasks.items():
+                    for task in tasks:
+                        task_args = task.get('args', [])
+                        if task_args and len(task_args) > 0:
+                            # Check if this task is for our filter
+                            if task_args[0] == filter_id:
+                                task_id = task.get('id')
+                                if task_id:
+                                    celery_app.control.revoke(task_id, terminate=True)
+                                    cancelled_count += 1
+                                    logger.info("🗑️ Revoked Celery task %s for filter %s", task_id, filter_id)
+        except Exception as exc:
+            logger.warning("Could not inspect/revoke Celery tasks for filter %s: %s", filter_id, exc)
+        
+        # Delete completed job results from Redis backend
+        try:
+            # Scan for result keys matching this filter
+            result_pattern = f"celery-task-meta-*"
+            for key in redis_client.scan_iter(match=result_pattern):
+                try:
+                    result_data = redis_client.get(key)
+                    if result_data:
+                        import json
+                        result_json = json.loads(result_data)
+                        # Check if this result belongs to our filter
+                        result_args = result_json.get('args', [])
+                        if result_args and len(result_args) > 0 and result_args[0] == filter_id:
+                            redis_client.delete(key)
+                            deleted_results_count += 1
+                            logger.debug("🗑️ Deleted result key %s for filter %s", key.decode(), filter_id)
+                except Exception:
+                    # Skip keys that can't be parsed
+                    pass
+        except Exception as exc:
+            logger.warning("Could not delete completed job results for filter %s: %s", filter_id, exc)
+    
+    if cancelled_count > 0 or deleted_results_count > 0:
+        logger.info(
+            "🗑️ Cancelled %s active Celery job(s) and deleted %s completed result(s) for WhatsApp session %s",
+            cancelled_count,
+            deleted_results_count,
+            session_id,
+        )
+
+
 # ── DELETE /connection ───────────────────────────────────────────────────────
 
 
@@ -996,6 +1084,9 @@ async def disconnect_whatsapp(
             )
         )
         await db.commit()
+
+        # Delete all Celery jobs associated with this session
+        await _cancel_whatsapp_session_jobs(db, session.id, current_user.email)
 
         profile_dir = session_profile_dir(session)
         try:

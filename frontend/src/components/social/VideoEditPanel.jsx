@@ -41,9 +41,11 @@ export default function VideoEditPanel({ upload, thumbnail, onThumbnailChange, o
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(duration);
   const [trimming, setTrimming] = useState(false);
+  const [lastTrimTime, setLastTrimTime] = useState(null);
   useEffect(() => {
     setStart(0);
     setEnd(duration);
+    setLastTrimTime(null);
   }, [uploadId, duration]);
 
   // Thumbnail source + capture controls.
@@ -80,6 +82,7 @@ export default function VideoEditPanel({ upload, thumbnail, onThumbnailChange, o
     try {
       const { data } = await socialSchedulerApi.trimVideo(uploadId, { start, end });
       onEdited(data); // same upload_id, new duration/size — refreshes the preview
+      setLastTrimTime(new Date().toLocaleTimeString());
       toast.success(trimmedSomething ? 'Trim applied' : 'Clip unchanged');
     } catch (err) {
       toast.error(getErrorMessage(err, 'Could not trim the video'));
@@ -141,13 +144,18 @@ export default function VideoEditPanel({ upload, thumbnail, onThumbnailChange, o
         {/* Preview + trim */}
         <div className="space-y-3">
           <video
-            key={uploadId}
+            key={`${uploadId}-${lastTrimTime}`}
             src={upload.video_url}
             controls
             preload="metadata"
             className="max-h-64 w-full rounded-lg border border-surface-700 bg-black object-contain"
             data-testid="edit-video-preview"
           />
+          {lastTrimTime && (
+            <p className="text-xs text-zinc-500">
+              Last updated at {lastTrimTime}
+            </p>
+          )}
 
           <div>
             <div className="flex items-center justify-between">
