@@ -32,6 +32,7 @@ from the fixes needed for the OAuth routes and the worker to actually work:
 import asyncio
 import json
 import os
+import re
 import socket
 import ssl
 import time
@@ -268,6 +269,23 @@ class YouTubeService:
 
     # ── Publish ──────────────────────────────────────────────────────────────
 
+    def _sanitize_description(self, description: str) -> str:
+        """Sanitize description to avoid YouTube API validation errors.
+        
+        Removes or escapes characters that YouTube rejects in descriptions,
+        such as angle brackets (<, >) which can be interpreted as HTML.
+        """
+        if not description:
+            return ""
+        
+        # Replace angle brackets with their HTML entity equivalents
+        # YouTube accepts these entities but rejects raw < and >
+        sanitized = description.replace("<", "&lt;").replace(">", "&gt;")
+        
+        # Remove any remaining problematic characters if needed
+        # YouTube descriptions can contain most Unicode characters
+        return sanitized
+
     async def upload_short(
         self,
         video_path: str,
@@ -304,6 +322,9 @@ class YouTubeService:
             short_title = title
             short_description = description or ""
             tags = []
+
+        # Sanitize description to avoid YouTube validation errors
+        short_description = self._sanitize_description(short_description)
 
         body = {
             "snippet": {

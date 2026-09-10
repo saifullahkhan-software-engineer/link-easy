@@ -122,7 +122,7 @@ export default function AdminLayout() {
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <Link to="/admin" className="flex h-14 shrink-0 items-center gap-2.5 border-b border-surface-700 px-5 transition hover:bg-surface-800/50 sm:h-16">
+        <Link to="/" className="flex h-14 shrink-0 items-center gap-2.5 border-b border-surface-700 px-5 transition hover:bg-surface-800/50 sm:h-16">
           <img src="/favicon.svg" alt="" className="h-7 w-7" />
           <span className="text-lg font-bold tracking-tight text-zinc-100">
             Link<span className="text-accent-400">Easy</span>

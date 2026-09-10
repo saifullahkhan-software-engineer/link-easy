@@ -20,6 +20,7 @@ the ``Authorization`` header, and never logged.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -28,6 +29,52 @@ import httpx
 from core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Thread-safe counter for round-robin API key selection
+_key_index_lock = threading.Lock()
+_key_index = 0
+
+# Thread-safe counter for OpenRouter round-robin API key selection
+_openrouter_key_index_lock = threading.Lock()
+_openrouter_key_index = 0
+
+
+def _get_next_groq_api_key() -> str:
+    """Get the next Groq API key in round-robin order.
+
+    When multiple keys are configured (comma-separated in GROQ_API_KEY),
+    this function cycles through them to distribute load and avoid rate limits.
+    """
+    global _key_index
+    keys = settings.groq_api_keys
+    if not keys:
+        return ""
+    
+    with _key_index_lock:
+        if _key_index >= len(keys):
+            _key_index = 0
+        key = keys[_key_index]
+        _key_index += 1
+        return key
+
+
+def _get_next_openrouter_api_key() -> str:
+    """Get the next OpenRouter API key in round-robin order.
+
+    When multiple keys are configured (comma-separated in AI_ASSISTANT_OPENROUTER_API_KEY),
+    this function cycles through them to distribute load and avoid rate limits.
+    """
+    global _openrouter_key_index
+    keys = settings.openrouter_api_keys
+    if not keys:
+        return ""
+    
+    with _openrouter_key_index_lock:
+        if _openrouter_key_index >= len(keys):
+            _openrouter_key_index = 0
+        key = keys[_openrouter_key_index]
+        _openrouter_key_index += 1
+        return key
 
 # Base URLs already include their ``/v1``-style suffix; ``chat()`` appends
 # ``/chat/completions``. ``custom`` has no preset — the operator must set
@@ -127,21 +174,29 @@ def resolve_provider_config() -> ProviderConfig:
                 return value
         return (preset_value or "").strip()
 
+    # For Groq, use provider-specific override if set
+    groq_base_url = settings.AI_ASSISTANT_GROQ_BASE_URL if provider == "groq" else ""
     base_url = _resolve(
-        settings.AI_ASSISTANT_BASE_URL, settings.GROQ_BASE_URL, preset["base_url"]
+        settings.AI_ASSISTANT_BASE_URL, groq_base_url, preset["base_url"]
     )
     if not base_url:
         raise AssistantProviderUnavailable(
             "AI assistant: no base URL configured for the selected provider"
         )
 
-    model = _resolve(settings.AI_ASSISTANT_MODEL, settings.GROQ_MODEL, preset["model"])
+    # For Groq, use provider-specific model override if set
+    groq_model = settings.AI_ASSISTANT_GROQ_MODEL if provider == "groq" else ""
+    model = _resolve(settings.AI_ASSISTANT_MODEL, groq_model, preset["model"])
     if not model:
         raise AssistantProviderUnavailable("AI assistant: no model configured for the selected provider")
 
     api_key = (settings.AI_ASSISTANT_API_KEY or "").strip()
     if not api_key and provider == "groq":
-        api_key = (settings.GROQ_API_KEY or "").strip()
+        # Use round-robin selection for multiple Groq API keys (assistant-specific)
+        api_key = _get_next_groq_api_key()
+    if not api_key and provider == "openrouter":
+        # Use round-robin selection for multiple OpenRouter API keys (assistant-specific)
+        api_key = _get_next_openrouter_api_key()
     if not api_key:
         # Logged without a value: the point is that it is absent.
         logger.warning("AI assistant: no API key configured — chat unavailable")
@@ -176,6 +231,11 @@ def _resolve_fallback_config(name: str) -> Optional[ProviderConfig]:
 
     prefix = f"AI_ASSISTANT_{provider.upper()}"
     api_key = str(getattr(settings, f"{prefix}_API_KEY", "") or "").strip()
+    
+    # Use round-robin selection for OpenRouter when multiple keys are configured
+    if provider == "openrouter" and not api_key:
+        api_key = _get_next_openrouter_api_key()
+    
     if not api_key:
         if provider in KEYLESS_PROVIDERS:
             api_key = "not-needed"  # keyless endpoint; the header is ignored

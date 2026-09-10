@@ -209,14 +209,30 @@ class Settings(BaseSettings):
     # Turns one large pasted message into per-platform title / description /
     # hashtags. The key is backend-only: it is read here, never sent to the
     # browser, and never echoed in a response or a log line. Leave
-    # GROQ_API_KEY empty and the endpoint answers 503 — the upload page keeps
+    # SOCIAL_MEDIA_GROQ_API_KEY empty and the endpoint answers 503 — the upload page keeps
     # its local (regex) parser as the fallback.
+    #
+    # Multiple API keys can be provided as a comma-separated list for round-robin
+    # load balancing to avoid rate limits: SOCIAL_MEDIA_GROQ_API_KEY=key1,key2,key3
+    #
+    # Fallback providers can be configured for social media extraction:
+    # SOCIAL_MEDIA_FALLBACKS=openrouter,gemini
     #
     # Future work: a Google Cloud provider (Gemini / Vertex AI) plugs into the
     # same seam — services/ai/copy_parser.py owns the prompt, the JSON repair
     # and the field validation, all of which are provider-independent, so
     # adding Google means one more parser class there plus its own key here.
     # Nothing in api/v1/social_scheduler.py or the frontend needs to change.
+    SOCIAL_MEDIA_GROQ_API_KEY: str = ""
+    SOCIAL_MEDIA_GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    SOCIAL_MEDIA_GROQ_MODEL: str = "qwen/qwen3.6-27b"
+    # Fallback providers for social media extraction (comma-separated)
+    SOCIAL_MEDIA_FALLBACKS: str = ""
+    SOCIAL_MEDIA_OPENROUTER_API_KEY: str = ""
+    SOCIAL_MEDIA_OPENROUTER_MODEL: str = ""
+    SOCIAL_MEDIA_GEMINI_API_KEY: str = ""
+    SOCIAL_MEDIA_GEMINI_MODEL: str = ""
+    # Legacy support - falls back to SOCIAL_MEDIA_GROQ_API_KEY if set
     GROQ_API_KEY: str = ""
     GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     GROQ_MODEL: str = "qwen/qwen3.6-27b"
@@ -245,6 +261,9 @@ class Settings(BaseSettings):
     AI_ASSISTANT_API_KEY: str = ""
     AI_ASSISTANT_BASE_URL: str = ""
     AI_ASSISTANT_MODEL: str = ""
+    # Provider-specific overrides for base URL and model
+    AI_ASSISTANT_GROQ_BASE_URL: str = ""
+    AI_ASSISTANT_GROQ_MODEL: str = ""
     # Fallback providers, tried in order when the primary is rate-limited or
     # erroring (HTTP 429/502/503/504): e.g. "gemini,cerebras". Each fallback
     # needs its own key below (or, for pollinations, none at all). Models and
@@ -358,6 +377,68 @@ class Settings(BaseSettings):
             for origin in self.BACKEND_CORS_ORIGINS.split(",")
             if origin.strip()
         ]
+
+    @property
+    def groq_api_keys(self) -> list[str]:
+        """Parse Groq API keys for round-robin selection (AI assistant).
+        
+        Supports both JSON array format: ["key1","key2"]
+        and comma-separated format: key1,key2
+        """
+        keys_str = self.AI_ASSISTANT_API_KEY or ""
+        return self._parse_api_keys(keys_str)
+
+    @property
+    def social_media_groq_api_keys(self) -> list[str]:
+        """Parse Groq API keys for social media extraction.
+        
+        Supports both JSON array format and comma-separated format.
+        Falls back to legacy GROQ_API_KEY if SOCIAL_MEDIA_GROQ_API_KEY is empty.
+        """
+        keys_str = self.SOCIAL_MEDIA_GROQ_API_KEY or ""
+        if not keys_str:
+            # Legacy fallback
+            keys_str = self.GROQ_API_KEY or ""
+        return self._parse_api_keys(keys_str)
+
+    @property
+    def openrouter_api_keys(self) -> list[str]:
+        """Parse OpenRouter API keys for round-robin selection (AI assistant).
+        
+        Supports both JSON array format and comma-separated format.
+        """
+        keys_str = self.AI_ASSISTANT_OPENROUTER_API_KEY or ""
+        return self._parse_api_keys(keys_str)
+
+    @property
+    def social_media_openrouter_api_keys(self) -> list[str]:
+        """Parse OpenRouter API keys for social media extraction.
+        
+        Supports both JSON array format and comma-separated format.
+        """
+        keys_str = self.SOCIAL_MEDIA_OPENROUTER_API_KEY or ""
+        return self._parse_api_keys(keys_str)
+
+    def _parse_api_keys(self, keys_str: str) -> list[str]:
+        """Parse API keys from either JSON array or comma-separated format."""
+        if not keys_str:
+            return []
+        
+        keys_str = keys_str.strip()
+        
+        # Try JSON array format first
+        if keys_str.startswith("[") and keys_str.endswith("]"):
+            try:
+                import json
+                keys = json.loads(keys_str)
+                if isinstance(keys, list):
+                    return [str(key).strip() for key in keys if str(key).strip()]
+            except (json.JSONDecodeError, ValueError):
+                # If JSON parsing fails, fall through to comma-separated
+                pass
+        
+        # Fall back to comma-separated format
+        return [key.strip() for key in keys_str.split(",") if key.strip()]
 
     @property
     def social_oauth_return_url(self) -> str:

@@ -42,12 +42,36 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from typing import Any, Iterable, Optional
 
 from core.config import settings
 from schemas.social_scheduler import PLATFORM_VALUES, PlatformCopy, PlatformCopyFields
 
 logger = logging.getLogger(__name__)
+
+# Thread-safe counter for round-robin API key selection (shared with assistant providers)
+_copy_key_index_lock = threading.Lock()
+_copy_key_index = 0
+
+
+def _get_next_groq_api_key_for_copy() -> str:
+    """Get the next Groq API key in round-robin order for copy parsing.
+
+    When multiple keys are configured (comma-separated in SOCIAL_MEDIA_GROQ_API_KEY),
+    this function cycles through them to distribute load and avoid rate limits.
+    """
+    global _copy_key_index
+    keys = settings.social_media_groq_api_keys
+    if not keys:
+        return ""
+    
+    with _copy_key_index_lock:
+        if _copy_key_index >= len(keys):
+            _copy_key_index = 0
+        key = keys[_copy_key_index]
+        _copy_key_index += 1
+        return key
 
 # ("youtube", "instagram", "tiktok", "facebook") — the same order the frontend
 # stores and the publisher services accept.
@@ -513,11 +537,14 @@ class GroqCopyParser(CopyParser):
 
     @property
     def api_key(self) -> str:
-        return (self._api_key if self._api_key is not None else settings.GROQ_API_KEY) or ""
+        if self._api_key is not None:
+            return self._api_key
+        # Use round-robin selection for multiple Groq API keys
+        return _get_next_groq_api_key_for_copy()
 
     @property
     def model(self) -> str:
-        return self._model or settings.GROQ_MODEL
+        return self._model or settings.SOCIAL_MEDIA_GROQ_MODEL
 
     @property
     def base_url(self) -> str:
@@ -527,7 +554,7 @@ class GroqCopyParser(CopyParser):
         full OpenAI-compatible URL in configuration, but remove that path
         before constructing the client so it is not duplicated.
         """
-        configured = (settings.GROQ_BASE_URL or "https://api.groq.com").rstrip("/")
+        configured = (settings.SOCIAL_MEDIA_GROQ_BASE_URL or "https://api.groq.com").rstrip("/")
         suffix = "/openai/v1"
         if configured.lower().endswith(suffix):
             configured = configured[: -len(suffix)]
