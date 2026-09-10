@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { adminApi } from '../../api/endpoints';
 import { getErrorMessage } from '../../api/client';
 import { Spinner } from '../../components/Spinner';
 import { Section } from '../../components/admin/shared';
 import SettingsEditor from '../../components/admin/SettingsEditor';
+import StaleTasksCard from '../../components/admin/StaleTasksCard';
 
 function formatDate(iso) {
   if (!iso) return '—';
@@ -58,6 +60,17 @@ export default function AdminWhatsAppPage() {
         </button>
       </div>
 
+      <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+        <p className="text-sm font-semibold text-emerald-200">Filters are never deleted from here</p>
+        <p className="mt-1 text-sm leading-6 text-zinc-400">
+          Filter jobs belong to the login account that owns them — only the owner can delete them
+          from the app. This page lists them read-only; unnecessary <em>queue leftovers</em> for
+          inactive filters can be checked and revoked below without touching any filter. Closed
+          sessions are removed from <Link to="/admin/accounts" className="font-semibold text-emerald-300 hover:text-emerald-200">Accounts</Link>,
+          and deeper queue surgery lives under <Link to="/admin/redis-queues" className="font-semibold text-emerald-300 hover:text-emerald-200">Redis Queues</Link>.
+        </p>
+      </div>
+
       <Section
         title="WhatsApp jobs (filter jobs)"
         description="Every WhatsApp filter job with its message counters, newest first."
@@ -108,6 +121,12 @@ export default function AdminWhatsAppPage() {
           </div>
         )}
       </Section>
+
+      <StaleTasksCard
+        scope="whatsapp"
+        title="Stale WhatsApp scan tasks"
+        description="Scan tasks still queued even though their filter is paused, deleted, or never activated. Preview first, then revoke the unnecessary leftovers — no filters are deleted."
+      />
 
       <SettingsEditor
         categories={['whatsapp', 'jobs']}

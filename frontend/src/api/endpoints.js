@@ -449,8 +449,15 @@ export const adminApi = {
   // Per-section admin views (own sidebar, separate from the app module).
   accounts: () => api.get('/admin/accounts'),
   deleteWhatsAppSession: (sessionId) => api.delete(`/admin/accounts/whatsapp/${sessionId}`),
+  cleanupClosedSessions: (payload) => api.post('/admin/accounts/whatsapp/cleanup-closed', payload),
   linkedinJobs: () => api.get('/admin/jobs/linkedin'),
+  deleteLinkedInJob: (jobId) => api.delete(`/admin/jobs/linkedin/${encodeURIComponent(jobId)}`),
+  bulkDeleteLinkedInJobs: (payload) => api.post('/admin/jobs/linkedin/bulk-delete', payload),
   whatsappJobs: () => api.get('/admin/jobs/whatsapp'),
+  // Stale queued/scheduled Celery tasks across all users (revoke only — no
+  // job row and no filter row is ever deleted by this cleanup).
+  stalePreview: (scope = 'all') => api.get('/admin/queues/stale-preview', { params: { scope } }),
+  cleanupStaleTasks: (payload) => api.post('/admin/queues/cleanup-stale', payload),
 };
 
 /* --------------------------------- live debug ------------------------------ */
